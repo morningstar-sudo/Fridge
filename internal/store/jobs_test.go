@@ -2,6 +2,8 @@ package store_test
 
 import (
 	"errors"
+	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"fridge/internal/store"
@@ -21,8 +23,11 @@ func seed(t *testing.T, s *store.Store, name string) (db store.Database, dest st
 	return *d, *de
 }
 
+var keySeq atomic.Int64
+
 func newBackup(db store.Database, dest store.Destination, sched *int64) *store.Backup {
-	return &store.Backup{DatabaseID: db.ID, DestinationID: dest.ID, ScheduleID: sched, Trigger: "manual", Engine: "postgres", EngineVersion: "17"}
+	return &store.Backup{DatabaseID: db.ID, DestinationID: dest.ID, ScheduleID: sched, Trigger: "manual", Engine: "postgres", EngineVersion: "17",
+		S3Key: fmt.Sprintf("k%d", keySeq.Add(1))}
 }
 
 func TestOneRunningBackupPerDatabase(t *testing.T) {

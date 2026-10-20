@@ -124,6 +124,8 @@ var migrations = []string{
 	// restores needs error + split source engine/version (Task 3).
 	`ALTER TABLE restores RENAME COLUMN source_engine_version TO source_version;
 	ALTER TABLE restores ADD COLUMN source_engine TEXT NOT NULL DEFAULT '', ADD COLUMN error TEXT NOT NULL DEFAULT '';`,
+	// one object key per backup row: a same-second rerun must conflict, not overwrite (Task 9).
+	`CREATE UNIQUE INDEX backups_s3_key ON backups(s3_key);`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

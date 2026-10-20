@@ -31,6 +31,7 @@ type fakeRuntime struct {
 	alerts    []string
 	onWait    func()
 	execFn    func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int
+	hang      bool // Exec blocks until ctx is done
 }
 
 func (f *fakeRuntime) Ping(ctx context.Context) error { return f.pingErr }
@@ -50,6 +51,10 @@ func (f *fakeRuntime) WaitHealthy(ctx context.Context, id string, d time.Duratio
 }
 
 func (f *fakeRuntime) Exec(ctx context.Context, id string, cmd []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	if f.hang {
+		<-ctx.Done()
+		return -1, ctx.Err()
+	}
 	if f.execFn == nil {
 		return 0, nil
 	}

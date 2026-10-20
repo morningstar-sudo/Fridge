@@ -41,6 +41,7 @@ type App struct {
 	Sched         *Scheduler                                                       // may be nil in tests
 	OpenObjects   func(d store.Destination, secretKey string) (ObjectStore, error) // nil = real S3
 	now           func() time.Time                                                 // test clock; nil = time.Now
+	backupTimeout time.Duration                                                    // test override; 0 = backupTimeout
 	wg            sync.WaitGroup
 }
 

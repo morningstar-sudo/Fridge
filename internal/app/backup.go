@@ -95,7 +95,13 @@ func (a *App) StartBackup(ctx context.Context, dbID, destID int64, scheduleID *i
 }
 
 func (a *App) runBackup(objs ObjectStore, db store.Database, b store.Backup) {
-	ctx := context.Background() // outlives the request
+	ctx := context.Background() // outlives the request; bookkeeping uses it so a timeout cannot block recording the result
+	timeout := a.backupTimeout
+	if timeout == 0 {
+		timeout = backupTimeout
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	eng, _, _ := engine.Get(db.Engine)
 	cmd := eng.DumpCmd(engine.Params{Name: db.Name, User: db.User, Version: db.Version})
 
@@ -103,7 +109,7 @@ func (a *App) runBackup(objs ObjectStore, db store.Database, b store.Backup) {
 	var stderr bytes.Buffer
 	done := make(chan error, 1)
 	go func() { // stderr is only read after <-done
-		code, err := a.RT.Exec(ctx, db.ContainerID, cmd, nil, pw, &stderr)
+		code, err := a.RT.Exec(runCtx, db.ContainerID, cmd, nil, pw, &stderr)
 		switch {
 		case err != nil:
 			err = fmt.Errorf("dump failed: %w", err)
@@ -114,7 +120,7 @@ func (a *App) runBackup(objs ObjectStore, db store.Database, b store.Backup) {
 		done <- err
 	}()
 
-	size, putErr := objs.Put(ctx, b.S3Key, pr, map[string]string{
+	size, putErr := objs.Put(runCtx, b.S3Key, pr, map[string]string{
 		"fridge-engine": db.Engine, "fridge-version": db.Version, "fridge-db": db.Name,
 	})
 	if putErr != nil {
@@ -129,7 +135,7 @@ func (a *App) runBackup(objs ObjectStore, db store.Database, b store.Backup) {
 		return
 	}
 	if err := a.Store.FinishBackup(ctx, b.ID, "ok", size, tail(stderr.String()), ""); err != nil {
-		log.Printf("backup %d: finish: %v", b.ID, err)
+		a.alertf(ctx, "backup %s: recording result failed: %v", db.Name, err)
 		return
 	}
 	if b.ScheduleID != nil {
@@ -137,16 +143,9 @@ func (a *App) runBackup(objs ObjectStore, db store.Database, b store.Backup) {
 	}
 }
 
-func tail(s string) string {
-	if len(s) > 8192 {
-		return s[len(s)-8192:]
-	}
-	return s
-}
-
 func (a *App) failBackup(ctx context.Context, objs ObjectStore, db store.Database, b store.Backup, stderr string, err error) {
-	if ferr := a.Store.FinishBackup(ctx, b.ID, "failed", 0, tail(stderr), err.Error()); ferr != nil {
-		log.Printf("backup %d: finish: %v", b.ID, ferr)
+	if ferr := a.Store.FinishBackup(ctx, b.ID, "failed", 0, tail(stderr), strings.ToValidUTF8(err.Error(), "?")); ferr != nil {
+		a.alertf(ctx, "backup %s: recording failure failed: %v (original: %v)", db.Name, ferr, err)
 	}
 	if derr := objs.Delete(ctx, b.S3Key); derr != nil {
 		log.Printf("backup %d: cleanup %s: %v", b.ID, b.S3Key, derr)
@@ -193,4 +192,23 @@ func (a *App) BackupDownloadURL(ctx context.Context, backupID int64) (string, er
 		return "", err
 	}
 	return objs.PresignGet(ctx, b.S3Key, 15*time.Minute)
+}
+
+// ponytail: fixed 6h ceiling per backup; make configurable if databases get huge.
+const backupTimeout = 6 * time.Hour
+
+// tail keeps the last 8 KiB as valid UTF-8 (Postgres TEXT rejects invalid bytes).
+func tail(s string) string {
+	if len(s) > 8192 {
+		s = s[len(s)-8192:]
+	}
+	return strings.ToValidUTF8(s, "?")
+}
+
+func (a *App) alertf(ctx context.Context, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	log.Print(msg)
+	if a.Alert != nil {
+		a.Alert(ctx, msg)
+	}
 }

@@ -64,7 +64,7 @@ func (s *Store) Test(ctx context.Context) error {
 
 // Put streams r (unknown length); returns bytes stored. A failing reader aborts the upload.
 func (s *Store) Put(ctx context.Context, key string, r io.Reader, meta map[string]string) (int64, error) {
-	info, err := s.c.PutObject(ctx, s.bucket, key, r, -1, minio.PutObjectOptions{UserMetadata: meta})
+	info, err := s.c.PutObject(ctx, s.bucket, key, r, -1, minio.PutObjectOptions{UserMetadata: meta, PartSize: 64 << 20}) // explicit: unknown length otherwise sizes buffers for 5 TiB
 	if err != nil {
 		return 0, err
 	}

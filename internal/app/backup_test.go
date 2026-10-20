@@ -208,3 +208,79 @@ func TestDeleteDestinationInUse(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestBackupTimeout(t *testing.T) {
+	a, rt, objs := newTestApp(t)
+	d, dest := fixture(t, a)
+	a.backupTimeout = 50 * time.Millisecond
+	rt.hang = true
+	b, err := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Wait()
+	got, _ := a.Store.GetBackup(context.Background(), b.ID)
+	if got.Status != "failed" || objs.has(b.S3Key) || len(rt.alerts) != 1 {
+		t.Fatalf("backup = %+v alerts = %v", got, rt.alerts)
+	}
+}
+
+func TestBackupInvalidUTF8Log(t *testing.T) {
+	a, rt, _ := newTestApp(t)
+	d, dest := fixture(t, a)
+	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int {
+		stdout.Write([]byte("X"))
+		stderr.Write([]byte("bad \xff\xfe bytes"))
+		return 0
+	}
+	b, _ := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual")
+	a.Wait()
+	got, _ := a.Store.GetBackup(context.Background(), b.ID)
+	if got.Status != "ok" || len(rt.alerts) != 0 {
+		t.Fatalf("backup = %+v alerts = %v", got, rt.alerts)
+	}
+}
+
+func TestBackupFinishFailureAlerts(t *testing.T) {
+	a, rt, _ := newTestApp(t)
+	d, dest := fixture(t, a)
+	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int {
+		stdout.Write([]byte("X"))
+		a.Store.Close() // FinishBackup will now fail
+		return 0
+	}
+	if _, err := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual"); err != nil {
+		t.Fatal(err)
+	}
+	a.Wait()
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if len(rt.alerts) != 1 || !strings.Contains(rt.alerts[0], "abc") {
+		t.Fatalf("alerts = %v", rt.alerts)
+	}
+}
+
+func TestBackupSameSecondKeyConflict(t *testing.T) {
+	a, rt, objs := newTestApp(t)
+	d, dest := fixture(t, a)
+	fixed := time.Date(2026, 10, 20, 2, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return fixed }
+	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int {
+		stdout.Write([]byte("X"))
+		return 0
+	}
+	ctx := context.Background()
+	b, err := a.StartBackup(ctx, d.ID, dest.ID, nil, "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Wait()
+	if _, err := a.StartBackup(ctx, d.ID, dest.ID, nil, "manual"); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("err = %v", err)
+	}
+	a.Wait()
+	got, _ := a.Store.GetBackup(ctx, b.ID)
+	if got.Status != "ok" || !objs.has(b.S3Key) {
+		t.Fatalf("first backup damaged: %+v", got)
+	}
+}
