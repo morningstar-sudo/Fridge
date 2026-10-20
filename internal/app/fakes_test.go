@@ -9,6 +9,7 @@ import (
 	"fridge/internal/objstore"
 	"github.com/minio/minio-go/v7"
 	"io"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -40,6 +41,11 @@ type fakeRuntime struct {
 	onWait    func()
 	execFn    func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int
 	hang      bool // Exec blocks until ctx is done
+
+	// network state: network -> attached containers; ops logs Run/Remove/network calls in order.
+	nets       map[string]map[string]bool
+	ops        []string
+	connectErr error
 }
 
 func (f *fakeRuntime) Ping(ctx context.Context) error { return f.pingErr }
@@ -48,8 +54,72 @@ func (f *fakeRuntime) Run(ctx context.Context, s container.RunSpec) (string, err
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.runs = append(f.runs, s)
+	f.ops = append(f.ops, "run "+s.Name+" "+s.Network)
+	if f.nets[s.Network] != nil {
+		f.nets[s.Network][s.Name] = true
+	}
 	return "ctr-" + s.Name, nil
 }
+
+func (f *fakeRuntime) CreateNetwork(ctx context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ops = append(f.ops, "create "+name)
+	if f.nets == nil {
+		f.nets = map[string]map[string]bool{}
+	}
+	if f.nets[name] == nil {
+		f.nets[name] = map[string]bool{}
+	}
+	return nil
+}
+
+func (f *fakeRuntime) RemoveNetwork(ctx context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ops = append(f.ops, "rmnet "+name)
+	if len(f.nets[name]) > 0 { // like Docker: attached endpoints block removal
+		return errors.New("network has active endpoints")
+	}
+	delete(f.nets, name)
+	return nil
+}
+
+func (f *fakeRuntime) ConnectNetwork(ctx context.Context, net, ctr string, aliases []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ops = append(f.ops, "connect "+net+" "+ctr+" "+strings.Join(aliases, ","))
+	if f.connectErr != nil {
+		return f.connectErr
+	}
+	if f.nets[net] == nil {
+		return errors.New("no such network " + net)
+	}
+	f.nets[net][ctr] = true // already connected: no-op
+	return nil
+}
+
+func (f *fakeRuntime) DisconnectNetwork(ctx context.Context, net, ctr string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ops = append(f.ops, "disconnect "+net+" "+ctr)
+	delete(f.nets[net], ctr)
+	return nil
+}
+
+func (f *fakeRuntime) ContainerNetworks(ctx context.Context, ctr string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for n, cs := range f.nets {
+		if cs[ctr] {
+			out = append(out, n)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeRuntime) FridgeSubnets(ctx context.Context) ([]netip.Prefix, error) { return nil, nil }
 
 func (f *fakeRuntime) WaitHealthy(ctx context.Context, id string, d time.Duration) error {
 	if f.onWait != nil {
@@ -87,6 +157,10 @@ func (f *fakeRuntime) Remove(ctx context.Context, id, volume string) error {
 		return err // like the real client: a dead ctx removes nothing
 	}
 	f.removes = append(f.removes, removeCall{id, volume})
+	f.ops = append(f.ops, "remove "+id)
+	for _, cs := range f.nets {
+		delete(cs, strings.TrimPrefix(id, "ctr-"))
+	}
 	return nil
 }
 
@@ -184,6 +258,7 @@ func newTestApp(t *testing.T) (*App, *fakeRuntime, *fakeObjects) {
 	a := &App{
 		Store: storetest.New(t), Box: box, RT: rt, CA: ca,
 		TraefikDir: t.TempDir(), HealthTimeout: time.Second,
+		ControlNetwork: "fridge-net", TraefikContainer: "fridge-traefik",
 	}
 	a.Alert = func(ctx context.Context, text string) {
 		rt.mu.Lock()

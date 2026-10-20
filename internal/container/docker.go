@@ -25,7 +25,11 @@ type RunSpec struct {
 	VolumePath  string
 	Healthcheck []string
 	Labels      map[string]string
+	Network     string // "" = the client's network; NoNetwork = isolated. Alias = Name on user-defined networks.
 }
+
+// NoNetwork runs a container with no network at all (Docker's "none").
+const NoNetwork = "none"
 
 type Client struct {
 	cli     *client.Client
@@ -84,9 +88,13 @@ func (c *Client) Run(ctx context.Context, s RunSpec) (string, error) {
 			Retries: 15, StartPeriod: 2 * time.Second,
 		}
 	}
+	netName := s.Network
+	if netName == "" {
+		netName = c.network
+	}
 	host := &container.HostConfig{
 		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
-		NetworkMode:   container.NetworkMode(c.network),
+		NetworkMode:   container.NetworkMode(netName),
 	}
 	if s.Volume != "" {
 		if _, err := c.cli.VolumeCreate(ctx, volume.CreateOptions{Name: s.Volume, Labels: s.Labels}); err != nil {
@@ -94,9 +102,12 @@ func (c *Client) Run(ctx context.Context, s RunSpec) (string, error) {
 		}
 		host.Binds = []string{s.Volume + ":" + s.VolumePath}
 	}
-	nets := &network.NetworkingConfig{EndpointsConfig: map[string]*network.EndpointSettings{
-		c.network: {Aliases: []string{s.Name}},
-	}}
+	var nets *network.NetworkingConfig
+	if netName != NoNetwork { // Docker rejects aliases on "none"
+		nets = &network.NetworkingConfig{EndpointsConfig: map[string]*network.EndpointSettings{
+			netName: {Aliases: []string{s.Name}},
+		}}
+	}
 	resp, err := c.cli.ContainerCreate(ctx, cfg, host, nets, nil, s.Name)
 	if err != nil {
 		return "", err

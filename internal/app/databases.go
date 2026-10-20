@@ -123,9 +123,17 @@ func (a *App) provision(ctx context.Context, d *store.Database, eng engine.Engin
 	p := nodeParams(*d)
 	p.Password, p.AdminPassword = pw, adminPW
 	spec := eng.Spec(p)
+	// The node lives only on its own internal network with Traefik: no control plane, no peers, no internet.
+	net := NodeNetwork(*d)
+	if err := a.RT.CreateNetwork(ctx, net); err != nil {
+		return fmt.Errorf("create network: %w", err)
+	}
+	if err := a.RT.ConnectNetwork(ctx, net, a.TraefikContainer, nil); err != nil {
+		return fmt.Errorf("connect proxy: %w", err)
+	}
 	id, err := a.RT.Run(ctx, container.RunSpec{
 		Name: d.Volume, Image: spec.Image, Env: spec.Env, Volume: d.Volume, VolumePath: spec.VolumePath,
-		Healthcheck: spec.Healthcheck, Labels: map[string]string{"fridge.db_id": fmt.Sprint(d.ID)},
+		Healthcheck: spec.Healthcheck, Labels: map[string]string{"fridge.db_id": fmt.Sprint(d.ID)}, Network: net,
 	})
 	if err != nil {
 		return fmt.Errorf("run container: %w", err)
@@ -201,7 +209,7 @@ func nodeParams(d store.Database) engine.Params {
 	return p
 }
 
-// removeNode tears down container, volume, route and cert, then marks the row "error". Failures are only logged.
+// removeNode tears down container, volume, node network, route and cert, then marks the row "error". Failures are only logged.
 func (a *App) removeNode(ctx context.Context, d store.Database) {
 	// Rollback must survive a cancelled request context.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
@@ -212,6 +220,13 @@ func (a *App) removeNode(ctx context.Context, d store.Database) {
 	}
 	if err := a.RT.Remove(ctx, id, d.Volume); err != nil {
 		log.Printf("removeNode %s: remove container: %v", d.Name, err)
+	}
+	net := NodeNetwork(d)
+	if err := a.RT.DisconnectNetwork(ctx, net, a.TraefikContainer); err != nil {
+		log.Printf("removeNode %s: disconnect proxy: %v", d.Name, err)
+	}
+	if err := a.RT.RemoveNetwork(ctx, net); err != nil {
+		log.Printf("removeNode %s: remove network: %v", d.Name, err)
 	}
 	if err := proxy.RemoveRoute(a.TraefikDir, d.ID); err != nil {
 		log.Printf("removeNode %s: remove route: %v", d.Name, err)

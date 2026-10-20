@@ -100,9 +100,13 @@ func runServer() error {
 	a := &app.App{
 		Store: st, Box: box, RT: rt, CA: ca, TraefikDir: traefikDir, APIBackend: apiBackend,
 		HealthTimeout: 120 * time.Second, Alert: alert.Webhook(os.Getenv("FRIDGE_ALERT_WEBHOOK")),
+		ControlNetwork: network, TraefikContainer: env("FRIDGE_TRAEFIK_CONTAINER", "fridge-traefik"),
 	}
 	if err := a.RecoverInterrupted(ctx); err != nil { // after FailRunning, before the scheduler loads
 		return fmt.Errorf("recover interrupted nodes: %w", err)
+	}
+	if err := a.ReconcileNetworks(ctx); err != nil { // isolation is best-effort at boot; serving matters more
+		log.Printf("reconcile node networks: %v", err)
 	}
 	allow, err := a.Allowlist(ctx)
 	if err != nil {

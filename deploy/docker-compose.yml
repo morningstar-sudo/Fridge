@@ -15,6 +15,7 @@ services:
 
   traefik:
     image: traefik:v3.5
+    container_name: fridge-traefik # Fridge attaches it to every node network (FRIDGE_TRAEFIK_CONTAINER)
     ports:
       - "5432:5432"
       - "8080:8080"

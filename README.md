@@ -52,7 +52,8 @@ Stopping `fridge` does not interrupt database traffic; Traefik keeps routing wit
 | `FRIDGE_LISTEN` | `:8080` | HTTP listen address |
 | `FRIDGE_DATA` | `/data` | holds the internal CA (`<data>/ca`) |
 | `FRIDGE_TRAEFIK_DIR` | `/traefik` | shared with Traefik: `dynamic/` (routes), `certs/` |
-| `FRIDGE_NETWORK` | `fridge-net` | Docker network for database containers |
+| `FRIDGE_NETWORK` | `fridge-net` | control network (traefik, fridge, fridge-meta); each DB node gets its own internal `fridge-node-<key>` network |
+| `FRIDGE_TRAEFIK_CONTAINER` | `fridge-traefik` | Traefik container Fridge attaches to every node network |
 | `FRIDGE_API_BACKEND` | `http://fridge:8080` | URL Traefik uses to reach the API |
 | `FRIDGE_ALERT_WEBHOOK` | empty (log only) | receives `POST {"text": "..."}` on failed backups/restores |
 | `TZ` | `UTC` | time zone the backup schedules' cron expressions run in (e.g. `Asia/Ho_Chi_Minh`); compose passes it through from `deploy/.env` |

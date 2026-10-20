@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -41,6 +42,16 @@ func TestE2EBackupRestoreAcrossVersions(t *testing.T) {
 	}
 	t.Cleanup(func() { exec.Command("docker", "network", "rm", network).Run() })
 
+	// Traefik stand-in on the control network; provisioning attaches it to each node network.
+	const proxyName = "fridge-it-e2e-proxy"
+	_ = rt.Remove(ctx, proxyName, proxyName)
+	proxyID, err := rt.Run(ctx, container.RunSpec{Name: proxyName, Image: "postgres:17-alpine", Env: []string{"POSTGRES_PASSWORD=x"},
+		Volume: proxyName, VolumePath: "/var/lib/postgresql/data"})
+	t.Cleanup(func() { _ = rt.Remove(ctx, proxyName, proxyName) }) // runs after the nodes' cleanup below
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	key := make([]byte, 32)
 	rand.Read(key)
 	box, err := secret.NewBox(base64.StdEncoding.EncodeToString(key))
@@ -54,7 +65,8 @@ func TestE2EBackupRestoreAcrossVersions(t *testing.T) {
 	a := &App{
 		Store: storetest.New(t), Box: box, RT: rt, CA: ca,
 		TraefikDir: t.TempDir(), HealthTimeout: 120 * time.Second,
-		Alert: func(ctx context.Context, text string) { t.Logf("alert: %s", text) },
+		Alert:          func(ctx context.Context, text string) { t.Logf("alert: %s", text) },
+		ControlNetwork: network, TraefikContainer: proxyName,
 	}
 
 	// Node names carry a fresh random node_key, so leftovers of an aborted run never collide.
@@ -93,6 +105,13 @@ func TestE2EBackupRestoreAcrossVersions(t *testing.T) {
 	}
 	if !strings.HasPrefix(src.AdminUser, "su_") {
 		t.Fatalf("admin user %q", src.AdminUser)
+	}
+	// Isolation: the node sits only on its own network; the proxy reaches it by container name.
+	if nets, err := rt.ContainerNetworks(ctx, src.Volume); err != nil || len(nets) != 1 || nets[0] != NodeNetwork(src) {
+		t.Fatalf("node networks = %q, %v", nets, err)
+	}
+	if code, err := rt.Exec(ctx, proxyID, []string{"pg_isready", "-h", src.Volume, "-t", "5"}, nil, io.Discard, io.Discard); err != nil || code != 0 {
+		t.Fatalf("proxy -> node: code %d err %v", code, err)
 	}
 
 	b, err := a.StartBackup(ctx, src.ID, dest.ID, nil, "manual", nil)

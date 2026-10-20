@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strconv"
 	"strings"
 	"testing"
@@ -36,6 +37,16 @@ func (f *fakeRT) Exec(_ context.Context, _ string, _ []string, _ io.Reader, _, _
 	return 0, nil
 }
 func (f *fakeRT) Remove(context.Context, string, string) error { return nil }
+func (f *fakeRT) CreateNetwork(context.Context, string) error  { return nil }
+func (f *fakeRT) RemoveNetwork(context.Context, string) error  { return nil }
+func (f *fakeRT) ConnectNetwork(context.Context, string, string, []string) error {
+	return nil
+}
+func (f *fakeRT) DisconnectNetwork(context.Context, string, string) error { return nil }
+func (f *fakeRT) ContainerNetworks(context.Context, string) ([]string, error) {
+	return nil, nil
+}
+func (f *fakeRT) FridgeSubnets(context.Context) ([]netip.Prefix, error) { return nil, nil }
 
 type fakeObjs struct {
 	testErr error

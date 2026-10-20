@@ -27,7 +27,15 @@ type Runtime interface {
 	WaitHealthy(ctx context.Context, id string, timeout time.Duration) error
 	Exec(ctx context.Context, id string, cmd []string, stdin io.Reader, stdout, stderr io.Writer) (int, error)
 	Remove(ctx context.Context, id, volume string) error
+	CreateNetwork(ctx context.Context, name string) error
+	RemoveNetwork(ctx context.Context, name string) error
+	ConnectNetwork(ctx context.Context, netName, containerName string, aliases []string) error
+	DisconnectNetwork(ctx context.Context, netName, containerName string) error
+	ContainerNetworks(ctx context.Context, containerName string) ([]string, error)
+	FridgeSubnets(ctx context.Context) ([]netip.Prefix, error)
 }
+
+var _ Runtime = (*container.Client)(nil)
 
 type App struct {
 	Store         *store.Store
@@ -43,6 +51,10 @@ type App struct {
 	now           func() time.Time                                                 // test clock; nil = time.Now
 	backupTimeout time.Duration                                                    // test override; 0 = backupTimeout
 	wg            sync.WaitGroup
+
+	// ControlNetwork (FRIDGE_NETWORK) holds only traefik/fridge/fridge-meta; each DB node gets its own
+	// internal network shared with TraefikContainer (FRIDGE_TRAEFIK_CONTAINER).
+	ControlNetwork, TraefikContainer string
 }
 
 // Wait blocks until all background jobs finish.
