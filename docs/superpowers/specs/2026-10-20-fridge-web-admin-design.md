@@ -4,7 +4,7 @@ Bổ sung cho `2026-10-20-fridge-design.md`. Giai đoạn này được người
 
 ## Vì sao
 
-Hiện chỉ có CLI + một token tĩnh `FRIDGE_TOKEN` dùng chung: ai có token làm được mọi thứ, hệ thống không biết ai là ai. Team cần một giao diện web để làm việc hằng ngày, có tài khoản riêng, và mỗi người chỉ quản lý tài nguyên của mình.
+Giai đoạn 1 chỉ có CLI + một token tĩnh `FRIDGE_TOKEN` dùng chung (giai đoạn này **bỏ** nó): ai có token làm được mọi thứ, hệ thống không biết ai là ai. Team cần một giao diện web để làm việc hằng ngày, có tài khoản riêng, và mỗi người chỉ quản lý tài nguyên của mình.
 
 ## Mục tiêu
 
@@ -20,7 +20,7 @@ Hiện chỉ có CLI + một token tĩnh `FRIDGE_TOKEN` dùng chung: ai có toke
 - RBAC chi tiết hơn admin/user; nhóm/team.
 - **API token** cho script/CI — sẽ là một hệ thống **riêng**, không dùng chung với session ID (người dùng chốt). Thiết kế middleware xác thực sao cho thêm loại thứ hai không phải viết lại.
 - Upload cert SSL tùy chỉnh (sau).
-- Trang health/monitor/limits (giai đoạn 3), audit log, xóa DB, restore ghi đè (giai đoạn sau).
+- Trang health/monitor/limits (giai đoạn 3), xóa DB, restore ghi đè (giai đoạn sau). *(Audit log nằm trong giai đoạn này — mục 13c.)*
 - Log chạy trực tiếp (SSE) — dùng polling.
 
 ## Anti-goals
@@ -40,12 +40,14 @@ Hiện chỉ có CLI + một token tĩnh `FRIDGE_TOKEN` dùng chung: ai có toke
 
 ### 1. Mô hình dữ liệu (migration mới, không sửa migration cũ)
 
-- `users(id, username UNIQUE, role[admin|user], scram_salt BYTEA, scram_iterations INT, stored_key BYTEA, server_key BYTEA, disabled BOOL, created_at, created_by NULL)`
-- `invites(id, token_hash UNIQUE, username, role, purpose[new_user|reset_password], user_id NULL, created_by, expires_at, used_at NULL)`
+- `users(id, username UNIQUE CHECK ~ '^[a-z][a-z0-9]{2,15}$', role[admin|user], scram_salt BYTEA, scram_iterations INT, stored_key BYTEA, server_key BYTEA, disabled BOOL, created_at, created_by NULL)`
+- `invites(id, token_hash UNIQUE, username (cùng CHECK), role, purpose[new_user|reset_password], user_id NULL, created_by, expires_at, used_at NULL)`
 - `sessions(id_hash UNIQUE, user_id, created_at, last_seen_at, expires_at, ip, user_agent)` — `id_hash` = SHA-256 của session ID; DB lộ cũng không dùng được.
 - `databases` thêm `owner_id BIGINT NULL REFERENCES users(id)`.
 - `database_members(database_id, user_id, added_by, added_at, PRIMARY KEY(database_id, user_id))`.
 - `destinations` thêm `owner_id BIGINT NULL REFERENCES users(id)`, `shared BOOL NOT NULL DEFAULT false`.
+- `backups` thêm `started_by_id BIGINT NULL REFERENCES users(id)` (NULL = job hệ thống/lịch); `restores` thêm `started_by_id` tương tự. Trang Hoạt động đọc người khởi động từ cột này (không JOIN audit).
+- **Username tài khoản**: `^[a-z][a-z0-9]{2,15}$` (3–16 ký tự, chữ thường + số, **không `_`**) — kiểm ở setup, tạo lời mời, nhận lời mời **và** bằng CHECK trên `users.username`, `invites.username`. Nhờ không có `_`, tiền tố `<username>_` (mục 13b, 13b-3) tách được một cách không mơ hồ.
 - **Dữ liệu cũ**: DB/destination có `owner_id NULL` được gán cho admin đầu tiên ngay khi bước setup tạo admin xong.
 
 ### 1b. Ràng buộc toàn vẹn (người dùng yêu cầu "siết chặt quan hệ")
@@ -80,7 +82,7 @@ Hiện chỉ có CLI + một token tĩnh `FRIDGE_TOKEN` dùng chung: ai có toke
 - Env mới **`FRIDGE_SETUP_TOKEN`** (người dùng chốt: "1 token trong env").
 - Khi bảng `users` **rỗng**: mọi trang web chuyển tới màn **Tạo admin** (nhập setup token, username, mật khẩu ×2). Sai token → từ chối (so sánh constant-time).
 - Khi **đã có user**: bỏ qua hoàn toàn — endpoint setup trả 409, setup token vô hiệu, server khởi động được dù không có biến này.
-- Chưa có user mà thiếu `FRIDGE_SETUP_TOKEN` → server vẫn chạy nhưng log cảnh báo rõ và màn setup báo "chưa cấu hình setup token".
+- Chưa có user mà thiếu `FRIDGE_SETUP_TOKEN` → server vẫn chạy nhưng log cảnh báo rõ lúc khởi động và màn setup báo "chưa cấu hình setup token". `GET /api/setup/status` trả `{needed, token_configured}` để web biết hiện thông báo này.
 - Tài khoản tạo ở bước này là `admin`.
 
 ### 3. SCRAM-SHA-256 (RFC 5802 / RFC 7677)
@@ -92,14 +94,14 @@ Hiện chỉ có CLI + một token tĩnh `FRIDGE_TOKEN` dùng chung: ai có toke
   - `POST /api/auth/scram/start {client_first}` → `{server_first, scram_id}` (`scram_id` = khóa trạng thái trong RAM, sống 60s).
   - `POST /api/auth/scram/finish {scram_id, client_final}` → kiểm `ClientProof`; đúng → tạo session, trả `{server_final, user}`. Client **phải** kiểm `ServerSignature` (chống server giả).
 - **Không lộ username có tồn tại hay không**: username không có/bị khóa vẫn trả `server_first` với salt giả xác định (`HMAC(FRIDGE_SECRET_KEY, username)` cắt 16 byte) và lỗi chung "sai tên đăng nhập hoặc mật khẩu".
-- **Chống dò**: sai 5 lần trong 1 phút theo (username, IP) → khóa 5 phút (RAM). *(Lựa chọn của Claude.)*
+- **Chống dò**: sai 5 lần trong 1 phút theo (username, IP) → khóa 5 phút (RAM). Re-auth (đổi mật khẩu) dùng **chung** bộ đếm này. *(Lựa chọn của Claude.)*
 - Đổi mật khẩu: phải chứng minh mật khẩu cũ bằng một vòng SCRAM mới (re-auth) trong cùng request flow, rồi gửi bộ khóa mới; mọi session khác của user bị xóa.
 
 ### 4. Session stateful (người dùng chốt)
 
 - Session ID: 32 byte ngẫu nhiên (base64url). Server lưu hash trong `sessions`.
 - **Web**: cookie `fridge_session`, `HttpOnly; Secure; SameSite=Strict; Path=/`.
-- **CLI**: `Authorization: Bearer <session id>` — cùng bảng, cùng quyền. `fridge login` chạy SCRAM, lưu session ID vào `~/.config/fridge/session` (0600); env `FRIDGE_TOKEN` (nếu đặt) ghi đè file. `fridge logout` xóa session phía server + file. `fridge whoami`.
+- **CLI**: `Authorization: Bearer <session id>` — cùng bảng, cùng quyền. `fridge login` chạy SCRAM, lưu session ID vào `~/.config/fridge/session` (0600); env `FRIDGE_SESSION` (nếu đặt) ghi đè file. `fridge logout` xóa session phía server + file. `fridge whoami`.
 - Hết hạn: không hoạt động **12 giờ** hoặc tuyệt đối **7 ngày**; `last_seen_at` cập nhật tối đa 1 lần/phút. Job dọn session hết hạn mỗi giờ. *(Lựa chọn của Claude.)*
 - **CSRF**: request dùng cookie và không phải GET/HEAD phải có `Origin` (hoặc `Sec-Fetch-Site: same-origin`) khớp host; request dùng Bearer không cần.
 - Middleware xác thực trả về một `Principal{UserID, Role}`; nguồn hiện tại: cookie hoặc Bearer session. API token sau này là nguồn thứ ba.
@@ -129,12 +131,15 @@ Hiện chỉ có CLI + một token tĩnh `FRIDGE_TOKEN` dùng chung: ai có toke
   - Trên destination **shared**: không liệt kê bucket; chỉ thấy các bản backup (từ bảng `backups`) thuộc DB mình có quyền.
   - Nút "Restore…" trên một dòng backup của DB mình có quyền luôn dùng được, bất kể destination thuộc ai.
 - Restore vào node mới: người bấm = owner node mới.
-- Không cho hạ quyền/khóa **admin hoạt động cuối cùng**.
+- Không cho hạ quyền/khóa **admin hoạt động cuối cùng** — kiểm trong cùng transaction với thay đổi (khóa advisory), để hai admin hạ quyền nhau đồng thời thì tối đa một người thành công.
+- Thêm người quản lý bằng username không tồn tại → cùng lỗi chung "không thêm được" như mọi input sai khác (không lộ username có tồn tại).
+- **Backup now** không chọn destination và DB chưa có lịch: chỉ chọn destination mà **owner DB dùng được** (owner sở hữu hoặc `shared`, id nhỏ nhất); không có → 400. Không bao giờ lấy destination đầu tiên của hệ thống.
+- Sửa/xóa lịch backup: tải lịch → DB của lịch → kiểm quyền DB (không có → 404).
 - Job hệ thống (scheduler, recovery khi khởi động) chạy không gắn user.
 
 ### 6. Quản lý user
 
-- Admin tạo **lời mời** (username, role) → link dùng một lần `https://<host>:8443/#/invite/<token>`, hết hạn **48 giờ**; người được mời tự đặt mật khẩu bằng SCRAM. Người tạo không bao giờ biết mật khẩu. *(Lựa chọn của Claude.)*
+- Admin tạo **lời mời** (username, role) → link dùng một lần `https://<host>:8443/#/invite/<token>`, hết hạn **48 giờ**; người được mời tự đặt mật khẩu bằng SCRAM. Người tạo không bao giờ biết mật khẩu. *(Lựa chọn của Claude.)* Token chỉ nằm sau `#` (không gửi lên server khi mở trang); web tra lời mời bằng `POST /api/invites/lookup {token}` và nhận bằng `POST /api/invites/accept {token, credentials}` — token không bao giờ nằm trong đường dẫn URL của request.
 - Reset mật khẩu = lời mời `purpose=reset_password` cho user có sẵn; dùng xong xóa mọi session của user đó.
 - Khóa user → xóa mọi session, chặn đăng nhập. DB/destination của user bị khóa vẫn nằm đó; admin vẫn quản lý được.
 
@@ -150,7 +155,7 @@ Hiện chỉ có CLI + một token tĩnh `FRIDGE_TOKEN` dùng chung: ai có toke
 
 - File tĩnh trong `internal/web/static/` nhúng bằng `embed`, phục vụ ở `/` cùng server với API. Một trang HTML + JS module, **router theo hash** (`#/databases`, `#/databases/abc`, …). Không build step.
 - Header bảo mật: `Content-Security-Policy: default-src 'self'` (không inline script/style), `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`.
-- **Bố cục** (người dùng duyệt mockup A): **sidebar trái đóng/mở được** (thu gọn còn icon, trạng thái nhớ trong `localStorage`), mục: Databases · Restore · Destinations · Settings (admin thấy thêm Users, Sessions toàn hệ thống). Góc dưới sidebar: tên user · Đổi mật khẩu · Đăng xuất.
+- **Bố cục** (người dùng duyệt mockup A): **sidebar trái đóng/mở được** (thu gọn còn icon, trạng thái nhớ trong `localStorage`), mục: Databases · Restore · Destinations · Domains · Audit log · Settings (admin thấy thêm Users, Sessions toàn hệ thống, Images, Hoạt động). Góc dưới sidebar: tên user · Đổi mật khẩu · Đăng xuất.
 - **Màn hình**:
   - **Tạo admin** (lần đầu) · **Đăng nhập** · **Chấp nhận lời mời** · **Đổi mật khẩu**.
   - **Databases**: bảng (tên, engine/version, domain, trạng thái, backup gần nhất, owner — admin thấy cột owner), nút "+ Tạo DB" (form: engine, version dropdown từ `/api/engines`, tên, domain).
@@ -163,7 +168,7 @@ Hiện chỉ có CLI + một token tĩnh `FRIDGE_TOKEN` dùng chung: ai có toke
 ### 9. API
 
 - Mọi route `/api/*` hiện có giữ nguyên đường dẫn nhưng **áp quyền** theo mục 5 (lọc danh sách, 404 cho tài nguyên không thuộc quyền, 403 cho thao tác cấm trên tài nguyên thấy được).
-- Thêm (tên endpoint do builder quyết, gợi ý): `GET /api/setup/status`, `POST /api/setup`, `POST /api/auth/scram/start|finish`, `POST /api/auth/logout`, `GET /api/me`, `POST /api/me/password`, sessions (list/revoke), users + invites (admin), `GET|POST|DELETE /api/databases/{db}/members`, `PATCH /api/destinations/{id}` (cờ `shared`, admin).
+- Thêm (tên endpoint do builder quyết, gợi ý): `GET /api/setup/status` (`{needed, token_configured}`), `POST /api/setup`, `POST /api/invites/lookup|accept` (token trong body), `POST /api/auth/scram/start|finish`, `POST /api/auth/logout`, `GET /api/me`, `POST /api/me/password`, sessions (list/revoke), users + invites (admin), `GET|POST|DELETE /api/databases/{db}/members`, `PATCH /api/destinations/{id}` (cờ `shared`, admin).
 - Response JSON có thêm `owner` (username) cho DB/destination.
 
 ### 10. Đường thoát khi tự khóa (anti-goal 3)
@@ -177,11 +182,12 @@ Lệnh chạy **bên trong container** (`docker exec <fridge> /fridge recover �
 
 - **Bỏ** `FRIDGE_TOKEN` khỏi server, compose, `.env.example`, README.
 - **Thêm** `FRIDGE_SETUP_TOKEN` (cần khi chưa có user), `FRIDGE_PUBLIC_HOSTS` (tùy chọn).
-- CLI: `FRIDGE_URL` mặc định `https://localhost:8443`; CLI tin CA nội bộ qua `--ca-file`/`FRIDGE_CA_FILE` hoặc `fridge login --insecure` lần đầu để tải CA (builder quyết chi tiết, nhưng mặc định **không** tắt kiểm tra TLS).
+- **Thêm** `FRIDGE_TRAEFIK_CONTAINER` (mặc định `fridge-traefik`; compose đặt `container_name: fridge-traefik`) — dùng cho cô lập mạng (mục 13d). `FRIDGE_TRUSTED_PROXY` là danh sách CIDR ghi đè (mặc định: subnet của `fridge-net`, mục 12).
+- CLI: `FRIDGE_URL` mặc định `https://localhost:8443`; CLI tin CA nội bộ theo **TOFU** (`fridge login` lần đầu, mục 12) hoặc `--ca-file`/`FRIDGE_CA_FILE`. Không có chế độ tắt kiểm tra TLS. Env `FRIDGE_SESSION` ghi đè file session.
 
 ### 12. Quyết định bổ sung (lựa chọn của Claude, sau builder check)
 
-- **IP thật của client**: Fridge chỉ tin `X-Forwarded-For` khi request đến từ Traefik (env `FRIDGE_TRUSTED_PROXY`, mặc định hostname `traefik`, resolve lúc khởi động); container fridge không publish port. IP này dùng cho khóa đăng nhập, `sessions.ip` và log. CSRF so `Origin` với `Host` mà Traefik chuyển nguyên.
+- **IP thật của client**: Fridge chỉ tin `X-Forwarded-For` khi peer nằm trong **subnet của `fridge-net`** (lấy qua Docker API lúc khởi động) hoặc loopback — không dựa vào một IP resolve từ tên `traefik` (IP container đổi khi restart). Env `FRIDGE_TRUSTED_PROXY` (danh sách CIDR, phân tách dấu phẩy) ghi đè mặc định này. Vì `fridge-net` chỉ còn `traefik`, `fridge`, `fridge-meta` (mục 13d) nên tin cả subnet là an toàn. Container fridge không publish port. IP này dùng cho khóa đăng nhập, `sessions.ip` và log. CSRF so `Origin` với `Host` mà Traefik chuyển nguyên.
 - **CA cert công khai**: `GET /api/ca` **không cần đăng nhập** (chỉ là cert công khai). `fridge login` lần đầu chưa có CA → tải CA, in fingerprint SHA-256, hỏi xác nhận (TOFU), lưu vào `~/.config/fridge/ca.pem` và dùng từ đó; `--ca-file`/`FRIDGE_CA_FILE` để chỉ định sẵn. Không có chế độ tắt kiểm tra TLS.
 - **Traefik**: cert mặc định không ảnh hưởng route DB — các router `:5432` đã chọn cert theo SNI (`tls.certificates` từng domain); SNI lạ vốn không có router. Đổi entrypoint `api :8080` → `websecure :8443` + `web :8080` (redirect) được chấp nhận; `ping :8082` giữ nguyên.
 - **Backup khi destination không còn trong tầm nhìn**: ai có quyền với DB thì luôn thấy, tải (presign phía server), restore các bản backup của DB đó, bất kể destination thuộc ai hay đã bỏ dùng chung. Không cho xóa destination khi còn lịch backup (của bất kỳ ai) trỏ tới (giữ quy tắc ErrInUse hiện có). Bỏ cờ dùng chung không phá lịch có sẵn của người khác.
@@ -190,6 +196,9 @@ Lệnh chạy **bên trong container** (`docker exec <fridge> /fridge recover �
 - **Nâng cấp từ giai đoạn 1** (chưa có user): bắt buộc làm setup. Trong lúc chưa setup, `/api/*` (trừ setup/status/ca/healthz/readyz) trả **401 `{"error":"setup required"}`**; CLI in hướng dẫn mở web để setup.
 - **Host trong link mời**: lấy từ `Host` của request tạo lời mời; lệnh `recover reset-password` (không có request) dùng tên đầu tiên trong `FRIDGE_PUBLIC_HOSTS`, không có thì `localhost`.
 - **Kiểm thử JS**: trang `/test/scram.html` (+ file JS riêng, tuân CSP) chạy test vector RFC 7677 trong trình duyệt, hiện PASS/FAIL. Vô hại nên nhúng luôn; không cần Node/npm.
+- **`fridge setup` trên CLI** (tạo admin đầu tiên không cần trình duyệt, cùng SCRAM) — giữ, cho server không có trình duyệt.
+- **Smoke UI bằng Playwright chạy trong Docker** (`scripts/ui-smoke/`) — chỉ là công cụ kiểm thử: không phải build step của frontend, không phải dependency của dự án, không nằm trong sản phẩm.
+- **Session list**: mỗi phiên trong JSON có `current: true` nếu là phiên của chính request (web đánh dấu "phiên hiện tại").
 
 ### 13. Validate file dump trước khi restore (người dùng chốt: làm cả 2 mức, mức 2 là một nút "Kiểm tra kỹ")
 
@@ -203,9 +212,9 @@ Lệnh chạy **bên trong container** (`docker exec <fridge> /fridge recover �
 
 **Mức 2 — "Kiểm tra kỹ" (tùy chọn, một nút riêng cạnh Restore):**
 - Chạy nền như một job: bảng `dump_checks(id, destination_id, s3_key, status[running|ok|failed], result JSONB, log, started_by, started_at, finished_at)`; polling như backup/restore.
-- Tải **toàn bộ** object, stream (không ghi đĩa) vào một container tạm `postgres:<version cao nhất trong catalog>` (không network, tự xóa sau khi xong, timeout 6h):
-  - `.dump`: `pg_restore -f /dev/null` đọc từ stdin — đọc hết mọi khối dữ liệu, phát hiện file cụt/khối hỏng.
-  - `.sql.gz`: giải nén hết (kiểm CRC + độ dài cuối gzip) và kiểm UTF-8 toàn bộ; `.sql`: kiểm UTF-8 toàn bộ. (Không thực thi SQL — chỉ kiểm tính toàn vẹn.)
+- Tải **toàn bộ** object, stream (không ghi đĩa), timeout 6h:
+  - `.dump`: stream vào một container tạm `postgres:<version cao nhất trong catalog>` (không network, tự xóa sau khi xong) chạy `pg_restore -f /dev/null` đọc từ stdin — đọc hết mọi khối dữ liệu, phát hiện file cụt/khối hỏng.
+  - `.sql.gz`/`.sql`: kiểm **ngay trong Go** (không container) — `.sql.gz` giải nén hết (kiểm CRC + độ dài cuối gzip) và kiểm UTF-8 toàn bộ; `.sql`: kiểm UTF-8 toàn bộ. (Không thực thi SQL — chỉ kiểm tính toàn vẹn.)
 - Kết quả hiển thị: OK/lỗi, dung lượng đã đọc, version nguồn, số mục trong TOC (với `.dump`), log lỗi.
 - Không bắt buộc trước khi Restore; nút Restore vẫn bấm được (người dùng tự quyết).
 - Quyền: giống quy tắc duyệt file restore (mục 5).
@@ -214,7 +223,7 @@ Lệnh chạy **bên trong container** (`docker exec <fridge> /fridge recover �
 ### 13b. User/mật khẩu của DB do người dùng đặt (người dùng chốt)
 
 - Form **Tạo DB** và form **restore vào node mới** có ô **User** và **Mật khẩu**, mỗi ô có nút **Ngẫu nhiên** sinh chuỗi trên trình duyệt (`crypto.getRandomValues`): hậu tố user 8 ký tự `[a-z0-9]`, mật khẩu 24 ký tự `[A-Za-z0-9-_.~]`; ô mật khẩu có Hiện/Ẩn + Copy.
-- **Tên user bắt buộc có tiền tố `<username owner>_`** (người dùng chốt — tránh lộ tài khoản tenant khác qua kiểm tra trùng tên): người dùng chỉ nhập hậu tố `^[a-z0-9_]{1,15}$`, UI hiện tiền tố cố định; trùng tên chỉ kiểm trong phạm vi owner; áp cho mọi engine. Username tài khoản Fridge vì vậy siết thành `^[a-z][a-z0-9_]{2,15}$` (không `.`/`-`, ≤ 16 ký tự → tổng ≤ 32 ký tự, vừa giới hạn MySQL).
+- **Tên user bắt buộc có tiền tố `<username owner>_`** (người dùng chốt — tránh lộ tài khoản tenant khác qua kiểm tra trùng tên): người dùng chỉ nhập hậu tố `^[a-z0-9_]{1,15}$`, UI hiện tiền tố cố định; trùng tên chỉ kiểm trong phạm vi owner; áp cho mọi engine. Username tài khoản Fridge vì vậy siết thành `^[a-z][a-z0-9]{2,15}$` (người dùng chốt: không `_`/`.`/`-`, ≤ 16 ký tự → tổng ≤ 32 ký tự, vừa giới hạn MySQL); vì username không có `_`, dấu `_` đầu tiên luôn là ranh giới tiền tố (vd `alice_shop_rw` = owner `alice`, hậu tố `shop_rw`).
 - Để trống → hậu tố = hậu tố tên DB (`-` → `_`), mật khẩu `crypto/rand.Text()`. *(Lựa chọn của Claude, giữ tương thích CLI/API.)*
 - Ràng buộc *(lựa chọn của Claude)*: mật khẩu 12–128 ký tự ASCII in được, không khoảng trắng. Sai → 400.
 - Mật khẩu DB đi lên server qua HTTPS (bắt buộc, vì Fridge phải tạo user trong Postgres) và lưu mã hóa AES-GCM như hiện tại. Connection string dựng bằng `url.UserPassword` để ký tự đặc biệt đúng.
@@ -225,7 +234,7 @@ Lệnh chạy **bên trong container** (`docker exec <fridge> /fridge recover �
 
 - **Superuser riêng của từng DB** (người dùng chốt, thay cho phương án dùng chung theo owner — để áp được cho mọi engine, kể cả MySQL/MariaDB route theo username qua ProxySQL): mỗi lần tạo/restore node, Fridge sinh superuser `su_<node_key>` (mục 13b-3) + mật khẩu ngẫu nhiên (`crypto/rand.Text()`), lưu mã hóa trong `databases.admin_user` / `databases.admin_password_enc`. Tên duy nhất theo DB đang hoạt động.
   - Container khởi tạo với `POSTGRES_USER = su_<node_key>`, `POSTGRES_PASSWORD = mật khẩu superuser`, `POSTGRES_DB = <tên DB>`. Healthcheck, backup (`pg_dump`), restore, kiểm tra kỹ chạy bằng superuser này (qua socket nội bộ, không cần mật khẩu).
-  - **Owner** và **admin** xem và **rotate** superuser của DB (rotate: `ALTER ROLE` trên node, thành công mới lưu mật khẩu mới). **Người quản lý không thấy** *(lựa chọn của Claude)*. Mỗi lần xem/rotate ghi audit (`superuser.reveal`, `superuser.rotate`).
+  - **Owner** và **admin** xem và **rotate** superuser của DB (rotate: `ALTER ROLE` trên node, thành công mới lưu mật khẩu mới). **Người quản lý không thấy** *(lựa chọn của Claude)*. Mỗi lần xem/rotate ghi audit (`superuser.reveal`, `superuser.rotate`). CLI: `fridge superuser show <db> [--reveal]`, `fridge superuser rotate <db>`; `fridge show <db> [--reveal]` chỉ cho user ứng dụng.
 - **User ứng dụng** (tên/mật khẩu tự đặt hoặc ngẫu nhiên — mục 13b): `CREATE ROLE … LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE`, là **owner của database** và schema `public` (người dùng chốt: "owner của database") — tự tạo/sửa/xóa bảng, index, schema, extension trusted; đọc ghi dữ liệu. Tạo sau khi container healthy bằng `psql` chạy dưới superuser, SQL đưa qua stdin (mật khẩu không nằm trên dòng lệnh).
 - **Restore**: chạy bằng superuser của node mới; object được gán cho user ứng dụng (`pg_restore --no-owner --no-acl --role=<app>`; file SQL thuần được thêm `SET ROLE <app>;` ở đầu luồng).
 - Owner và người quản lý thấy connection string của user ứng dụng; connection string superuser chỉ owner/admin.
@@ -234,10 +243,10 @@ Lệnh chạy **bên trong container** (`docker exec <fridge> /fridge recover �
 ### 13b-3. Tên nội bộ dạng hash, tên DB theo owner, domain đăng ký trước (người dùng chốt)
 
 - **Tên DB bắt buộc tiền tố `<username owner>_`** (người dùng chốt, giống user ứng dụng): người dùng nhập hậu tố `^[a-z0-9][a-z0-9-]{0,29}$`, UI hiện tiền tố cố định; tên đầy đủ (vd `alice_shop`) dùng để hiển thị, gọi API/CLI và làm tên database bên trong engine. Vì tiền tố là username của chính mình nên tên DB **tự nhiên duy nhất toàn hệ thống** mà không lộ DB của tenant khác (trùng chỉ có thể là với DB của chính mình).
-- **Tên nội bộ không hiển thị** lấy từ `node_key = hex(sha256("<username owner>_<tên DB>_<unix nano lúc tạo>"))[:16]`, lưu ở `databases.node_key` (UNIQUE): container + volume `fridge-<engine>-<node_key>`; superuser `su_<node_key>` (thay cho `su_<tên DB>` ở mục 13b-2). Restore vào node mới sinh `node_key` mới.
+- **Tên nội bộ không hiển thị** lấy từ `node_key = hex(sha256("<username owner>_<tên DB>_<unix nano lúc tạo>"))[:16]`, lưu ở `databases.node_key` (UNIQUE): container + volume `fridge-<engine>-<node_key>`; network riêng `fridge-node-<node_key>` (mục 13d); superuser `su_<node_key>`. Restore vào node mới sinh `node_key` mới.
 - **Domain đăng ký trước** (không xác thực DNS — có trường hợp dùng DNS nội bộ): bảng `domains(id, owner_id → users, name UNIQUE, created_at)`. Owner thêm/xóa domain của mình; domain trùng với domain đã có (của bất kỳ ai) → báo chung "domain không đăng ký được" (không nói ai đang dùng). Không xóa được domain đang có DB dùng. Admin thấy mọi domain, xóa được domain không còn dùng *(lựa chọn của Claude)*.
-- **Tạo/restore DB**: chọn domain từ danh sách đã đăng ký của **owner** node (dropdown); `databases.domain_id → domains`. Một domain dùng được cho nhiều DB khác engine, mỗi engine một DB (giữ unique `(engine, domain)`) *(lựa chọn của Claude)*.
-- **Dữ liệu giai đoạn 1**: lúc tạo admin đầu tiên, domain của các DB cũ được đăng ký cho admin và gắn `domain_id`; DB cũ giữ tên container/volume cũ (`node_key` rỗng = kiểu cũ).
+- **Tạo/restore DB**: chọn domain từ danh sách đã đăng ký của **owner** node (dropdown); `databases.domain_id → domains ON DELETE SET NULL`. "Đang dùng" (chặn xóa domain, đếm số DB) chỉ tính DB **đang hoạt động** (trạng thái khác `error`/`deleted`). Một domain dùng được cho nhiều DB khác engine, mỗi engine một DB (giữ unique `(engine, domain)`) *(lựa chọn của Claude)*.
+- **Dữ liệu giai đoạn 1**: lúc tạo admin đầu tiên, domain của các DB cũ được đăng ký cho admin (`SELECT DISTINCT domain … ON CONFLICT (name) DO NOTHING` — nhiều DB cũ chung domain không lỗi) và gắn `domain_id`; DB cũ giữ tên container/volume cũ (`node_key` rỗng = kiểu cũ).
 - **Gọi DB bằng tên** (API `{db}`, CLI): dùng tên đầy đủ có tiền tố — luôn duy nhất.
 - Audit: `domain.register`, `domain.remove`. CLI: `fridge domains add|ls|rm`. Web: mục **Domains** (bảng của mình; admin thấy tất cả + cột owner).
 
@@ -248,8 +257,27 @@ Lệnh chạy **bên trong container** (`docker exec <fridge> /fridge recover �
 - Sự kiện ghi: setup, đăng nhập (thành công/thất bại), đăng xuất, đổi mật khẩu, lời mời (tạo/nhận), khóa/mở, nâng/hạ quyền, thu hồi phiên; tạo DB, thêm/gỡ người quản lý, **xem mật khẩu DB**, Backup now, tải backup, restore, kiểm tra kỹ; destination tạo/sửa/xóa/dùng chung/test; lịch backup tạo/sửa/xóa; allowlist; pull/prune image; mọi lệnh `fridge recover`; backup theo lịch và xóa do retention (actor `system`).
 - **Xem mật khẩu DB thành hành động riêng**: API chi tiết DB trả connection string **đã che mật khẩu**; mật khẩu thật chỉ trả qua một endpoint riêng (nút "Hiện"/"Copy" trên web, `fridge show --reveal` trên CLI) và mỗi lần gọi đều ghi audit.
 - **Ai xem** (người dùng chốt): admin xem toàn bộ; user thường xem hành động của chính mình + mọi hành động trên DB mình là owner. Giữ **1 năm**.
-- Trang **Audit log**: lọc theo người, hành động, đối tượng/DB, khoảng thời gian; phân trang; **xuất CSV** (theo đúng bộ lọc và quyền). CLI `fridge audit [--user] [--action] [--db] [--since]`.
-- Trang **Hoạt động** (admin) — "ai đang làm gì": các job đang chạy (backup, restore, kiểm tra kỹ, pull image) kèm người khởi động + thời điểm; người đang online (phiên có hoạt động trong **5 phút** gần nhất *(lựa chọn của Claude)*); tự làm mới bằng polling.
+- Trang **Audit log**: lọc theo người (username), hành động, đối tượng/DB (tên hoặc id), khoảng thời gian; phân trang; **xuất CSV** (theo đúng bộ lọc và quyền). CLI `fridge audit [--user] [--action] [--db] [--since]`.
+- Trang **Hoạt động** (admin) — "ai đang làm gì": các job đang chạy (backup, restore, kiểm tra kỹ, pull image) kèm người khởi động (cột `started_by_id` của job; NULL = `system`) + thời điểm; người đang online (phiên có hoạt động trong **5 phút** gần nhất *(lựa chọn của Claude)*, kèm username); tự làm mới bằng polling.
+
+### 13d. Cô lập mạng giữa các node (người dùng chốt — làm ngay giai đoạn 2)
+
+Mục tiêu: shell của tenant **bên trong container DB của chính họ** (vd qua `COPY … TO PROGRAM` nếu có superuser) không chạm được `fridge-meta`, API Fridge `:8080`, node của tenant khác, hay internet.
+
+- **Mạng điều khiển `fridge-net`**: chỉ `traefik`, `fridge`, `fridge-meta` (+ `minio` khi chạy profile dev). Không container DB nào nằm trên `fridge-net`.
+- **Mỗi node DB một network riêng** `fridge-node-<node_key>`, tạo với `Internal: true` (không ra ngoài, không tới host). Chỉ gắn container DB đó + container Traefik. Backend route Traefik giữ nguyên `<tên container>:<port>` (container có alias = tên container trên network đó).
+- Fridge (qua Docker API, `NetworkConnect`) gắn Traefik vào network của node khi provision; khi gỡ node: tách Traefik rồi xóa network. Container Traefik xác định bằng env `FRIDGE_TRAEFIK_CONTAINER` (mặc định `fridge-traefik`; compose đặt `container_name: fridge-traefik`). Provision lỗi → rollback cả network.
+- **Đối soát lúc khởi động**: bảo đảm Traefik được gắn vào mọi network node đang có; DB giai đoạn 1 (đang nằm trên `fridge-net`) được chuyển sang network riêng (tạo network, gắn DB + Traefik, tách DB khỏi `fridge-net`). File route không đổi vì alias = tên container.
+- Container tạm (kiểm tra kỹ dump) vẫn chạy **không network**.
+- Fridge không cần nằm trên network node (healthcheck/backup/restore đều qua Docker exec).
+- Kiểm thử: unit (runtime giả ghi lại các lệnh tạo/gắn/tách/xóa network, cả rollback khi lỗi) + integration Docker thật (từ trong node A: `pg_isready -h <container node B>` và `-h fridge-meta` đều thất bại; Traefik → node vẫn tới được).
+
+### 13e. Chặn SSRF qua destination (người dùng chốt)
+
+- Endpoint của destination do **user không phải admin** tạo/sửa **không được** resolve tới: loopback, link-local (gồm `169.254.0.0/16`, `fe80::/10`), địa chỉ unspecified, hoặc bất kỳ IP nào trong các network Docker của chính Fridge (subnet của `fridge-net` và mọi `fridge-node-*`); cũng chặn các tên `fridge`, `fridge-meta`, `traefik`, `fridge-traefik`. RFC1918 nói chung **vẫn cho phép** (MinIO của người dùng trên server khác).
+- Kiểm hai lần: lúc tạo/sửa (resolve tên) **và lúc kết nối** — `net.Dialer.Control` tùy biến trong objstore kiểm IP thật đang dial (chống DNS rebinding).
+- Admin đặt setting `s3_endpoint_allowlist` (danh sách host) — host trong danh sách được bỏ qua kiểm tra. Destination do admin tạo không bị kiểm.
+- Lỗi trả thông điệp chung: **"endpoint không được phép"** (không nói lý do cụ thể).
 
 ### 14. Trang Images — quản lý docker image của DB (người dùng chốt)
 
@@ -276,8 +304,8 @@ Tên endpoint/JSON cụ thể, cấu trúc file JS, cách vendor Bootstrap (phi�
 2. Bắt gói tin (hoặc log request phía server) khi tạo admin và đăng nhập: không có mật khẩu dạng rõ; DB chỉ chứa salt/stored_key/server_key.
 3. Test vector SCRAM-SHA-256 của RFC 7677 pass cho phía server (Go) và phía CLI; JS kiểm bằng cùng vector trong một trang test.
 4. Sai mật khẩu 5 lần/phút → khóa 5 phút; username không tồn tại trả cùng thông điệp và cùng dạng `server_first`.
-5. User A tạo DB `a1` và destination `dA`; user B không thấy `a1`/`dA` (404 qua API, không có trong UI); A thêm B làm người quản lý `a1` → B thấy và backup được, nhưng không thêm người khác được; admin thấy tất cả.
-6. Admin tạo destination `dAdmin` (mặc định riêng: B không thấy), rồi đánh dấu `shared` → B chọn được khi đặt lịch, không thấy secret, không duyệt được bucket; chỉ thấy backup của DB mình trên destination đó.
+5. User `alice` tạo DB `alice_app` và destination `dAlice`; user `bob` không thấy `alice_app`/`dAlice` (404 qua API, không có trong UI); alice thêm bob làm người quản lý `alice_app` → bob thấy và backup được, nhưng không thêm người khác được; admin thấy tất cả.
+6. Admin tạo destination `dAdmin` (mặc định riêng: bob không thấy), rồi đánh dấu `shared` → bob chọn được khi đặt lịch, không thấy secret, không duyệt được bucket; chỉ thấy backup của DB mình trên destination đó.
 7. Session: đăng xuất/đổi mật khẩu/khóa user → session ID cũ (web và CLI) trả 401 ngay; quá 12h không hoạt động → 401.
 8. CSRF: POST bằng cookie với `Origin` lạ → 403.
 9. `http://localhost:8080` redirect sang `https://…:8443`; cert là cert tự sinh từ CA nội bộ, có SAN `localhost` và các tên trong `FRIDGE_PUBLIC_HOSTS`.
@@ -288,3 +316,6 @@ Tên endpoint/JSON cụ thể, cấu trúc file JS, cách vendor Bootstrap (phi�
 14. "Kiểm tra kỹ" một `.dump` bị cắt nửa cuối → `failed` kèm lỗi của pg_restore; một `.sql.gz` cụt → `failed` (lỗi gzip); file nguyên vẹn → `ok` với version nguồn và số mục TOC; container tạm không còn sau khi xong.
 15. Images (admin): bảng chỉ có image catalog/DB, cột số DB đúng (tạo 2 DB `postgres:16`, dừng 1 → vẫn đếm 2); "Pull" `postgres:15` → xuất hiện; Prune preview chỉ liệt kê image không DB nào dùng, xóa xong image đang dùng còn nguyên; user thường gọi `/api/images` → 403.
 16. Kiểm tra bản mới: pull một tag cũ theo digest rồi gắn lại tag (vd `postgres:18` trỏ về bản 18.0) → "Kiểm tra cập nhật" báo `18.0 → 18.x`; tắt mạng ra ngoài → hiện "không kiểm tra được", trang vẫn dùng bình thường.
+17. Cô lập mạng: từ trong container node A, `pg_isready -h <container node B>` và `pg_isready -h fridge-meta` đều thất bại; `psql` qua Traefik tới node A vẫn chạy; `docker network inspect fridge-net` không có container DB nào.
+18. SSRF: bob tạo destination với endpoint `http://fridge-meta:5432`, `http://127.0.0.1:9000`, `http://169.254.169.254` → 400 "endpoint không được phép"; `http://192.168.1.50:9000` → được; admin thêm host vào `s3_endpoint_allowlist` → host đó được phép.
+19. Username `alice_x` hoặc `Al` bị từ chối ở setup/lời mời (và bởi CHECK trong DB).

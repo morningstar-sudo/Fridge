@@ -51,7 +51,7 @@ Team nội bộ (dev/ops) hiện tạo DB bằng tay/docker-compose cho từng d
 ### Stack (lựa chọn của Claude, người dùng giao quyền)
 
 - **Go**, 1 binary `fridge`: `fridge server` (API + UI + scheduler) và các lệnh CLI gọi API.
-- **Postgres 17** cho metadata (driver `github.com/jackc/pgx/v5`), chạy container riêng `fridge-meta` trong compose — không do Fridge quản lý, không route qua Traefik, không publish port. *(Người dùng đổi từ SQLite sang Postgres.)*
+- **Metadata DB = Postgres 18** (người dùng chốt, trước là 17; image `postgres:18`, volume mount ở `/var/lib/postgresql`) (driver `github.com/jackc/pgx/v5`), chạy container riêng `fridge-meta` trong compose — không do Fridge quản lý, không route qua Traefik, không publish port. *(Người dùng đổi từ SQLite sang Postgres.)*
 - **Docker Engine SDK** (`github.com/docker/docker/client`).
 - **Traefik v3** (TCP routers, `HostSNI`, có hỗ trợ Postgres STARTTLS) — file provider, Fridge ghi file dynamic, Traefik watch.
 - **ProxySQL 2.x** — Fridge cấu hình qua admin interface (port 6032, giao thức MySQL).
@@ -263,14 +263,14 @@ deploy/traefik.yml          # static config
 
 ## Hai user trên mỗi node — ánh xạ theo engine (áp dụng khi thêm engine ở giai đoạn 4)
 
-Mỗi node có **superuser riêng** `su_<tên DB>` (Fridge giữ; owner/admin xem và rotate) và **user ứng dụng** (người dùng tự đặt hoặc ngẫu nhiên; không phải superuser; toàn quyền trên database của nó). Chi tiết ở `2026-10-20-fridge-web-admin-design.md` mục 13b-2.
+Mỗi node có **superuser riêng** `su_<node_key>` (Fridge giữ; owner/admin xem và rotate) và **user ứng dụng** (người dùng tự đặt hoặc ngẫu nhiên; không phải superuser; toàn quyền trên database của nó). Chi tiết ở `2026-10-20-fridge-web-admin-design.md` mục 13b-2.
 
 | Engine | Superuser | User ứng dụng | Ghi chú |
 |---|---|---|---|
 | PostgreSQL | `POSTGRES_USER` | owner database + schema `public`, `NOSUPERUSER NOCREATEDB NOCREATEROLE` | giai đoạn 2 |
 | MongoDB | root trong `admin` (`MONGO_INITDB_ROOT_*`) | user role `dbOwner` trên database của nó | |
-| MySQL / MariaDB | `su_<tên>` `ALL PRIVILEGES ON *.* WITH GRANT OPTION`; `root` nội bộ có mật khẩu ngẫu nhiên riêng, không cấp cho ai | `ALL PRIVILEGES ON <db>.*` | ProxySQL route theo username → **user ứng dụng phải duy nhất trên mọi node MySQL/MariaDB** (kiểm khi tạo); `su_<tên>` vốn đã duy nhất nên cũng đi qua ProxySQL được |
-| Redis (≥ 6) | user ACL `su_<tên>` `on +@all ~* &*`; user `default` tắt | user ACL `on ~* &* +@all -@admin -@dangerous` | Redis không có "database có owner" → gần tương đương: đọc ghi mọi key, không lệnh quản trị/nguy hiểm |
+| MySQL / MariaDB | `su_<node_key>` `ALL PRIVILEGES ON *.* WITH GRANT OPTION`; `root` nội bộ có mật khẩu ngẫu nhiên riêng, không cấp cho ai | `ALL PRIVILEGES ON <db>.*` | ProxySQL route theo username → user ứng dụng phải duy nhất trên mọi node MySQL/MariaDB: **đã được bảo đảm** bởi tiền tố bắt buộc `<username>_` (username tài khoản không có `_`, nên tên của hai owner khác nhau không bao giờ trùng) + unique index theo owner — không cần kiểm toàn cục thêm; `su_<node_key>` duy nhất (`node_key` UNIQUE) nên cũng đi qua ProxySQL được |
+| Redis (≥ 6) | user ACL `su_<node_key>` `on +@all ~* &*`; user `default` tắt | user ACL `on ~* &* +@all -@admin -@dangerous` | Redis không có "database có owner" → gần tương đương: đọc ghi mọi key, không lệnh quản trị/nguy hiểm |
 
 ## Giai đoạn triển khai
 
@@ -278,7 +278,7 @@ Mỗi node có **superuser riêng** `su_<tên DB>` (Fridge giữ; owner/admin xe
 2. **Web admin, tài khoản & phân quyền theo tài nguyên** — thiết kế riêng: `2026-10-20-fridge-web-admin-design.md` (Vanilla JS + Bootstrap 5, setup token, SCRAM-SHA-256, session stateful, admin/user, owner DB/destination, HTTPS tự ký). Thay cho mục 6 (Auth & quyền) của tài liệu này.
 3. **Health, monitor & giới hạn tài nguyên** (mục 9–11): health checker + `/api/health` + cảnh báo chuyển trạng thái; collector host/DB + lịch sử 24h + `/metrics` + cảnh báo ngưỡng; giới hạn CPU/RAM bắt buộc, quota disk cứng bằng loop device, tinh chỉnh Postgres theo RAM, `fridge top`, `fridge limits`.
 4. **Thêm 4 engine**: Mongo, Redis (Traefik SNI), MySQL, MariaDB (ProxySQL) — mỗi engine kèm lệnh đếm kết nối, tinh chỉnh theo RAM, healthcheck.
-5. **An toàn**: ACME DNS-01, test-restore định kỳ, audit, soft-delete, restore ghi đè, reconcile loop, alert no-backup-26h.
+5. **An toàn**: ACME DNS-01, test-restore định kỳ, soft-delete, restore ghi đè, reconcile loop, alert no-backup-26h.
 6. **Bổ sung Web UI** cho các giai đoạn sau: nhập giới hạn tài nguyên, trang Health, biểu đồ tài nguyên 24h, log chạy trực tiếp (SSE), các engine mới.
 
 ## Để builder tự quyết
