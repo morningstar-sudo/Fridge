@@ -79,6 +79,17 @@ func TestRunExecRemove(t *testing.T) {
 		t.Fatalf("expected stdin error, got code %d", code)
 	}
 
+	// a stalled exec must honour ctx (the backup timeout depends on it)
+	tctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	start := time.Now()
+	if code, err := c.Exec(tctx, id, []string{"sleep", "300"}, nil, io.Discard, io.Discard); err == nil {
+		t.Fatalf("stalled exec: want error, got code %d", code)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("stalled exec returned after %s", d)
+	}
+
 	if err := c.Remove(ctx, id, spec.Volume); err != nil {
 		t.Fatal(err)
 	}

@@ -153,6 +153,9 @@ func TestRestoreGarbageRollsBack(t *testing.T) {
 	if db.Status != "error" || len(rt.removes) != 1 || rt.removes[0].ID != "ctr-"+db.Volume {
 		t.Fatalf("db %+v removes %+v", db, rt.removes)
 	}
+	if s, _ := a.Store.ListSchedules(context.Background(), db.ID); len(s) != 0 {
+		t.Fatalf("rolled-back node kept schedules: %+v", s)
+	}
 }
 
 func TestRestoreBadGzipRollsBack(t *testing.T) {

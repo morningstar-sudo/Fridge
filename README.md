@@ -57,6 +57,7 @@ Stopping `fridge` does not interrupt database traffic; Traefik keeps routing wit
 | `FRIDGE_NETWORK` | `fridge-net` | Docker network for database containers |
 | `FRIDGE_API_BACKEND` | `http://fridge:8080` | URL Traefik uses to reach the API |
 | `FRIDGE_ALERT_WEBHOOK` | empty (log only) | receives `POST {"text": "..."}` on failed backups/restores |
+| `TZ` | `UTC` | time zone the backup schedules' cron expressions run in (e.g. `Asia/Ho_Chi_Minh`); compose passes it through from `deploy/.env` |
 
 Compose also reads `FRIDGE_META_PASSWORD` (use URL-safe characters, it goes into `FRIDGE_DATABASE_URL`).
 `fridge healthcheck` exits 0 when `/readyz` answers 200 (used by the compose healthcheck).

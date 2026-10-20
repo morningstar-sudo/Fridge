@@ -65,6 +65,7 @@ services:
       FRIDGE_TRAEFIK_DIR: /traefik
       FRIDGE_NETWORK: fridge-net
       FRIDGE_API_BACKEND: http://fridge:8080
+      TZ: ${TZ:-UTC} # time zone of backup schedules
     volumes:
       - fridge-data:/data
       - traefik:/traefik

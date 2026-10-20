@@ -144,6 +144,10 @@ func (c *Client) Exec(ctx context.Context, id string, cmd []string, stdin io.Rea
 		return -1, err
 	}
 	defer hj.Close()
+	// The hijacked conn ignores ctx; closing it is the only way to unblock StdCopy and the stdin copy.
+	// ponytail: the exec'd process keeps running in the container (Docker has no exec-kill API).
+	stop := context.AfterFunc(ctx, func() { hj.Close() })
+	defer stop()
 	inErr := make(chan error, 1)
 	if stdin != nil {
 		go func() {
@@ -156,6 +160,9 @@ func (c *Client) Exec(ctx context.Context, id string, cmd []string, stdin io.Rea
 		}()
 	}
 	_, outErr := stdcopy.StdCopy(stdout, stderr, hj.Reader)
+	if err := ctx.Err(); err != nil {
+		return -1, fmt.Errorf("exec: %w", err)
+	}
 	select {
 	case err := <-inErr:
 		return -1, fmt.Errorf("exec stdin: %w", err)

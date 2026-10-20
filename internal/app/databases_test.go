@@ -162,9 +162,16 @@ func TestSetAllowlist(t *testing.T) {
 func TestRemoveNodeCleansProvisionedDatabase(t *testing.T) {
 	a, rt, _ := newTestApp(t)
 	ctx := context.Background()
+	a.Sched = NewScheduler(a)
+	if err := a.Store.CreateDestination(ctx, &store.Destination{Name: "s3", Provider: "s3"}); err != nil {
+		t.Fatal(err)
+	}
 	d, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "abc", Domain: "abc.com"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if s, _ := a.Store.ListSchedules(ctx, d.ID); len(s) != 1 || len(a.Sched.c.Entries()) != 1 {
+		t.Fatalf("precondition: schedules %+v entries %d", s, len(a.Sched.c.Entries()))
 	}
 	files := []string{
 		filepath.Join(a.TraefikDir, "dynamic", fmt.Sprintf("db-%d.yml", d.ID)),
@@ -189,6 +196,9 @@ func TestRemoveNodeCleansProvisionedDatabase(t *testing.T) {
 	if got, _ := a.Store.GetDatabase(ctx, d.ID); got.Status != "error" {
 		t.Fatalf("status = %s", got.Status)
 	}
+	if s, _ := a.Store.ListSchedules(ctx, d.ID); len(s) != 0 || len(a.Sched.c.Entries()) != 0 {
+		t.Fatalf("schedules %+v entries %d", s, len(a.Sched.c.Entries()))
+	}
 }
 
 func TestCreateDatabaseRollbackSurvivesCancelledContext(t *testing.T) {
@@ -205,5 +215,71 @@ func TestCreateDatabaseRollbackSurvivesCancelledContext(t *testing.T) {
 	dbs, _ := a.Store.ListDatabases(context.Background())
 	if len(dbs) != 1 || dbs[0].Status != "error" {
 		t.Fatalf("dbs = %+v", dbs)
+	}
+}
+
+func TestRecoverInterrupted(t *testing.T) {
+	a, rt, _ := newTestApp(t)
+	ctx := context.Background()
+	dest := store.Destination{Name: "s3", Provider: "s3"}
+	if err := a.Store.CreateDestination(ctx, &dest); err != nil {
+		t.Fatal(err)
+	}
+	keep, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "keep", Domain: "keep.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	half := store.Database{Name: "half", Engine: "postgres", Version: "17", Domain: "half.com", TLSMode: "internal",
+		User: "half_app", Volume: "fridge-postgres-half", Status: "creating"}
+	if err := a.Store.CreateDatabase(ctx, &half); err != nil {
+		t.Fatal(err)
+	}
+	tgt, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "tgt", Domain: "tgt.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := store.Restore{DestinationID: dest.ID, S3Key: "k.dump", SourceEngine: "postgres", Mode: "new"}
+	if err := a.Store.StartRestore(ctx, &r); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Store.SetRestoreTarget(ctx, r.ID, tgt.ID); err != nil {
+		t.Fatal(err)
+	}
+	a.Sched = NewScheduler(a)
+
+	if _, err := a.Store.FailRunning(ctx, "interrupted by restart"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.RecoverInterrupted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	want := []removeCall{{"fridge-postgres-half", "fridge-postgres-half"}, {"ctr-fridge-postgres-tgt", "fridge-postgres-tgt"}}
+	if len(rt.removes) != 2 || rt.removes[0] != want[0] || rt.removes[1] != want[1] {
+		t.Fatalf("removes = %+v", rt.removes)
+	}
+	for _, id := range []int64{half.ID, tgt.ID} {
+		if got, _ := a.Store.GetDatabase(ctx, id); got.Status != "error" {
+			t.Fatalf("db %d status = %s", id, got.Status)
+		}
+	}
+	if s, _ := a.Store.ListSchedules(ctx, tgt.ID); len(s) != 0 {
+		t.Fatalf("target schedules = %+v", s)
+	}
+	if got, _ := a.Store.GetDatabase(ctx, keep.ID); got.Status != "running" {
+		t.Fatalf("keep status = %s", got.Status)
+	}
+	if s, _ := a.Store.ListSchedules(ctx, keep.ID); len(s) != 1 {
+		t.Fatalf("keep schedules = %+v", s)
+	}
+	if len(rt.alerts) != 1 || !strings.Contains(rt.alerts[0], "half, tgt") {
+		t.Fatalf("alerts = %q", rt.alerts)
+	}
+	for _, n := range []string{"half", "tgt"} {
+		if _, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: n, Domain: n + ".com"}); err != nil {
+			t.Fatalf("reuse %s: %v", n, err)
+		}
+	}
+	if err := a.RecoverInterrupted(ctx); err != nil || len(rt.removes) != 2 || len(rt.alerts) != 1 {
+		t.Fatalf("second run: err=%v removes=%+v alerts=%q", err, rt.removes, rt.alerts)
 	}
 }

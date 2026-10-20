@@ -164,3 +164,56 @@ func TestListEnabledSchedules(t *testing.T) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
 }
+
+func TestDeleteSchedulesForDatabase(t *testing.T) {
+	s := storetest.New(t)
+	db, dest := seed(t, s, "a")
+	db2, _ := seed(t, s, "b")
+	for _, id := range []int64{db.ID, db.ID, db2.ID} {
+		if err := s.CreateSchedule(ctx, &store.Schedule{DatabaseID: id, DestinationID: dest.ID, Cron: "0 2 * * *", Prefix: "fridge", KeepLatest: 7, Enabled: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.DeleteSchedulesForDatabase(ctx, db.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteSchedulesForDatabase(ctx, db.ID); err != nil { // none left: still fine
+		t.Fatal(err)
+	}
+	if got, _ := s.ListSchedules(ctx, db.ID); len(got) != 0 {
+		t.Fatalf("left: %+v", got)
+	}
+	if got, _ := s.ListSchedules(ctx, db2.ID); len(got) != 1 {
+		t.Fatalf("other db: %+v", got)
+	}
+}
+
+func TestOrphanedRestoreTargets(t *testing.T) {
+	s := storetest.New(t)
+	live, dest := seed(t, s, "a")   // target of a failed restore, still running -> orphan
+	gone, _ := seed(t, s, "b")      // target of a failed restore, already torn down
+	ok, _ := seed(t, s, "c")        // target of a successful restore
+	overwrite, _ := seed(t, s, "d") // target of a failed overwrite restore: never touched
+	if err := s.SetDatabaseState(ctx, gone.ID, "error", ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		db           store.Database
+		mode, status string
+	}{{live, "new", "failed"}, {gone, "new", "failed"}, {ok, "new", "ok"}, {overwrite, "overwrite", "failed"}} {
+		r := &store.Restore{DestinationID: dest.ID, S3Key: "k", SourceEngine: "postgres", Mode: c.mode}
+		if err := s.StartRestore(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetRestoreTarget(ctx, r.ID, c.db.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.FinishRestore(ctx, r.ID, c.status, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.OrphanedRestoreTargets(ctx)
+	if err != nil || len(got) != 1 || got[0].ID != live.ID || got[0].Name != "a" {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+}

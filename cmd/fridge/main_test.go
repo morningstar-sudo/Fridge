@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -25,13 +26,14 @@ func TestServerRequiresEnv(t *testing.T) {
 }
 
 func TestHealthcheck(t *testing.T) {
-	status := http.StatusOK
+	var status atomic.Int32
+	status.Store(http.StatusOK)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/readyz" {
 			http.NotFound(w, r)
 			return
 		}
-		w.WriteHeader(status)
+		w.WriteHeader(int(status.Load()))
 	}))
 	defer srv.Close()
 	u, _ := url.Parse(srv.URL)
@@ -39,7 +41,7 @@ func TestHealthcheck(t *testing.T) {
 	if got := healthcheck(); got != 0 {
 		t.Fatalf("ready: exit %d", got)
 	}
-	status = http.StatusServiceUnavailable
+	status.Store(http.StatusServiceUnavailable)
 	if got := healthcheck(); got != 1 {
 		t.Fatalf("not ready: exit %d", got)
 	}

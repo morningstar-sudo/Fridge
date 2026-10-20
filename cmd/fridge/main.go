@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // distroless has no zoneinfo; lets TZ pick the schedules' time zone
 
 	"fridge/internal/alert"
 	"fridge/internal/api"
@@ -96,6 +97,9 @@ func runServer() error {
 	a := &app.App{
 		Store: st, Box: box, RT: rt, CA: ca, TraefikDir: traefikDir, APIBackend: apiBackend,
 		HealthTimeout: 120 * time.Second, Alert: alert.Webhook(os.Getenv("FRIDGE_ALERT_WEBHOOK")),
+	}
+	if err := a.RecoverInterrupted(ctx); err != nil { // after FailRunning, before the scheduler loads
+		return fmt.Errorf("recover interrupted nodes: %w", err)
 	}
 	allow, err := a.Allowlist(ctx)
 	if err != nil {

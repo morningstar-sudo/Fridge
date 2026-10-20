@@ -112,6 +112,11 @@ func (s *Store) DeleteSchedule(ctx context.Context, id int64) error {
 	return s.exec1(ctx, `DELETE FROM backup_schedules WHERE id=$1`, id)
 }
 
+func (s *Store) DeleteSchedulesForDatabase(ctx context.Context, databaseID int64) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM backup_schedules WHERE database_id=$1`, databaseID)
+	return mapErr(err)
+}
+
 // --- backups ---
 
 // StartBackup inserts a running backup; ErrConflict if the database already has one.
@@ -166,6 +171,14 @@ func (s *Store) GetRestore(ctx context.Context, id int64) (Restore, error) {
 	var x Restore
 	err := x.scan(s.pool.QueryRow(ctx, `SELECT `+restoreCols+` FROM restores WHERE id=$1`, id))
 	return x, mapErr(err)
+}
+
+// OrphanedRestoreTargets returns live nodes that a failed mode=new restore was building
+// (e.g. interrupted by a restart, see FailRunning) and that were never torn down.
+func (s *Store) OrphanedRestoreTargets(ctx context.Context) ([]Database, error) {
+	return list(ctx, s, func(d *Database, r scanner) error { return d.scan(r) },
+		`SELECT `+dbCols+` FROM databases WHERE status NOT IN ('error','deleted')
+		AND id IN (SELECT target_database_id FROM restores WHERE status='failed' AND mode='new') ORDER BY id`)
 }
 
 // FailRunning marks every running backup and restore failed; returns the row count.

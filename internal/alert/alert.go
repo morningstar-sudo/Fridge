@@ -32,5 +32,8 @@ func Webhook(url string) func(ctx context.Context, text string) {
 			return
 		}
 		resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			log.Printf("alert webhook: %s", resp.Status)
+		}
 	}
 }

@@ -34,7 +34,7 @@ func (postgres) Spec(p Params) Spec {
 		},
 		VolumePath:  volume,
 		Port:        5432,
-		Healthcheck: []string{"CMD-SHELL", fmt.Sprintf("pg_isready -U %s -d %s", p.User, p.Name)},
+		Healthcheck: []string{"CMD-SHELL", fmt.Sprintf("pg_isready -h 127.0.0.1 -U %s -d %s", p.User, p.Name)},
 	}
 }
 

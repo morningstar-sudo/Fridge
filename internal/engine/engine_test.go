@@ -53,6 +53,15 @@ func TestPostgresVolumePath(t *testing.T) {
 	}
 }
 
+// Over TCP, so the entrypoint's socket-only init server never reads as healthy.
+func TestPostgresHealthcheckUsesTCP(t *testing.T) {
+	e, _, _ := Get("postgres")
+	hc := e.Spec(Params{Name: "abc", User: "u", Version: "17"}).Healthcheck
+	if len(hc) != 2 || hc[0] != "CMD-SHELL" || hc[1] != "pg_isready -h 127.0.0.1 -U u -d abc" {
+		t.Fatalf("healthcheck = %q", hc)
+	}
+}
+
 func TestPostgresRestoreCmd(t *testing.T) {
 	e, _, err := Get("postgres")
 	if err != nil {

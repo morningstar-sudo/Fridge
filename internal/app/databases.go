@@ -177,4 +177,43 @@ func (a *App) removeNode(ctx context.Context, d store.Database) {
 	if err := a.Store.SetDatabaseState(ctx, d.ID, "error", ""); err != nil {
 		log.Printf("removeNode %s: set state: %v", d.Name, err)
 	}
+	// A dead node must not keep a schedule: it would alert nightly and pin its destination.
+	if err := a.Store.DeleteSchedulesForDatabase(ctx, d.ID); err != nil {
+		log.Printf("removeNode %s: delete schedules: %v", d.Name, err)
+	} else if a.Sched != nil {
+		if err := a.Sched.Reload(ctx); err != nil {
+			log.Printf("removeNode %s: reload scheduler: %v", d.Name, err)
+		}
+	}
+}
+
+// RecoverInterrupted tears down nodes left half-built by a restart: databases still "creating"
+// and the targets of restores that failed (FailRunning marks interrupted ones failed). Run it
+// after FailRunning, before serving.
+func (a *App) RecoverInterrupted(ctx context.Context) error {
+	dbs, err := a.Store.ListDatabases(ctx)
+	if err != nil {
+		return err
+	}
+	var victims []store.Database
+	for _, d := range dbs {
+		if d.Status == "creating" {
+			victims = append(victims, d)
+		}
+	}
+	targets, err := a.Store.OrphanedRestoreTargets(ctx)
+	if err != nil {
+		return err
+	}
+	victims = append(victims, targets...)
+	if len(victims) == 0 {
+		return nil
+	}
+	names := make([]string, len(victims))
+	for i, d := range victims {
+		a.removeNode(ctx, d)
+		names[i] = d.Name
+	}
+	a.alertf(ctx, "removed %d node(s) interrupted by restart: %s", len(victims), strings.Join(names, ", "))
+	return nil
 }
