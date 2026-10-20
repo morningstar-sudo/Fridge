@@ -223,13 +223,23 @@ Lệnh chạy **bên trong container** (`docker exec <fridge> /fridge recover �
 
 ### 13b-2. Hai user trên mỗi node DB (người dùng chốt)
 
-- **Superuser riêng của từng DB** (người dùng chốt, thay cho phương án dùng chung theo owner — để áp được cho mọi engine, kể cả MySQL/MariaDB route theo username qua ProxySQL): mỗi lần tạo/restore node, Fridge sinh superuser `su_<tên DB>` + mật khẩu ngẫu nhiên (`crypto/rand.Text()`), lưu mã hóa trong `databases.admin_user` / `databases.admin_password_enc`. Tên duy nhất theo DB đang hoạt động.
-  - Container khởi tạo với `POSTGRES_USER = su_<tên>`, `POSTGRES_PASSWORD = mật khẩu superuser`, `POSTGRES_DB = <tên DB>`. Healthcheck, backup (`pg_dump`), restore, kiểm tra kỹ chạy bằng superuser này (qua socket nội bộ, không cần mật khẩu).
+- **Superuser riêng của từng DB** (người dùng chốt, thay cho phương án dùng chung theo owner — để áp được cho mọi engine, kể cả MySQL/MariaDB route theo username qua ProxySQL): mỗi lần tạo/restore node, Fridge sinh superuser `su_<node_key>` (mục 13b-3) + mật khẩu ngẫu nhiên (`crypto/rand.Text()`), lưu mã hóa trong `databases.admin_user` / `databases.admin_password_enc`. Tên duy nhất theo DB đang hoạt động.
+  - Container khởi tạo với `POSTGRES_USER = su_<node_key>`, `POSTGRES_PASSWORD = mật khẩu superuser`, `POSTGRES_DB = <tên DB>`. Healthcheck, backup (`pg_dump`), restore, kiểm tra kỹ chạy bằng superuser này (qua socket nội bộ, không cần mật khẩu).
   - **Owner** và **admin** xem và **rotate** superuser của DB (rotate: `ALTER ROLE` trên node, thành công mới lưu mật khẩu mới). **Người quản lý không thấy** *(lựa chọn của Claude)*. Mỗi lần xem/rotate ghi audit (`superuser.reveal`, `superuser.rotate`).
 - **User ứng dụng** (tên/mật khẩu tự đặt hoặc ngẫu nhiên — mục 13b): `CREATE ROLE … LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE`, là **owner của database** và schema `public` (người dùng chốt: "owner của database") — tự tạo/sửa/xóa bảng, index, schema, extension trusted; đọc ghi dữ liệu. Tạo sau khi container healthy bằng `psql` chạy dưới superuser, SQL đưa qua stdin (mật khẩu không nằm trên dòng lệnh).
 - **Restore**: chạy bằng superuser của node mới; object được gán cho user ứng dụng (`pg_restore --no-owner --no-acl --role=<app>`; file SQL thuần được thêm `SET ROLE <app>;` ở đầu luồng).
 - Owner và người quản lý thấy connection string của user ứng dụng; connection string superuser chỉ owner/admin.
 - **DB tạo ở giai đoạn 1** (một user, là superuser): cột `databases.admin_user` rỗng = "kiểu cũ" — vẫn chạy như trước, UI gắn nhãn "kiểu cũ"; muốn chuyển sang mô hình mới thì backup → restore sang node mới *(lựa chọn của Claude)*.
+
+### 13b-3. Tên nội bộ dạng hash, tên DB theo owner, domain đăng ký trước (người dùng chốt)
+
+- **Tên DB chỉ cần duy nhất trong phạm vi owner** (không còn duy nhất toàn hệ thống → không lộ DB của tenant khác).
+- **Tên nội bộ không hiển thị** lấy từ `node_key = hex(sha256("<username owner>_<tên DB>_<unix nano lúc tạo>"))[:16]`, lưu ở `databases.node_key` (UNIQUE): container + volume `fridge-<engine>-<node_key>`; superuser `su_<node_key>` (thay cho `su_<tên DB>` ở mục 13b-2). Restore vào node mới sinh `node_key` mới.
+- **Domain đăng ký trước** (không xác thực DNS — có trường hợp dùng DNS nội bộ): bảng `domains(id, owner_id → users, name UNIQUE, created_at)`. Owner thêm/xóa domain của mình; domain trùng với domain đã có (của bất kỳ ai) → báo chung "domain không đăng ký được" (không nói ai đang dùng). Không xóa được domain đang có DB dùng. Admin thấy mọi domain, xóa được domain không còn dùng *(lựa chọn của Claude)*.
+- **Tạo/restore DB**: chọn domain từ danh sách đã đăng ký của **owner** node (dropdown); `databases.domain_id → domains`. Một domain dùng được cho nhiều DB khác engine, mỗi engine một DB (giữ unique `(engine, domain)`) *(lựa chọn của Claude)*.
+- **Dữ liệu giai đoạn 1**: lúc tạo admin đầu tiên, domain của các DB cũ được đăng ký cho admin và gắn `domain_id`; DB cũ giữ tên container/volume cũ (`node_key` rỗng = kiểu cũ).
+- **Gọi DB bằng tên** (API `{db}`, CLI): ưu tiên DB do chính người gọi sở hữu; nếu vẫn nhiều DB cùng tên trong phạm vi nhìn thấy (vd admin) → 409 "tên không duy nhất, dùng id".
+- Audit: `domain.register`, `domain.remove`. CLI: `fridge domains add|ls|rm`. Web: mục **Domains** (bảng của mình; admin thấy tất cả + cột owner).
 
 ### 13c. Audit log & Hoạt động (người dùng chốt)
 
