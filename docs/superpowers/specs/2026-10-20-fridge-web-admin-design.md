@@ -164,6 +164,26 @@ Lệnh chạy **bên trong container** (`docker exec <fridge> /fridge recover �
 - **Host trong link mời**: lấy từ `Host` của request tạo lời mời; lệnh `recover reset-password` (không có request) dùng tên đầu tiên trong `FRIDGE_PUBLIC_HOSTS`, không có thì `localhost`.
 - **Kiểm thử JS**: trang `/test/scram.html` (+ file JS riêng, tuân CSP) chạy test vector RFC 7677 trong trình duyệt, hiện PASS/FAIL. Vô hại nên nhúng luôn; không cần Node/npm.
 
+### 13. Validate file dump trước khi restore (người dùng chốt: làm cả 2 mức, mức 2 là một nút "Kiểm tra kỹ")
+
+Áp dụng cho mọi đường restore (web, CLI, API).
+
+**Mức 1 — kiểm tra phần đầu file (luôn chạy, đồng bộ, trước khi tạo node hay bản ghi restore):**
+- Đọc tối đa 64 KB đầu object bằng range GET (thêm `ReadHead(ctx, key, n)` vào ObjectStore).
+- Từ chối: object rỗng; magic bytes không khớp đuôi/engine — `.dump` phải bắt đầu `PGDMP`; `.gz` phải có header gzip và giải nén được đoạn đầu; `.sql`/`.sql.gz` (sau giải nén) phải là UTF-8 hợp lệ, không chứa byte NUL, và có dấu hiệu SQL dump (dòng chú thích `-- PostgreSQL database dump`, hoặc câu lệnh `SET`/`CREATE`/`COPY`/`INSERT` trong phần đầu).
+- Với `.dump`: parse header archive custom → lấy **version archive, version Postgres nguồn, version pg_dump**. Dùng version Postgres nguồn này cho kiểm tra tương thích (ưu tiên hơn metadata S3 và đường dẫn). Từ chối nếu header cho thấy định dạng không phải custom (tar/directory) hoặc version archive mới hơn pg_restore của node đích đọc được.
+- Lỗi → 400 với lý do cụ thể (vd "file không phải pg_dump custom format", "dump từ Postgres 17 không restore được vào 16"); không tạo gì.
+
+**Mức 2 — "Kiểm tra kỹ" (tùy chọn, một nút riêng cạnh Restore):**
+- Chạy nền như một job: bảng `dump_checks(id, destination_id, s3_key, status[running|ok|failed], result JSONB, log, started_by, started_at, finished_at)`; polling như backup/restore.
+- Tải **toàn bộ** object, stream (không ghi đĩa) vào một container tạm `postgres:<version cao nhất trong catalog>` (không network, tự xóa sau khi xong, timeout 6h):
+  - `.dump`: `pg_restore -f /dev/null` đọc từ stdin — đọc hết mọi khối dữ liệu, phát hiện file cụt/khối hỏng.
+  - `.sql.gz`: giải nén hết (kiểm CRC + độ dài cuối gzip) và kiểm UTF-8 toàn bộ; `.sql`: kiểm UTF-8 toàn bộ. (Không thực thi SQL — chỉ kiểm tính toàn vẹn.)
+- Kết quả hiển thị: OK/lỗi, dung lượng đã đọc, version nguồn, số mục trong TOC (với `.dump`), log lỗi.
+- Không bắt buộc trước khi Restore; nút Restore vẫn bấm được (người dùng tự quyết).
+- Quyền: giống quy tắc duyệt file restore (mục 5).
+- CLI: `fridge check --from <dest>:<key> [--wait]`; API: `POST /api/dump-checks`, `GET /api/dump-checks/{id}` (tên do builder quyết).
+
 ## Để builder tự quyết
 
 Tên endpoint/JSON cụ thể, cấu trúc file JS, cách vendor Bootstrap (phiên bản 5.3.x), giao diện chi tiết từng form, cách tổ chức package Go cho auth/web, chi tiết UX CLI trust CA.
@@ -182,3 +202,5 @@ Tên endpoint/JSON cụ thể, cấu trúc file JS, cách vendor Bootstrap (phi�
 10. `fridge login` → `fridge ls` chỉ hiện DB của user đó; `fridge logout` → lệnh tiếp theo 401.
 11. `docker exec … /fridge recover allowlist 10.0.0.0/8` mở lại truy cập sau khi tự khóa; `recover reset-password` in link dùng được.
 12. Sidebar thu gọn/mở, trạng thái giữ sau reload; mọi trang chạy với CSP `default-src 'self'` không lỗi console.
+13. Restore một file rỗng / file ảnh đổi đuôi `.dump` / file gzip hỏng header / `.dump` từ PG17 vào node PG16 → 400 ngay với lý do cụ thể, không có container hay bản ghi restore nào được tạo.
+14. "Kiểm tra kỹ" một `.dump` bị cắt nửa cuối → `failed` kèm lỗi của pg_restore; một `.sql.gz` cụt → `failed` (lỗi gzip); file nguyên vẹn → `ok` với version nguồn và số mục TOC; container tạm không còn sau khi xong.
