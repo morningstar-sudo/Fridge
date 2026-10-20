@@ -126,6 +126,17 @@ func (a *App) StartRestore(ctx context.Context, req RestoreRequest) (store.Resto
 		return store.Restore{}, err
 	}
 
+	// ponytail: linear scan; add a store query if database counts get large.
+	dbs, err := a.Store.ListDatabases(ctx)
+	if err != nil {
+		return store.Restore{}, err
+	}
+	for _, d := range dbs {
+		if d.Status != "error" && d.Status != "deleted" && d.Engine == srcEng && d.Domain == nr.Domain {
+			return store.Restore{}, fmt.Errorf("%w: domain %q in use", store.ErrConflict, nr.Domain)
+		}
+	}
+
 	r := store.Restore{DestinationID: req.DestinationID, S3Key: req.Key, SourceEngine: srcEng, SourceVersion: srcVer, Mode: "new"}
 	if warning != "" {
 		r.Log = warning + "\n"
@@ -180,6 +191,7 @@ func (a *App) runRestore(objs ObjectStore, eng engine.Engine, r store.Restore, n
 			if err != nil {
 				return fmt.Errorf("not a gzip file: %w", err)
 			}
+			defer zr.Close()
 			in = zr
 		}
 		code, err := a.RT.Exec(runCtx, d.ContainerID, cmd, in, io.Discard, &stderr)

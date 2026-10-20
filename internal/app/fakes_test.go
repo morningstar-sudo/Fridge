@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fridge/internal/objstore"
+	"github.com/minio/minio-go/v7"
 	"io"
 	"strings"
 	"sync"
@@ -111,7 +112,11 @@ func (f *fakeObjects) Get(ctx context.Context, key string) (io.ReadCloser, error
 func (f *fakeObjects) Meta(ctx context.Context, key string) (map[string]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.objs[key].meta, nil
+	o, ok := f.objs[key]
+	if !ok {
+		return nil, minio.ErrorResponse{Code: "NoSuchKey"} // what the real objstore surfaces
+	}
+	return o.meta, nil
 }
 
 func (f *fakeObjects) List(ctx context.Context, prefix, q string, limit int) ([]objstore.Object, bool, error) {
