@@ -281,9 +281,11 @@ func (c *cli) dispatch(args []string) error {
 	case "backup":
 		var dest string
 		var wait bool
+		timeout := 6 * time.Hour
 		pos, err := c.need(cmd, rest, 1, func(fs *flag.FlagSet) {
 			fs.StringVar(&dest, "dest", "", "destination name or id (default: schedule/first)")
 			fs.BoolVar(&wait, "wait", false, "wait until finished")
+			fs.DurationVar(&timeout, "timeout", timeout, "max time to wait with --wait")
 		})
 		if err != nil {
 			return err
@@ -298,7 +300,7 @@ func (c *cli) dispatch(args []string) error {
 		if err != nil {
 			return err
 		}
-		return c.job(b, "/api/backups/", wait)
+		return c.job(b, "/api/backups/", "fridge backups "+pos[0], wait, timeout)
 	case "backups":
 		pos, err := c.need(cmd, rest, 1, nil)
 		if err != nil {
@@ -326,6 +328,7 @@ func (c *cli) dispatch(args []string) error {
 	case "restore":
 		var from, name, domain, version, eng string
 		var wait bool
+		timeout := 6 * time.Hour
 		_, err := c.need(cmd, rest, 0, func(fs *flag.FlagSet) {
 			fs.StringVar(&from, "from", "", "<dest>:<key> (required)")
 			fs.StringVar(&name, "name", "", "new database name (required)")
@@ -333,6 +336,7 @@ func (c *cli) dispatch(args []string) error {
 			fs.StringVar(&version, "version", "", "engine version")
 			fs.StringVar(&eng, "engine", "", "engine")
 			fs.BoolVar(&wait, "wait", false, "wait until finished")
+			fs.DurationVar(&timeout, "timeout", timeout, "max time to wait with --wait")
 		})
 		if err != nil {
 			return err
@@ -353,7 +357,7 @@ func (c *cli) dispatch(args []string) error {
 		if err != nil {
 			return err
 		}
-		return c.job(b, "/api/restores/", wait)
+		return c.job(b, "/api/restores/", "GET /api/restores/<id>", wait, timeout)
 	case "allowlist":
 		if len(rest) > 0 && rest[0] == "set" {
 			pos, err := c.need("allowlist set", rest[1:], -1, nil)
@@ -437,7 +441,7 @@ func destID(s string) (int64, error) {
 }
 
 // job prints a backup/restore start response and, with wait, polls until it leaves "running".
-func (c *cli) job(b []byte, getPath string, wait bool) error {
+func (c *cli) job(b []byte, getPath, hint string, wait bool, timeout time.Duration) error {
 	var v struct {
 		ID     int64
 		Status string
@@ -446,12 +450,24 @@ func (c *cli) job(b []byte, getPath string, wait bool) error {
 	if err := json.Unmarshal(b, &v); err != nil {
 		return err
 	}
+	deadline := time.Now().Add(timeout)
+	fails := 0
 	for wait && v.Status == "running" {
+		abort := func(why string) error {
+			return fmt.Errorf("%s while waiting for job id=%d; check with `%s`", why, v.ID, hint)
+		}
+		if time.Now().After(deadline) {
+			return abort("timeout")
+		}
 		time.Sleep(pollEvery)
 		nb, err := call("GET", getPath+itoa(v.ID), nil)
 		if err != nil {
-			return err
+			if fails++; fails >= 5 {
+				return abort(err.Error())
+			}
+			continue
 		}
+		fails = 0
 		b = nb
 		v.Error = ""
 		if err := json.Unmarshal(b, &v); err != nil {
