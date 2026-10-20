@@ -144,6 +144,20 @@ func (s *Store) ListBackups(ctx context.Context, databaseID int64) ([]Backup, er
 	return list(ctx, s, scanBackup, `SELECT `+backupCols+` FROM backups WHERE database_id=$1 ORDER BY id DESC`, databaseID)
 }
 
+// LastBackups returns each database's newest backup (by started_at); databases without one are absent.
+func (s *Store) LastBackups(ctx context.Context, dbIDs []int64) (map[int64]Backup, error) {
+	bs, err := list(ctx, s, scanBackup, `SELECT DISTINCT ON (database_id) `+backupCols+` FROM backups
+		WHERE database_id = ANY($1) ORDER BY database_id, started_at DESC, id DESC`, dbIDs)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int64]Backup, len(bs))
+	for _, b := range bs {
+		out[b.DatabaseID] = b
+	}
+	return out, nil
+}
+
 func (s *Store) OKBackupsForSchedule(ctx context.Context, scheduleID int64) ([]Backup, error) {
 	return list(ctx, s, scanBackup, `SELECT `+backupCols+` FROM backups WHERE schedule_id=$1 AND status='ok' ORDER BY id DESC`, scheduleID)
 }

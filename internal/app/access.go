@@ -128,7 +128,7 @@ func (a *App) ListRestorable(ctx context.Context, p auth.Principal, destID int64
 	return out, false, nil
 }
 
-// CanRestoreKey: managers may restore any file; others only keys of backups of databases they can access.
+// CanRestoreKey: managers may restore any file; others only keys of ok backups of databases they can access.
 func (a *App) CanRestoreKey(ctx context.Context, p auth.Principal, destID int64, key string) (bool, error) {
 	dest, err := a.Store.GetDestination(ctx, destID)
 	if err != nil {
@@ -142,6 +142,9 @@ func (a *App) CanRestoreKey(ctx context.Context, p auth.Principal, destID int64,
 		return false, nil
 	} else if err != nil {
 		return false, err
+	}
+	if b.Status != "ok" {
+		return false, nil
 	}
 	d, err := a.Store.GetDatabase(ctx, b.DatabaseID)
 	if err != nil {

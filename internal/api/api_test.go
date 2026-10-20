@@ -182,7 +182,7 @@ func TestNoSecretsInResponses(t *testing.T) {
 	}
 	do(h, "POST", "/api/databases", `{"engine":"postgres","name":"abc","domain":"abc.com"}`, true)
 	l := do(h, "GET", "/api/databases", "", true).Body.String()
-	if strings.Contains(l, "password_enc") || strings.Contains(l, "connection_string") || !strings.Contains(l, `"alice_abc"`) {
+	if strings.Contains(l, "password_enc") || !strings.Contains(l, `"connection_string":"postgresql://alice_abc:****@`) || !strings.Contains(l, `"alice_abc"`) {
 		t.Fatal(l)
 	}
 }

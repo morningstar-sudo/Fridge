@@ -13,7 +13,6 @@ import (
 	"fridge/internal/app"
 	"fridge/internal/auth"
 	"fridge/internal/engine"
-	"fridge/internal/objstore"
 	"fridge/internal/store"
 )
 
@@ -30,6 +29,7 @@ type Options struct {
 }
 
 // New builds the HTTP handler: public routes, then everything else behind session auth.
+// Every resource route checks the caller's rights: invisible resources are 404, forbidden actions on visible ones 403.
 func New(a *app.App, au *auth.Service, o Options) http.Handler {
 	s := &server{a: a, au: au, trusted: o.TrustedProxy}
 	m := http.NewServeMux()
@@ -46,9 +46,11 @@ func New(a *app.App, au *auth.Service, o Options) http.Handler {
 	api.HandleFunc("POST /api/databases", s.createDB)
 	api.HandleFunc("GET /api/databases", s.listDBs)
 	api.HandleFunc("GET /api/databases/{db}", s.getDB)
+	api.HandleFunc("GET /api/databases/{db}/connection", s.connection)
 	api.HandleFunc("GET /api/destinations", s.listDests)
 	api.HandleFunc("POST /api/destinations", s.createDest)
 	api.HandleFunc("PUT /api/destinations/{id}", s.updateDest)
+	api.HandleFunc("PATCH /api/destinations/{id}", s.shareDest)
 	api.HandleFunc("DELETE /api/destinations/{id}", s.deleteDest)
 	api.HandleFunc("POST /api/destinations/{id}/test", s.testDest)
 	api.HandleFunc("GET /api/destinations/{id}/objects", s.objects)
@@ -64,6 +66,7 @@ func New(a *app.App, au *auth.Service, o Options) http.Handler {
 	api.HandleFunc("GET /api/restores/{id}", s.getRestore)
 	api.HandleFunc("GET /api/settings/allowlist", s.getAllow)
 	api.HandleFunc("PUT /api/settings/allowlist", s.putAllow)
+	s.adminRoutes(api)
 	m.HandleFunc("GET /api/ca", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.Write(a.CA.CertPEM())
@@ -126,7 +129,13 @@ func pathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	return id, true
 }
 
-// dbOf resolves {db}: all digits = id, otherwise name.
+// me is the authenticated caller; every route behind requireLogin has one.
+func me(r *http.Request) auth.Principal {
+	p, _ := principal(r)
+	return p
+}
+
+// dbOf resolves {db} (all digits = id, otherwise the full prefixed name); 404 unless the caller may access it.
 func (s *server) dbOf(w http.ResponseWriter, r *http.Request) (store.Database, bool) {
 	v := r.PathValue("db")
 	var d store.Database
@@ -136,6 +145,9 @@ func (s *server) dbOf(w http.ResponseWriter, r *http.Request) (store.Database, b
 	} else {
 		d, err = s.a.Store.GetDatabaseByName(r.Context(), v)
 	}
+	if err == nil {
+		err = s.canAccess(r, d)
+	}
 	if err != nil {
 		fail(w, err)
 		return d, false
@@ -143,47 +155,124 @@ func (s *server) dbOf(w http.ResponseWriter, r *http.Request) (store.Database, b
 	return d, true
 }
 
-// ---- response shapes (never include PasswordEnc / SecretKeyEnc) ----
-
-type dbJSON struct {
-	ID               int64     `json:"id"`
-	Name             string    `json:"name"`
-	Engine           string    `json:"engine"`
-	Version          string    `json:"version"`
-	Domain           string    `json:"domain"`
-	TLSMode          string    `json:"tls_mode"`
-	User             string    `json:"user"`
-	Status           string    `json:"status"`
-	CreatedAt        time.Time `json:"created_at"`
-	ConnectionString string    `json:"connection_string,omitempty"`
+// canAccess: nil, store.ErrNotFound (no access) or a lookup error.
+func (s *server) canAccess(r *http.Request, d store.Database) error {
+	ok, err := s.a.CanAccessDB(r.Context(), me(r), d)
+	if err == nil && !ok {
+		err = store.ErrNotFound
+	}
+	return err
 }
 
-func (s *server) dbOut(d store.Database, conn bool) (dbJSON, error) {
-	o := dbJSON{d.ID, d.Name, d.Engine, d.Version, d.Domain, d.TLSMode, d.User, d.Status, d.CreatedAt, ""}
-	if conn {
-		cs, err := s.a.ConnString(d)
-		if err != nil {
-			return o, err
-		}
-		o.ConnectionString = cs
+// ownerOf is dbOf plus 403 unless the caller owns d (or is admin).
+func (s *server) ownerOf(w http.ResponseWriter, r *http.Request) (store.Database, bool) {
+	d, ok := s.dbOf(w, r)
+	if ok && !app.IsDBOwner(me(r), d) {
+		fail(w, auth.ErrForbidden)
+		return d, false
 	}
-	return o, nil
+	return d, ok
+}
+
+// destOf loads {id}: 404 unless visible to the caller, 403 if manage is needed and the caller cannot manage it.
+func (s *server) destOf(w http.ResponseWriter, r *http.Request, manage bool) (store.Destination, bool) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return store.Destination{}, false
+	}
+	d, err := s.a.Store.GetDestination(r.Context(), id)
+	p := me(r)
+	switch {
+	case err != nil:
+	case !app.CanManageDestination(p, d) && !app.CanUseDestination(p, d):
+		err = store.ErrNotFound
+	case manage && !app.CanManageDestination(p, d):
+		err = auth.ErrForbidden
+	}
+	if err != nil {
+		fail(w, err)
+		return d, false
+	}
+	return d, true
+}
+
+// usableDest writes 400 "destination not usable" unless the caller may back up to destination id.
+// Missing and foreign destinations look the same.
+func (s *server) usableDest(w http.ResponseWriter, r *http.Request, id int64) bool {
+	d, err := s.a.Store.GetDestination(r.Context(), id)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		fail(w, err)
+		return false
+	}
+	if err != nil || !app.CanUseDestination(me(r), d) {
+		writeJSON(w, 400, map[string]string{"error": "destination not usable"})
+		return false
+	}
+	return true
+}
+
+// ---- response shapes (never include PasswordEnc / SecretKeyEnc) ----
+
+type lastBackupJSON struct {
+	Status     string     `json:"status"`
+	FinishedAt *time.Time `json:"finished_at"`
+}
+
+type dbJSON struct {
+	ID               int64           `json:"id"`
+	Name             string          `json:"name"`
+	Engine           string          `json:"engine"`
+	Version          string          `json:"version"`
+	Domain           string          `json:"domain"`
+	TLSMode          string          `json:"tls_mode"`
+	User             string          `json:"user"`
+	Status           string          `json:"status"`
+	CreatedAt        time.Time       `json:"created_at"`
+	Owner            string          `json:"owner"`
+	ConnectionString string          `json:"connection_string"` // password always masked
+	AdminUser        string          `json:"admin_user,omitempty"`
+	Legacy           bool            `json:"legacy,omitempty"`
+	LastBackup       *lastBackupJSON `json:"last_backup"`
+}
+
+// dbOut renders d for p; the superuser name only for its owner/admin.
+func dbOut(p auth.Principal, d store.Database, last map[int64]store.Backup) dbJSON {
+	cs, err := app.MaskedConnString(d)
+	if err != nil {
+		log.Printf("api: connection string of %s: %v", d.Name, err)
+	}
+	o := dbJSON{ID: d.ID, Name: d.Name, Engine: d.Engine, Version: d.Version, Domain: d.Domain, TLSMode: d.TLSMode,
+		User: d.User, Status: d.Status, CreatedAt: d.CreatedAt, Owner: d.OwnerName, ConnectionString: cs, Legacy: d.AdminUser == ""}
+	if app.IsDBOwner(p, d) {
+		o.AdminUser = d.AdminUser
+	}
+	if b, ok := last[d.ID]; ok {
+		o.LastBackup = &lastBackupJSON{b.Status, b.FinishedAt}
+	}
+	return o
 }
 
 type destJSON struct {
 	ID        int64     `json:"id"`
 	Name      string    `json:"name"`
 	Provider  string    `json:"provider"`
-	Endpoint  string    `json:"endpoint"`
+	Endpoint  string    `json:"endpoint,omitempty"`
 	Region    string    `json:"region"`
-	Bucket    string    `json:"bucket"`
-	AccessKey string    `json:"access_key"`
+	Bucket    string    `json:"bucket,omitempty"`
+	AccessKey string    `json:"access_key,omitempty"`
 	PathStyle bool      `json:"path_style"`
 	CreatedAt time.Time `json:"created_at"`
+	Owner     string    `json:"owner"`
+	Shared    bool      `json:"shared"`
 }
 
-func destOut(d store.Destination) destJSON {
-	return destJSON{d.ID, d.Name, d.Provider, d.Endpoint, d.Region, d.Bucket, d.AccessKey, d.PathStyle, d.CreatedAt}
+// destOut hides where a shared destination points from users who cannot manage it.
+func destOut(p auth.Principal, d store.Destination) destJSON {
+	o := destJSON{d.ID, d.Name, d.Provider, d.Endpoint, d.Region, d.Bucket, d.AccessKey, d.PathStyle, d.CreatedAt, d.OwnerName, d.Shared}
+	if !app.CanManageDestination(p, d) {
+		o.Endpoint, o.Bucket, o.AccessKey = "", "", ""
+	}
+	return o
 }
 
 type destIn struct {
@@ -282,37 +371,42 @@ func (s *server) engines(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) createDB(w http.ResponseWriter, r *http.Request) {
-	p, _ := principal(r)
+	p := me(r)
 	var in struct {
-		Engine  string `json:"engine"`
-		Name    string `json:"name"`
-		Domain  string `json:"domain"`
-		Version string `json:"version"`
-		TLSMode string `json:"tls_mode"`
+		Engine     string `json:"engine"`
+		Name       string `json:"name"`
+		Domain     string `json:"domain"`
+		Version    string `json:"version"`
+		TLSMode    string `json:"tls_mode"`
+		DBUser     string `json:"db_user"`
+		DBPassword string `json:"db_password"`
 	}
 	if !decode(w, r, &in) {
 		return
 	}
-	d, err := s.a.CreateDatabase(r.Context(), app.CreateRequest{Engine: in.Engine, Name: in.Name, Domain: in.Domain, Version: in.Version, TLSMode: in.TLSMode, OwnerID: p.UserID})
+	d, err := s.a.CreateDatabase(r.Context(), app.CreateRequest{Engine: in.Engine, Name: in.Name, Domain: in.Domain, Version: in.Version,
+		TLSMode: in.TLSMode, OwnerID: p.UserID, DBUser: in.DBUser, DBPassword: in.DBPassword})
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	o, err := s.dbOut(d, true)
-	if err != nil {
-		fail(w, err)
-		return
-	}
-	writeJSON(w, 201, o)
+	d.OwnerName = p.Username
+	writeJSON(w, 201, dbOut(p, d, nil))
 }
 
 func (s *server) listDBs(w http.ResponseWriter, r *http.Request) {
-	ds, err := s.a.Store.ListDatabases(r.Context())
+	p := me(r)
+	ds, err := s.a.VisibleDatabases(r.Context(), p)
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	writeJSON(w, 200, mapList(ds, func(d store.Database) dbJSON { o, _ := s.dbOut(d, false); return o }))
+	last, err := s.a.Store.LastBackups(r.Context(), mapList(ds, func(d store.Database) int64 { return d.ID }))
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, 200, mapList(ds, func(d store.Database) dbJSON { return dbOut(p, d, last) }))
 }
 
 func (s *server) getDB(w http.ResponseWriter, r *http.Request) {
@@ -320,21 +414,50 @@ func (s *server) getDB(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	o, err := s.dbOut(d, true)
+	last, err := s.a.Store.LastBackups(r.Context(), []int64{d.ID})
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	writeJSON(w, 200, o)
+	writeJSON(w, 200, dbOut(me(r), d, last))
+}
+
+// connection reveals the full app connection string; ?role=superuser the superuser's (owner/admin only).
+func (s *server) connection(w http.ResponseWriter, r *http.Request) {
+	d, ok := s.dbOf(w, r)
+	if !ok {
+		return
+	}
+	var cs string
+	var err error
+	switch r.URL.Query().Get("role") {
+	case "":
+		cs, err = s.a.ConnString(d)
+	case "superuser":
+		if !app.IsDBOwner(me(r), d) {
+			fail(w, auth.ErrForbidden)
+			return
+		}
+		cs, err = s.a.SuperuserConnString(r.Context(), d)
+	default:
+		writeJSON(w, 400, map[string]string{"error": "role must be empty or superuser"})
+		return
+	}
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]string{"connection_string": cs})
 }
 
 func (s *server) listDests(w http.ResponseWriter, r *http.Request) {
-	ds, err := s.a.Store.ListDestinations(r.Context())
+	p := me(r)
+	ds, err := s.a.VisibleDestinations(r.Context(), p)
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	writeJSON(w, 200, mapList(ds, destOut))
+	writeJSON(w, 200, mapList(ds, func(d store.Destination) destJSON { return destOut(p, d) }))
 }
 
 func (s *server) createDest(w http.ResponseWriter, r *http.Request) {
@@ -342,19 +465,20 @@ func (s *server) createDest(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
-	p, _ := principal(r)
+	p := me(r)
 	nd := in.dest(0)
-	nd.OwnerID = &p.UserID
+	nd.OwnerID = &p.UserID // private until an admin shares it
 	d, err := s.a.CreateDestination(r.Context(), nd, in.SecretKey)
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	writeJSON(w, 201, destOut(d))
+	d.OwnerName = p.Username
+	writeJSON(w, 201, destOut(p, d))
 }
 
 func (s *server) updateDest(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(w, r)
+	old, ok := s.destOf(w, r, true)
 	if !ok {
 		return
 	}
@@ -362,54 +486,66 @@ func (s *server) updateDest(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
-	if err := s.a.UpdateDestination(r.Context(), in.dest(id), in.SecretKey); err != nil {
+	if err := s.a.UpdateDestination(r.Context(), in.dest(old.ID), in.SecretKey); err != nil {
 		fail(w, err)
 		return
 	}
-	d, err := s.a.Store.GetDestination(r.Context(), id)
+	d, err := s.a.Store.GetDestination(r.Context(), old.ID)
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	writeJSON(w, 200, destOut(d))
+	writeJSON(w, 200, destOut(me(r), d))
 }
 
-func (s *server) deleteDest(w http.ResponseWriter, r *http.Request) {
-	if id, ok := pathID(w, r); ok {
-		del(w, s.a.DeleteDestination(r.Context(), id))
-	}
-}
-
-func del(w http.ResponseWriter, err error) {
-	if err != nil {
-		fail(w, err)
+// shareDest (admin only) makes a destination usable by every user.
+func (s *server) shareDest(w http.ResponseWriter, r *http.Request) {
+	if !me(r).IsAdmin() {
+		fail(w, auth.ErrForbidden)
 		return
 	}
-	w.WriteHeader(204)
-}
-
-func (s *server) testDest(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
 	if !ok {
 		return
 	}
-	if _, err := s.a.Store.GetDestination(r.Context(), id); err != nil {
-		fail(w, err) // lookup failures (404/500) are not a bad destination
+	var in struct {
+		Shared *bool `json:"shared"`
+	}
+	if !decode(w, r, &in) {
 		return
 	}
-	if err := s.a.TestDestination(r.Context(), id); err != nil {
+	if in.Shared == nil {
+		writeJSON(w, 400, map[string]string{"error": "shared is required"})
+		return
+	}
+	noContent(w, s.a.SetDestinationShared(r.Context(), id, *in.Shared))
+}
+
+func (s *server) deleteDest(w http.ResponseWriter, r *http.Request) {
+	if d, ok := s.destOf(w, r, true); ok {
+		noContent(w, s.a.DeleteDestination(r.Context(), d.ID))
+	}
+}
+
+func (s *server) testDest(w http.ResponseWriter, r *http.Request) {
+	d, ok := s.destOf(w, r, true)
+	if !ok {
+		return
+	}
+	if err := s.a.TestDestination(r.Context(), d.ID); err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
+// objects lists what the caller may restore: the whole bucket for managers, own backups on a shared destination.
 func (s *server) objects(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
 	if !ok {
 		return
 	}
-	objs, trunc, err := s.a.ListObjects(r.Context(), id, r.URL.Query().Get("prefix"), r.URL.Query().Get("q"))
+	objs, trunc, err := s.a.ListRestorable(r.Context(), me(r), id, r.URL.Query().Get("prefix"), r.URL.Query().Get("q"))
 	if err != nil {
 		fail(w, err)
 		return
@@ -418,9 +554,10 @@ func (s *server) objects(w http.ResponseWriter, r *http.Request) {
 		Key          string    `json:"key"`
 		Size         int64     `json:"size"`
 		LastModified time.Time `json:"last_modified"`
+		Database     string    `json:"database"`
 	}
 	writeJSON(w, 200, map[string]any{
-		"objects":   mapList(objs, func(o objstore.Object) obj { return obj{o.Key, o.Size, o.LastModified} }),
+		"objects":   mapList(objs, func(o app.Restorable) obj { return obj{o.Key, o.Size, o.LastModified, o.DatabaseName} }),
 		"truncated": trunc,
 	})
 }
@@ -431,6 +568,26 @@ type schedIn struct {
 	Prefix        string `json:"prefix"`
 	KeepLatest    int    `json:"keep_latest"`
 	Enabled       bool   `json:"enabled"`
+}
+
+// schedOf loads {id}; 404 unless the caller may access the schedule's database.
+func (s *server) schedOf(w http.ResponseWriter, r *http.Request) (store.Schedule, bool) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return store.Schedule{}, false
+	}
+	sc, err := s.a.Store.GetSchedule(r.Context(), id)
+	if err == nil {
+		var d store.Database
+		if d, err = s.a.Store.GetDatabase(r.Context(), sc.DatabaseID); err == nil {
+			err = s.canAccess(r, d)
+		}
+	}
+	if err != nil {
+		fail(w, err)
+		return sc, false
+	}
+	return sc, true
 }
 
 func (s *server) listScheds(w http.ResponseWriter, r *http.Request) {
@@ -452,7 +609,7 @@ func (s *server) createSched(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in schedIn
-	if !decode(w, r, &in) {
+	if !decode(w, r, &in) || !s.usableDest(w, r, in.DestinationID) {
 		return
 	}
 	sc, err := s.a.CreateSchedule(r.Context(), store.Schedule{DatabaseID: d.ID, DestinationID: in.DestinationID,
@@ -465,20 +622,20 @@ func (s *server) createSched(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) updateSched(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(w, r)
+	old, ok := s.schedOf(w, r)
 	if !ok {
 		return
 	}
 	var in schedIn
-	if !decode(w, r, &in) {
+	if !decode(w, r, &in) || !s.usableDest(w, r, in.DestinationID) {
 		return
 	}
-	sc := store.Schedule{ID: id, DestinationID: in.DestinationID, Cron: in.Cron, Prefix: in.Prefix, KeepLatest: in.KeepLatest, Enabled: in.Enabled}
+	sc := store.Schedule{ID: old.ID, DestinationID: in.DestinationID, Cron: in.Cron, Prefix: in.Prefix, KeepLatest: in.KeepLatest, Enabled: in.Enabled}
 	if err := s.a.UpdateSchedule(r.Context(), sc); err != nil {
 		fail(w, err)
 		return
 	}
-	got, err := s.a.Store.GetSchedule(r.Context(), id)
+	got, err := s.a.Store.GetSchedule(r.Context(), old.ID)
 	if err != nil {
 		fail(w, err)
 		return
@@ -487,8 +644,8 @@ func (s *server) updateSched(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) deleteSched(w http.ResponseWriter, r *http.Request) {
-	if id, ok := pathID(w, r); ok {
-		del(w, s.a.DeleteSchedule(r.Context(), id))
+	if sc, ok := s.schedOf(w, r); ok {
+		noContent(w, s.a.DeleteSchedule(r.Context(), sc.ID))
 	}
 }
 
@@ -505,8 +662,9 @@ func (s *server) listBackups(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, mapList(bs, backupOut))
 }
 
+// startBackup: an explicit destination must be usable by the caller; none = the app's owner-destination fallback.
 func (s *server) startBackup(w http.ResponseWriter, r *http.Request) {
-	p, _ := principal(r)
+	p := me(r)
 	d, ok := s.dbOf(w, r)
 	if !ok {
 		return
@@ -517,6 +675,9 @@ func (s *server) startBackup(w http.ResponseWriter, r *http.Request) {
 	if r.ContentLength != 0 && !decode(w, r, &in) {
 		return
 	}
+	if in.DestinationID != 0 && !s.usableDest(w, r, in.DestinationID) {
+		return
+	}
 	b, err := s.a.StartBackup(r.Context(), d.ID, in.DestinationID, nil, "manual", &p.UserID)
 	if err != nil {
 		fail(w, err)
@@ -525,25 +686,38 @@ func (s *server) startBackup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 202, backupOut(b))
 }
 
-func (s *server) getBackup(w http.ResponseWriter, r *http.Request) {
+// backupOf loads {id}; 404 unless the caller may access the backup's database.
+func (s *server) backupOf(w http.ResponseWriter, r *http.Request) (store.Backup, bool) {
 	id, ok := pathID(w, r)
 	if !ok {
-		return
+		return store.Backup{}, false
 	}
 	b, err := s.a.Store.GetBackup(r.Context(), id)
+	if err == nil {
+		var d store.Database
+		if d, err = s.a.Store.GetDatabase(r.Context(), b.DatabaseID); err == nil {
+			err = s.canAccess(r, d)
+		}
+	}
 	if err != nil {
 		fail(w, err)
-		return
+		return b, false
 	}
-	writeJSON(w, 200, backupOut(b))
+	return b, true
+}
+
+func (s *server) getBackup(w http.ResponseWriter, r *http.Request) {
+	if b, ok := s.backupOf(w, r); ok {
+		writeJSON(w, 200, backupOut(b))
+	}
 }
 
 func (s *server) download(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(w, r)
+	b, ok := s.backupOf(w, r)
 	if !ok {
 		return
 	}
-	u, err := s.a.BackupDownloadURL(r.Context(), id)
+	u, err := s.a.BackupDownloadURL(r.Context(), b.ID)
 	if err != nil {
 		fail(w, err)
 		return
@@ -552,23 +726,33 @@ func (s *server) download(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) startRestore(w http.ResponseWriter, r *http.Request) {
-	p, _ := principal(r)
+	p := me(r)
 	var in struct {
 		DestinationID int64  `json:"destination_id"`
 		Key           string `json:"key"`
 		Engine        string `json:"engine"`
 		New           *struct {
-			Name    string `json:"name"`
-			Domain  string `json:"domain"`
-			Version string `json:"version"`
+			Name       string `json:"name"`
+			Domain     string `json:"domain"`
+			Version    string `json:"version"`
+			DBUser     string `json:"db_user"`
+			DBPassword string `json:"db_password"`
 		} `json:"new"`
 	}
 	if !decode(w, r, &in) {
 		return
 	}
+	ok, err := s.a.CanRestoreKey(r.Context(), p, in.DestinationID, in.Key)
+	if err == nil && !ok {
+		err = store.ErrNotFound
+	}
+	if err != nil {
+		fail(w, err)
+		return
+	}
 	req := app.RestoreRequest{DestinationID: in.DestinationID, Key: in.Key, Engine: in.Engine, OwnerID: p.UserID}
 	if in.New != nil {
-		req.New = &app.CreateRequest{Name: in.New.Name, Domain: in.New.Domain, Version: in.New.Version}
+		req.New = &app.CreateRequest{Name: in.New.Name, Domain: in.New.Domain, Version: in.New.Version, DBUser: in.New.DBUser, DBPassword: in.New.DBPassword}
 	}
 	x, err := s.a.StartRestore(r.Context(), req)
 	if err != nil {
@@ -584,6 +768,9 @@ func (s *server) getRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	x, err := s.a.Store.GetRestore(r.Context(), id)
+	if p := me(r); err == nil && !p.IsAdmin() && (x.StartedByID == nil || *x.StartedByID != p.UserID) {
+		err = store.ErrNotFound
+	}
 	if err != nil {
 		fail(w, err)
 		return
@@ -592,6 +779,10 @@ func (s *server) getRestore(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getAllow(w http.ResponseWriter, r *http.Request) {
+	if !me(r).IsAdmin() {
+		fail(w, auth.ErrForbidden)
+		return
+	}
 	c, err := s.a.Allowlist(r.Context())
 	if err != nil {
 		fail(w, err)
@@ -601,6 +792,10 @@ func (s *server) getAllow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) putAllow(w http.ResponseWriter, r *http.Request) {
+	if !me(r).IsAdmin() {
+		fail(w, auth.ErrForbidden)
+		return
+	}
 	var in struct {
 		CIDRs []string `json:"cidrs"`
 	}

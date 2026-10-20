@@ -186,17 +186,38 @@ func (a *App) defaultSchedule(ctx context.Context, d store.Database) error {
 	return nil
 }
 
+// ConnString is the app user's full connection string, password included.
 func (a *App) ConnString(d store.Database) (string, error) {
-	eng, _, err := engine.Get(d.Engine)
-	if err != nil {
-		return "", err
-	}
 	pw, err := a.Box.Decrypt(d.PasswordEnc)
 	if err != nil {
 		return "", err
 	}
+	return connAs(d, d.User, pw)
+}
+
+// MaskedConnString is the app user's connection string with the password shown as "****".
+func MaskedConnString(d store.Database) (string, error) {
+	const mark = "FRIDGEMASKEDPASSWORD" // survives URL escaping unchanged
+	cs, err := connAs(d, d.User, mark)
+	return strings.Replace(cs, mark, "****", 1), err
+}
+
+// SuperuserConnString connects as the node superuser (a legacy node's db_user).
+func (a *App) SuperuserConnString(ctx context.Context, d store.Database) (string, error) {
+	u, pw, err := a.RevealSuperuser(ctx, d)
+	if err != nil {
+		return "", err
+	}
+	return connAs(d, u, pw)
+}
+
+func connAs(d store.Database, user, pw string) (string, error) {
+	eng, _, err := engine.Get(d.Engine)
+	if err != nil {
+		return "", err
+	}
 	p := nodeParams(d)
-	p.Password = pw
+	p.User, p.Password = user, pw
 	return eng.ConnString(p, d.Domain), nil
 }
 

@@ -7,7 +7,10 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"fridge/internal/store"
 )
@@ -158,6 +161,38 @@ func TestRotateSuperuser(t *testing.T) {
 		User: "old_app", Volume: "fridge-postgres-old", Status: "running", ContainerID: "c"}
 	if err := e.a.RotateSuperuser(ctx, legacy); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("legacy: %v", err)
+	}
+}
+
+func TestRotateSuperuserSerialized(t *testing.T) {
+	e := newNameEnv(t)
+	ctx := context.Background()
+	d, err := e.create(e.alice, e.aliceDom, "shop", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inflight, overlap atomic.Int32
+	e.rt.execFn = func([]string, io.Reader, io.Writer, io.Writer) int {
+		if inflight.Add(1) > 1 {
+			overlap.Store(1)
+		}
+		time.Sleep(20 * time.Millisecond)
+		inflight.Add(-1)
+		return 0
+	}
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Go(func() { errs[i] = e.a.RotateSuperuser(ctx, d) })
+	}
+	wg.Wait()
+	if errs[0] != nil || errs[1] != nil || overlap.Load() != 0 {
+		t.Fatalf("errs %v overlap %d", errs, overlap.Load())
+	}
+	d, _ = e.a.Store.GetDatabase(ctx, d.ID)
+	_, stored, _ := e.a.RevealSuperuser(ctx, d)
+	if x := lastExec(t, e.rt); x.Stdin != `ALTER ROLE "su_`+d.NodeKey+`" PASSWORD '`+stored+`';` {
+		t.Fatalf("node got %q, stored %q", x.Stdin, stored)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 
 	"fridge/internal/engine"
 	"fridge/internal/store"
@@ -22,8 +23,11 @@ func (a *App) RevealSuperuser(ctx context.Context, d store.Database) (user, pass
 }
 
 // RotateSuperuser sets a fresh superuser password on the running node, then stores it.
-// ponytail: no per-node lock; two concurrent rotates can leave the stored password behind the node's. Lock in the caller if that matters.
+// Rotations of one node are serialized so the stored password always matches the node's last one.
 func (a *App) RotateSuperuser(ctx context.Context, d store.Database) error {
+	mu, _ := a.suLocks.LoadOrStore(d.ID, &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+	defer mu.(*sync.Mutex).Unlock()
 	if d.AdminUser == "" {
 		return invalid("legacy database %s has no separate superuser", d.Name)
 	}

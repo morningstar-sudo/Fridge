@@ -59,6 +59,7 @@ type App struct {
 
 	netMu      sync.Mutex     // serializes node-network repair (Reconcile/Heal) with removeNode's teardown
 	healFailed map[int64]bool // under netMu: DBs whose last heal failed (alert once per OK→failed)
+	suLocks    sync.Map       // db id -> *sync.Mutex: one superuser rotation per node at a time
 }
 
 // Wait blocks until all background jobs finish.

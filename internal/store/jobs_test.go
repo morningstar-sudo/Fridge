@@ -217,3 +217,34 @@ func TestOrphanedRestoreTargets(t *testing.T) {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 }
+
+func TestLastBackups(t *testing.T) {
+	s := storetest.New(t)
+	db, dest := seed(t, s, "a")
+	db2, _ := seed(t, s, "b")
+	none, _ := seed(t, s, "c")
+	var last int64
+	for i, st := range []string{"ok", "failed", "ok"} {
+		b := newBackup(db, dest, nil)
+		if err := s.StartBackup(ctx, b); err != nil {
+			t.Fatal(err)
+		}
+		if i < 2 { // the newest stays running
+			if err := s.FinishBackup(ctx, b.ID, st, 0, "", ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+		last = b.ID
+	}
+	b2 := newBackup(db2, dest, nil)
+	if err := s.StartBackup(ctx, b2); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.LastBackups(ctx, []int64{db.ID, db2.ID, none.ID})
+	if err != nil || len(got) != 2 || got[db.ID].ID != last || got[db.ID].Status != "running" || got[db2.ID].ID != b2.ID {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if got, err := s.LastBackups(ctx, nil); err != nil || len(got) != 0 {
+		t.Fatalf("empty: %+v, %v", got, err)
+	}
+}

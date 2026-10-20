@@ -230,6 +230,25 @@ func TestCanRestoreKey(t *testing.T) {
 	if ok, err := a.CanRestoreKey(ctx, x.pBob, mine.ID, "foreign.sql"); err != nil || !ok {
 		t.Fatal(ok, err)
 	}
+	// only ok backups: running and failed ones of alice's own database are refused
+	d, _ := a.Store.GetDatabaseByName(ctx, "alice_one")
+	for _, st := range []string{"running", "failed"} {
+		b := store.Backup{DatabaseID: d.ID, DestinationID: dS.ID, Trigger: "manual", Engine: "postgres", EngineVersion: "17", S3Key: "fridge/" + st + ".dump"}
+		if err := a.Store.StartBackup(ctx, &b); err != nil {
+			t.Fatal(err)
+		}
+		if st == "failed" {
+			if err := a.Store.FinishBackup(ctx, b.ID, "failed", 0, "", "boom"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if ok, err := a.CanRestoreKey(ctx, x.pAlice, dS.ID, b.S3Key); err != nil || ok {
+			t.Errorf("%s: %v %v", st, ok, err)
+		}
+		if st == "running" {
+			a.Store.FinishBackup(ctx, b.ID, "failed", 0, "", "x") // one running backup per DB
+		}
+	}
 }
 
 func TestDefaultScheduleUsesOwnersDestination(t *testing.T) {

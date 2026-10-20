@@ -51,6 +51,16 @@ func validDBPassword(pw string) error {
 	return nil
 }
 
+// RegisterDomain registers a hostname for owner; store.ErrConflict if anyone holds it already.
+func (a *App) RegisterDomain(ctx context.Context, ownerID int64, name string) (store.Domain, error) {
+	d := store.Domain{OwnerID: ownerID, Name: strings.ToLower(strings.TrimSpace(name))}
+	if !validDomain(d.Name) {
+		return d, invalid("domain must be a hostname")
+	}
+	err := a.Store.CreateDomain(ctx, &d)
+	return d, err
+}
+
 // resolveNames validates name, app user and domain for the owner and returns the real name, user and domain id.
 func (a *App) resolveNames(ctx context.Context, req CreateRequest) (name, user string, domainID int64, err error) {
 	owner, err := a.Store.GetUser(ctx, req.OwnerID)
