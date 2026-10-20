@@ -21,6 +21,12 @@ var (
 
 const gs2 = "n,,"
 
+// Bounds the client accepts for the server-supplied iteration count.
+const (
+	MinIterations = 4096
+	MaxIterations = 10000000
+)
+
 func mac(key []byte, msg string) []byte {
 	h := hmac.New(sha256.New, key)
 	h.Write([]byte(msg))
@@ -140,7 +146,9 @@ func (c *Client) final(serverFirst string, salted []byte) (string, error) {
 	}
 	salt, err := base64.StdEncoding.DecodeString(v[1])
 	iter, err2 := strconv.Atoi(v[2])
-	if err != nil || err2 != nil || iter <= 0 {
+	if err != nil || err2 != nil || strings.Trim(v[2], "0123456789") != "" ||
+		iter < MinIterations || iter > MaxIterations ||
+		strings.ContainsAny(c.user, ",=") {
 		return "", ErrFormat
 	}
 	if salted == nil {

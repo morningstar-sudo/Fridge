@@ -98,6 +98,19 @@ func TestTamperedNonce(t *testing.T) {
 	}
 }
 
+func TestClientIterationBounds(t *testing.T) {
+	for _, i := range []string{"1", "4095", "10000001", "+4096", "-1", " 4096", "2000000000"} {
+		c := NewClient("user", "pencil", "abc")
+		if _, err := c.Final("r=abcd,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=" + i); !errors.Is(err, ErrFormat) {
+			t.Errorf("i=%q: err = %v, want ErrFormat", i, err)
+		}
+	}
+	c := NewClient("a,b", "pencil", "abc")
+	if _, err := c.Final("r=abcd,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"); !errors.Is(err, ErrFormat) {
+		t.Errorf("bad username: err = %v", err)
+	}
+}
+
 func TestClientRejectsBadServerFirst(t *testing.T) {
 	c := NewClient("user", "pencil", "abc")
 	for _, sf := range []string{"r=zzz,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096", "r=abcd,s=W22ZaJ0SNY7soEsUEjb6gQ==", "r=abcd,s=!!,i=4096", "r=abcd,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=x", "r=abcd,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=0"} {
