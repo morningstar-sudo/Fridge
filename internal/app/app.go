@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"fridge/internal/container"
+	"fridge/internal/objstore"
 	"fridge/internal/pki"
 	"fridge/internal/proxy"
 	"fridge/internal/secret"
@@ -37,7 +38,9 @@ type App struct {
 	APIBackend    string
 	HealthTimeout time.Duration
 	Alert         func(ctx context.Context, text string)
-	Sched         *Scheduler // may be nil in tests
+	Sched         *Scheduler                                                       // may be nil in tests
+	OpenObjects   func(d store.Destination, secretKey string) (ObjectStore, error) // nil = real S3
+	now           func() time.Time                                                 // test clock; nil = time.Now
 	wg            sync.WaitGroup
 }
 
@@ -76,3 +79,16 @@ func (a *App) SetAllowlist(ctx context.Context, cidrs []string) error {
 	}
 	return proxy.WriteBase(a.TraefikDir, cidrs, a.APIBackend)
 }
+
+// ObjectStore is the S3 surface the app needs; *objstore.Store satisfies it.
+type ObjectStore interface {
+	Test(ctx context.Context) error
+	Put(ctx context.Context, key string, r io.Reader, meta map[string]string) (int64, error)
+	Get(ctx context.Context, key string) (io.ReadCloser, error)
+	Meta(ctx context.Context, key string) (map[string]string, error)
+	List(ctx context.Context, prefix, q string, limit int) ([]objstore.Object, bool, error)
+	Delete(ctx context.Context, key string) error
+	PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error)
+}
+
+var _ ObjectStore = (*objstore.Store)(nil)

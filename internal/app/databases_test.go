@@ -14,7 +14,7 @@ import (
 )
 
 func TestCreateDatabaseHappyPath(t *testing.T) {
-	a, rt := newTestApp(t)
+	a, rt, _ := newTestApp(t)
 	ctx := context.Background()
 	d, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "abc", Domain: "ABC.com "})
 	if err != nil {
@@ -49,7 +49,7 @@ func TestCreateDatabaseHappyPath(t *testing.T) {
 }
 
 func TestCreateDatabaseValidation(t *testing.T) {
-	a, rt := newTestApp(t)
+	a, rt, _ := newTestApp(t)
 	ok := CreateRequest{Engine: "postgres", Name: "abc", Domain: "abc.com"}
 	cases := map[string]func(*CreateRequest){
 		"version":    func(r *CreateRequest) { r.Version = "99" },
@@ -75,7 +75,7 @@ func TestCreateDatabaseValidation(t *testing.T) {
 }
 
 func TestCreateDatabaseRollbackOnUnhealthy(t *testing.T) {
-	a, rt := newTestApp(t)
+	a, rt, _ := newTestApp(t)
 	ctx := context.Background()
 	rt.healthErr = errors.New("unhealthy")
 	req := CreateRequest{Engine: "postgres", Name: "abc", Domain: "abc.com"}
@@ -105,7 +105,7 @@ func TestCreateDatabaseRollbackOnUnhealthy(t *testing.T) {
 }
 
 func TestCreateDatabaseDefaultSchedule(t *testing.T) {
-	a, _ := newTestApp(t)
+	a, _, _ := newTestApp(t)
 	ctx := context.Background()
 	d1, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "one", Domain: "one.com"})
 	if err != nil {
@@ -136,7 +136,7 @@ func TestCreateDatabaseDefaultSchedule(t *testing.T) {
 }
 
 func TestSetAllowlist(t *testing.T) {
-	a, _ := newTestApp(t)
+	a, _, _ := newTestApp(t)
 	ctx := context.Background()
 	if got, _ := a.Allowlist(ctx); len(got) != 3 {
 		t.Fatalf("default = %v", got)
@@ -160,7 +160,7 @@ func TestSetAllowlist(t *testing.T) {
 }
 
 func TestRemoveNodeCleansProvisionedDatabase(t *testing.T) {
-	a, rt := newTestApp(t)
+	a, rt, _ := newTestApp(t)
 	ctx := context.Background()
 	d, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "abc", Domain: "abc.com"})
 	if err != nil {
@@ -192,7 +192,7 @@ func TestRemoveNodeCleansProvisionedDatabase(t *testing.T) {
 }
 
 func TestCreateDatabaseRollbackSurvivesCancelledContext(t *testing.T) {
-	a, rt := newTestApp(t)
+	a, rt, _ := newTestApp(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	rt.onWait = cancel
 	rt.healthErr = context.Canceled
