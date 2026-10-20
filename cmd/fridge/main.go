@@ -140,6 +140,16 @@ func runServer() error {
 	}); err != nil {
 		log.Printf("purge job: %v", err)
 	}
+	// A recreated Traefik container comes back on the control network only; re-attach it.
+	if err := a.Sched.AddFixed("@every 1m", func() {
+		hctx, cancel := context.WithTimeout(ctx, 50*time.Second)
+		defer cancel()
+		if _, err := a.HealNetworks(hctx); err != nil {
+			log.Printf("heal node networks: %v", err)
+		}
+	}); err != nil {
+		log.Printf("heal job: %v", err)
+	}
 	a.Sched.Start()
 
 	srv := &http.Server{Addr: listen, Handler: api.New(a, au, api.Options{TrustedProxy: api.TrustCIDRs(prefixes)}), ReadHeaderTimeout: 10 * time.Second}

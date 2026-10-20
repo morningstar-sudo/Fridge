@@ -39,6 +39,9 @@ func (f *fakeRT) Exec(_ context.Context, _ string, _ []string, _ io.Reader, _, _
 func (f *fakeRT) Remove(context.Context, string, string) error { return nil }
 func (f *fakeRT) CreateNetwork(context.Context, string) error  { return nil }
 func (f *fakeRT) RemoveNetwork(context.Context, string) error  { return nil }
+func (f *fakeRT) NetworkExists(context.Context, string) (bool, error) {
+	return true, nil
+}
 func (f *fakeRT) ConnectNetwork(context.Context, string, string, []string) error {
 	return nil
 }

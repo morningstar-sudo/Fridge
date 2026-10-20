@@ -74,6 +74,12 @@ func (f *fakeRuntime) CreateNetwork(ctx context.Context, name string) error {
 	return nil
 }
 
+func (f *fakeRuntime) NetworkExists(ctx context.Context, name string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.nets[name] != nil, nil
+}
+
 func (f *fakeRuntime) RemoveNetwork(ctx context.Context, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -28,6 +28,7 @@ type Runtime interface {
 	Exec(ctx context.Context, id string, cmd []string, stdin io.Reader, stdout, stderr io.Writer) (int, error)
 	Remove(ctx context.Context, id, volume string) error
 	CreateNetwork(ctx context.Context, name string) error
+	NetworkExists(ctx context.Context, name string) (bool, error)
 	RemoveNetwork(ctx context.Context, name string) error
 	ConnectNetwork(ctx context.Context, netName, containerName string, aliases []string) error
 	DisconnectNetwork(ctx context.Context, netName, containerName string) error
@@ -55,6 +56,9 @@ type App struct {
 	// ControlNetwork (FRIDGE_NETWORK) holds only traefik/fridge/fridge-meta; each DB node gets its own
 	// internal network shared with TraefikContainer (FRIDGE_TRAEFIK_CONTAINER).
 	ControlNetwork, TraefikContainer string
+
+	netMu      sync.Mutex     // serializes node-network repair (Reconcile/Heal) with removeNode's teardown
+	healFailed map[int64]bool // under netMu: DBs whose last heal failed (alert once per OK→failed)
 }
 
 // Wait blocks until all background jobs finish.

@@ -61,6 +61,8 @@ Stopping `fridge` does not interrupt database traffic; Traefik keeps routing wit
 Compose also reads `FRIDGE_META_PASSWORD` (use URL-safe characters, it goes into `FRIDGE_DATABASE_URL`).
 `fridge healthcheck` exits 0 when `/readyz` answers 200 (used by the compose healthcheck).
 
+Runbook: a recreated Traefik container loses its attachments to the `fridge-node-*` networks. Compose restarts Fridge when it recreates Traefik, and Fridge re-attaches them at boot and re-checks every minute. If Traefik was recreated outside compose while Fridge was down, DB routes recover within 1 minute of Fridge starting.
+
 ## Tests
 
 ```sh

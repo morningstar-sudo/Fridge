@@ -56,6 +56,9 @@ services:
     depends_on:
       fridge-meta:
         condition: service_healthy
+      traefik: # recreating Traefik restarts Fridge, whose boot reconcile re-attaches the node networks
+        condition: service_started
+        restart: true
     environment:
       FRIDGE_DATABASE_URL: postgres://fridge:${FRIDGE_META_PASSWORD}@fridge-meta:5432/fridge?sslmode=disable
       FRIDGE_SECRET_KEY: ${FRIDGE_SECRET_KEY:?set FRIDGE_SECRET_KEY in deploy/.env}

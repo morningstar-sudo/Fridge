@@ -126,6 +126,52 @@ func TestReconcileNetworksLegacy(t *testing.T) {
 	}
 }
 
+func TestHealNetworks(t *testing.T) {
+	a, rt, _ := newTestApp(t)
+	ctx := context.Background()
+	d := newDB(t, a, "abc")
+	gone := newDB(t, a, "gone")
+	net, goneNet := NodeNetwork(d), NodeNetwork(gone)
+
+	// Traefik recreated: it lost the node network. gone's network is being torn down (already removed).
+	delete(rt.nets[net], "fridge-traefik")
+	delete(rt.nets, goneNet)
+	rt.ops = nil
+	n, err := a.HealNetworks(ctx)
+	if err != nil || n != 1 {
+		t.Fatalf("repaired = %d, %v", n, err)
+	}
+	if !rt.nets[net]["fridge-traefik"] {
+		t.Fatal("traefik not re-attached")
+	}
+	if _, ok := rt.nets[goneNet]; ok || slices.ContainsFunc(rt.ops, func(s string) bool { return strings.HasPrefix(s, "create") }) {
+		t.Fatalf("heal created a network: %q", rt.ops)
+	}
+	if len(rt.alerts) != 1 || !strings.Contains(rt.alerts[0], d.Name) || strings.Contains(rt.alerts[0], gone.Name) {
+		t.Fatalf("alerts = %q", rt.alerts)
+	}
+
+	if n, err := a.HealNetworks(ctx); err != nil || n != 0 || len(rt.alerts) != 1 {
+		t.Fatalf("second run: repaired = %d, %v, alerts %q", n, err, rt.alerts)
+	}
+
+	// Failures alert once per OK→failed transition, and again only after a recovery.
+	delete(rt.nets[net], "fridge-traefik")
+	rt.connectErr = errors.New("no such container")
+	for range 3 {
+		if n, _ := a.HealNetworks(ctx); n != 0 {
+			t.Fatalf("repaired %d while failing", n)
+		}
+	}
+	if len(rt.alerts) != 2 || !strings.Contains(rt.alerts[1], "failed") {
+		t.Fatalf("alerts = %q", rt.alerts)
+	}
+	rt.connectErr = nil
+	if n, _ := a.HealNetworks(ctx); n != 1 || len(rt.alerts) != 3 {
+		t.Fatalf("recovery: repaired %d alerts %q", n, rt.alerts)
+	}
+}
+
 func TestReconcileNetworksIdempotent(t *testing.T) {
 	a, rt, _ := newTestApp(t)
 	ctx := context.Background()

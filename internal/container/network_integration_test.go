@@ -4,9 +4,12 @@ package container
 
 import (
 	"context"
+	"fmt"
 	"io"
+	gonet "net"
 	"net/netip"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,7 +35,7 @@ func TestNodeNetworkIsolation(t *testing.T) {
 		for _, s := range specs {
 			_ = c.Remove(ctx, s.Name, s.Volume)
 		}
-		for _, n := range []string{netA, netB, ctl} {
+		for _, n := range []string{netA, netB, ctl, "fridge-it-node-leaky"} {
 			_ = c.RemoveNetwork(ctx, n)
 		}
 	}
@@ -50,10 +53,45 @@ func TestNodeNetworkIsolation(t *testing.T) {
 			t.Fatal(err)
 		}
 		ins, err := c.cli.NetworkInspect(ctx, n, network.InspectOptions{})
-		if err != nil || !ins.Internal || ins.Labels["fridge.node"] != "1" {
-			t.Fatalf("%s: internal=%v labels=%v err=%v", n, ins.Internal, ins.Labels, err)
+		if err != nil || !ins.Internal || ins.Labels["fridge.node"] != "1" || ins.Options[inhibitIPv4] != "true" {
+			t.Fatalf("%s: internal=%v labels=%v options=%v err=%v", n, ins.Internal, ins.Labels, ins.Options, err)
 		}
 	}
+	// A pre-existing network that is internal but still has a host address on its bridge is refused.
+	const leaky = "fridge-it-node-leaky"
+	if _, err := c.cli.NetworkCreate(ctx, leaky, network.CreateOptions{Driver: "bridge", Internal: true}); err != nil {
+		t.Fatal(err)
+	}
+	err = c.CreateNetwork(ctx, leaky)
+	_ = c.RemoveNetwork(ctx, leaky)
+	if err == nil {
+		t.Fatal("CreateNetwork accepted a node network without inhibit_ipv4")
+	}
+	if ok, err := c.NetworkExists(ctx, netA); err != nil || !ok {
+		t.Fatalf("NetworkExists(%s) = %v, %v", netA, ok, err)
+	}
+	if ok, err := c.NetworkExists(ctx, "fridge-it-node-none"); err != nil || ok {
+		t.Fatalf("NetworkExists(missing) = %v, %v", ok, err)
+	}
+
+	// A host listener on all interfaces, to prove node A cannot reach the host either.
+	ln, err := gonet.Listen("tcp4", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	hostPort := fmt.Sprint(ln.Addr().(*gonet.TCPAddr).Port)
+	var hits atomic.Int32
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			hits.Add(1)
+			conn.Close()
+		}
+	}()
 	ids := map[string]string{}
 	for _, s := range specs {
 		id, err := c.Run(ctx, s)
@@ -104,6 +142,33 @@ func TestNodeNetworkIsolation(t *testing.T) {
 		if ip := info.NetworkSettings.Networks[net].IPAddress; ip == "" || isReady("fridge-it-pga", ip, "3") == 0 {
 			t.Fatalf("node A reached %s at %q", name, ip)
 		}
+	}
+	// The host: through node A's own gateway address and the control network's gateway.
+	var gws []string
+	for _, n := range []string{netA, ctl} {
+		ins, err := c.cli.NetworkInspect(ctx, n, network.InspectOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, cfg := range ins.IPAM.Config {
+			if cfg.Gateway != "" {
+				gws = append(gws, cfg.Gateway)
+			}
+		}
+	}
+	if len(gws) == 0 {
+		t.Fatal("no gateway address to probe")
+	}
+	for _, gw := range gws {
+		_, _ = c.Exec(ctx, ids["fridge-it-pga"], []string{"pg_isready", "-h", gw, "-p", hostPort, "-t", "3"}, nil, io.Discard, io.Discard)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("node A reached the host listener (%d connection(s)) via %v", n, gws)
+	}
+	// Positive control: the proxy on the control network does reach the host listener.
+	_, _ = c.Exec(ctx, ids["fridge-it-proxy"], []string{"pg_isready", "-h", gws[len(gws)-1], "-p", hostPort, "-t", "3"}, nil, io.Discard, io.Discard)
+	if hits.Load() == 0 {
+		t.Fatal("control probe never reached the host listener; the negative check proves nothing")
 	}
 	if code := isReady("fridge-it-proxy", "fridge-it-pga", "5"); code != 0 {
 		t.Fatalf("proxy cannot reach node A: exit %d", code)

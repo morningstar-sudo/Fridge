@@ -113,6 +113,16 @@ func TestE2EBackupRestoreAcrossVersions(t *testing.T) {
 	if code, err := rt.Exec(ctx, proxyID, []string{"pg_isready", "-h", src.Volume, "-t", "5"}, nil, io.Discard, io.Discard); err != nil || code != 0 {
 		t.Fatalf("proxy -> node: code %d err %v", code, err)
 	}
+	// Heal: a proxy that lost the node network (recreated Traefik) gets re-attached.
+	if err := rt.DisconnectNetwork(ctx, NodeNetwork(src), proxyName); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := a.HealNetworks(ctx); err != nil || n != 1 {
+		t.Fatalf("heal: repaired %d, %v", n, err)
+	}
+	if code, err := rt.Exec(ctx, proxyID, []string{"pg_isready", "-h", src.Volume, "-t", "5"}, nil, io.Discard, io.Discard); err != nil || code != 0 {
+		t.Fatalf("proxy -> node after heal: code %d err %v", code, err)
+	}
 
 	b, err := a.StartBackup(ctx, src.ID, dest.ID, nil, "manual", nil)
 	if err != nil {

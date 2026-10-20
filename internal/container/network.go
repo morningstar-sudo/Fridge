@@ -15,26 +15,51 @@ import (
 // NodeNetworkPrefix names the per-node internal networks.
 const NodeNetworkPrefix = "fridge-node-"
 
-// CreateNetwork creates an internal (no route out) bridge network for one DB node.
-// An existing network of that name is accepted only if it is internal.
+// inhibitIPv4 keeps the bridge itself address-less: without it, an Internal network still reaches
+// the host through its gateway IP.
+const inhibitIPv4 = "com.docker.network.bridge.inhibit_ipv4"
+
+// CreateNetwork creates an isolated bridge network for one DB node: Internal (no route out) and
+// with no host address on the bridge. An existing network is accepted only if it is isolated likewise.
 func (c *Client) CreateNetwork(ctx context.Context, name string) error {
-	ins, err := c.cli.NetworkInspect(ctx, name, network.InspectOptions{})
-	if err == nil {
-		if !ins.Internal || ins.Name != name {
-			return fmt.Errorf("network %s exists but is not an internal node network", name)
-		}
-		return nil
-	}
-	if !errdefs.IsNotFound(err) {
+	ok, err := c.checkNodeNetwork(ctx, name)
+	if err != nil || ok {
 		return err
 	}
 	_, err = c.cli.NetworkCreate(ctx, name, network.CreateOptions{
 		Driver: "bridge", Internal: true, Labels: map[string]string{"fridge.node": "1"},
+		Options: map[string]string{inhibitIPv4: "true"},
 	})
-	if errdefs.IsConflict(err) { // lost a race to a concurrent create; re-check it
-		return c.CreateNetwork(ctx, name)
+	if errdefs.IsConflict(err) { // lost a race to a concurrent create: re-check once
+		if ok, err = c.checkNodeNetwork(ctx, name); err == nil && !ok {
+			err = fmt.Errorf("network %s: create conflict but not found", name)
+		}
 	}
 	return err
+}
+
+// checkNodeNetwork: (false, nil) = absent; (true, nil) = present and isolated; error = present but not isolated.
+func (c *Client) checkNodeNetwork(ctx context.Context, name string) (bool, error) {
+	ins, err := c.cli.NetworkInspect(ctx, name, network.InspectOptions{})
+	if errdefs.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if ins.Name != name || !ins.Internal || ins.Options[inhibitIPv4] != "true" {
+		return false, fmt.Errorf("network %s exists but is not an isolated node network", name)
+	}
+	return true, nil
+}
+
+// NetworkExists reports whether a network with exactly this name exists.
+func (c *Client) NetworkExists(ctx context.Context, name string) (bool, error) {
+	ins, err := c.cli.NetworkInspect(ctx, name, network.InspectOptions{})
+	if errdefs.IsNotFound(err) {
+		return false, nil
+	}
+	return err == nil && ins.Name == name, err
 }
 
 // RemoveNetwork removes a network; a missing one is fine.
@@ -54,7 +79,13 @@ func (c *Client) ConnectNetwork(ctx context.Context, netName, containerName stri
 	if slices.Contains(nets, netName) {
 		return nil
 	}
-	return c.cli.NetworkConnect(ctx, netName, containerName, &network.EndpointSettings{Aliases: aliases})
+	err = c.cli.NetworkConnect(ctx, netName, containerName, &network.EndpointSettings{Aliases: aliases})
+	if err != nil { // a concurrent connect (heal vs reconcile) wins the race: that's success too
+		if nets, ierr := c.ContainerNetworks(ctx, containerName); ierr == nil && slices.Contains(nets, netName) {
+			return nil
+		}
+	}
+	return err
 }
 
 // DisconnectNetwork detaches a container; a missing container/network or no attachment is fine.

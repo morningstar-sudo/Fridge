@@ -218,6 +218,7 @@ func (a *App) removeNode(ctx context.Context, d store.Database) {
 	if id == "" {
 		id = d.Volume // container name == volume name
 	}
+	a.netMu.Lock() // a heal must not re-attach Traefik halfway through the teardown
 	if err := a.RT.Remove(ctx, id, d.Volume); err != nil {
 		log.Printf("removeNode %s: remove container: %v", d.Name, err)
 	}
@@ -228,6 +229,7 @@ func (a *App) removeNode(ctx context.Context, d store.Database) {
 	if err := a.RT.RemoveNetwork(ctx, net); err != nil {
 		log.Printf("removeNode %s: remove network: %v", d.Name, err)
 	}
+	a.netMu.Unlock()
 	if err := proxy.RemoveRoute(a.TraefikDir, d.ID); err != nil {
 		log.Printf("removeNode %s: remove route: %v", d.Name, err)
 	}
