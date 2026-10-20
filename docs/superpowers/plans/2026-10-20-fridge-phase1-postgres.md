@@ -4,9 +4,9 @@
 
 **Goal:** Tạo node Postgres (chọn version) cho một domain, truy cập qua Traefik theo SNI có IP allowlist và cert internal CA, backup lên nhiều S3 destination theo lịch hoặc 1 click, restore 1 file S3 vào node mới — qua REST API + CLI.
 
-**Architecture:** 1 binary Go `fridge`. Lá: `secret` (AES-GCM), `store` (SQLite), `engine` (catalog + Postgres), `container` (Docker SDK), `pki` (internal CA), `proxy` (ghi file dynamic Traefik), `objstore` (minio-go), `alert` (webhook). Lõi `app` điều phối, phụ thuộc Docker và S3 qua 2 interface nhỏ để test bằng fake. `api` (net/http) và CLI (`cmd/fridge`) nằm ngoài cùng. Data plane (Traefik + container DB) chạy độc lập với Fridge.
+**Architecture:** 1 binary Go `fridge`. Lá: `secret` (AES-GCM), `store` (Postgres metadata qua pgx), `engine` (catalog + Postgres), `container` (Docker SDK), `pki` (internal CA), `proxy` (ghi file dynamic Traefik), `objstore` (minio-go), `alert` (webhook). Lõi `app` điều phối, phụ thuộc Docker và S3 qua 2 interface nhỏ để test bằng fake. `api` (net/http) và CLI (`cmd/fridge`) nằm ngoài cùng. Data plane (Traefik + container DB) chạy độc lập với Fridge.
 
-**Tech Stack:** Go 1.26, `modernc.org/sqlite`, Docker Engine Go SDK, `github.com/minio/minio-go/v7`, `github.com/robfig/cron/v3`, `gopkg.in/yaml.v3`, Traefik v3, stdlib `net/http` + `flag`.
+**Tech Stack:** Go 1.26, Postgres 17 (metadata) + `github.com/jackc/pgx/v5`, Docker Engine Go SDK, `github.com/minio/minio-go/v7`, `github.com/robfig/cron/v3`, `gopkg.in/yaml.v3`, Traefik v3, stdlib `net/http` + `flag`.
 
 **Spec:** `docs/superpowers/specs/2026-10-20-fridge-design.md` (mục "Giai đoạn triển khai" bước 1).
 
@@ -14,7 +14,9 @@
 
 - **Mọi lệnh build/test/docker chạy trong WSL** (người dùng yêu cầu): distro `Ubuntu-24.04`, repo tại `/mnt/d/Windows/Desktop/code/Fridge`. Từ Windows gọi: `wsl -d Ubuntu-24.04 -- bash -lc 'cd /mnt/d/Windows/Desktop/code/Fridge && <lệnh>'`. Docker Engine chạy native trong WSL (29.8.2, `/var/run/docker.sock`), không dùng Docker Desktop. Git cũng chạy trong WSL.
 - Go trong WSL là 1.22.2 (apt). Không cài thêm: `go.mod` khai `go 1.26` để Go tự tải toolchain 1.26 (`GOTOOLCHAIN=auto`, mặc định).
-- Module path `fridge`. Go ≥ 1.26. Chỉ được thêm 5 dependency ở Tech Stack (+ dependency gián tiếp của chúng). CLI dùng stdlib `flag`.
+- Module path `fridge`. Go ≥ 1.26.
+- **Metadata DB = Postgres 17** (người dùng đổi từ SQLite): container `fridge-meta` trong compose, trên `fridge-net`, không publish port, không do Fridge quản lý/route. Fridge kết nối qua env `FRIDGE_DATABASE_URL`.
+- **Test cần Postgres thật**: env `FRIDGE_TEST_DATABASE_URL`, mặc định `postgres://postgres:postgres@localhost:55432/postgres?sslmode=disable`; `scripts/test-db.sh` dựng container `fridge-test-pg` (`postgres:17`, port `55432:5432`, idempotent). Không kết nối được → test **fail** kèm hướng dẫn chạy script, không được skip im lặng. Chỉ được thêm 5 dependency ở Tech Stack (+ dependency gián tiếp của chúng). CLI dùng stdlib `flag`.
 - Engine giai đoạn 1: chỉ `postgres`. Catalog Postgres: `13, 14, 15, 16, 17, 18`, mặc định `17`. Version ngoài catalog → 400.
 - Mỗi DB = 1 container `fridge-postgres-<name>` + named volume `fridge-postgres-<name>`, trên network `fridge-net`, **không publish port**, restart `unless-stopped`.
 - Traefik terminate TLS; entrypoint `pg` = `:5432`; router `HostSNI(\`<domain>\`)`; backend nói plaintext trong `fridge-net`.
@@ -49,6 +51,8 @@ internal/store/databases.go
 internal/store/destinations.go
 internal/store/settings.go
 internal/store/jobs.go      # schedules, backups, restores, FailRunning
+internal/store/storetest/storetest.go  # New(t): DB Postgres tạm riêng cho mỗi test
+scripts/test-db.sh          # dựng Postgres cho test
 internal/engine/engine.go   # interface, Info, catalog, ResolveVersion, CompareVersions
 internal/engine/postgres.go
 internal/container/docker.go
@@ -119,7 +123,7 @@ func TestBoxWrongKeyFails(t *testing.T) {
 ### Task 2: Store — mở DB, migrations, databases, destinations, settings
 
 **Files:**
-- Create: `internal/store/store.go`, `databases.go`, `destinations.go`, `settings.go`, `store_test.go`
+- Create: `internal/store/store.go`, `databases.go`, `destinations.go`, `settings.go`, `store_test.go` (package `store_test`), `internal/store/storetest/storetest.go`, `scripts/test-db.sh`
 
 **Interfaces:**
 - Produces:
@@ -128,7 +132,7 @@ func TestBoxWrongKeyFails(t *testing.T) {
 var ErrNotFound, ErrConflict, ErrInUse error
 type Database struct { ID int64; Name, Engine, Version, Domain, TLSMode, User, PasswordEnc, HostID, ContainerID, Volume, Status string; CreatedAt time.Time }
 type Destination struct { ID int64; Name, Provider, Endpoint, Region, Bucket, AccessKey, SecretKeyEnc string; PathStyle bool; CreatedAt time.Time }
-func Open(path string) (*Store, error)        // PRAGMA foreign_keys=ON, journal_mode=WAL, busy_timeout=5000; chạy migrations
+func Open(ctx context.Context, url string) (*Store, error) // pgxpool.New + Ping; chạy migrations
 func (s *Store) Close() error
 func (s *Store) CreateDatabase(ctx, d *Database) error            // set ID, CreatedAt; HostID mặc định "local"
 func (s *Store) GetDatabase(ctx, id int64) (Database, error)
@@ -144,7 +148,14 @@ func (s *Store) GetSetting(ctx, key string) (string, bool, error)
 func (s *Store) SetSetting(ctx, key, value string) error
 ```
 
-Migrations: slice `[]string` chạy theo `PRAGMA user_version` (mỗi phần tử 1 version). Migration 1 tạo **toàn bộ** bảng của giai đoạn 1 (cả `backup_schedules`, `backups`, `restores` dùng ở Task 3) theo mô hình ở spec mục 1, với:
+```go
+// storetest
+func New(t *testing.T) *store.Store // đọc FRIDGE_TEST_DATABASE_URL (mặc định ở Global Constraints); CREATE DATABASE fridge_t_<8 hex ngẫu nhiên>; store.Open trên DB đó; t.Cleanup: Close + DROP DATABASE ... WITH (FORCE). Lỗi kết nối → t.Fatalf("test postgres not reachable at %s — run scripts/test-db.sh: %v")
+func URL(t *testing.T) string        // URL của DB tạm vừa tạo bởi New gần nhất trong test (dùng khi cần mở lại)
+```
+`storetest` import `store`, nên test trong thư mục `store` dùng package `store_test` để tránh vòng import.
+
+Migrations: slice `[]string`, bảng `schema_migrations(version INT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`; mỗi migration chạy trong 1 transaction có `SELECT pg_advisory_xact_lock(hashtext('fridge-migrate'))` (an toàn khi sau này chạy nhiều instance). Kiểu cột: id `BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY`, thời gian `TIMESTAMPTZ NOT NULL DEFAULT now()`, cờ `BOOLEAN`. Migration 1 tạo **toàn bộ** bảng của giai đoạn 1 (cả `backup_schedules`, `backups`, `restores` dùng ở Task 3) theo mô hình ở spec mục 1, với:
 - `CREATE UNIQUE INDEX db_name ON databases(name) WHERE status NOT IN ('error','deleted')`
 - `CREATE UNIQUE INDEX db_domain ON databases(engine, domain) WHERE status NOT IN ('error','deleted')`
 - `destinations.name UNIQUE`; `backup_schedules.destination_id REFERENCES destinations(id) ON DELETE RESTRICT`, `database_id REFERENCES databases(id)`
@@ -152,14 +163,13 @@ Migrations: slice `[]string` chạy theo `PRAGMA user_version` (mỗi phần t�
 - `backups.destination_id`, `restores.destination_id` là INTEGER thường (không FK) để giữ lịch sử khi xóa destination. *(Quyết định của plan)*
 - Bỏ bảng `users`, `api_tokens`, `audit_log`, `hosts` (giai đoạn 3/sau); `databases.host_id TEXT NOT NULL DEFAULT 'local'`.
 
-Lỗi unique của SQLite → `ErrConflict`; lỗi FK khi xóa destination → `ErrInUse`; không có row → `ErrNotFound`.
+Map lỗi qua `*pgconn.PgError`: code `23505` (unique) → `ErrConflict`; `23503` (FK) → `ErrInUse`; `pgx.ErrNoRows` → `ErrNotFound`.
 
-- [ ] **Step 1: Viết test**
+- [ ] **Step 1: Viết `scripts/test-db.sh`** (`docker start fridge-test-pg 2>/dev/null || docker run -d --name fridge-test-pg -p 55432:5432 -e POSTGRES_PASSWORD=postgres postgres:17`, rồi chờ `pg_isready` qua `docker exec`), chạy nó → `docker exec fridge-test-pg pg_isready` báo `accepting connections`.
+- [ ] **Step 2: Viết test** (dùng `storetest.New(t)`)
 
 ```go
-func open(t *testing.T) *Store { s, err := Open(filepath.Join(t.TempDir(), "f.db")); if err != nil { t.Fatal(err) }; t.Cleanup(func(){ s.Close() }); return s }
-
-func TestReopenKeepsDataAndSkipsMigrations(t *testing.T)   // Open, tạo db, Close, Open lại cùng path → GetDatabaseByName thấy; không lỗi "table exists"
+func TestReopenKeepsDataAndSkipsMigrations(t *testing.T)   // tạo db, Close, store.Open(ctx, storetest.URL(t)) lại → GetDatabaseByName thấy; migrations không chạy lại (schema_migrations vẫn 1 dòng)
 func TestDatabaseUniqueness(t *testing.T) {
 	// abc/postgres/abc.com OK; trùng name → errors.Is(err, ErrConflict); khác name cùng engine+domain → ErrConflict
 	// SetDatabaseState(abc,"error","") rồi tạo lại name abc, domain abc.com → OK
@@ -168,10 +178,10 @@ func TestDestinationDeleteInUse(t *testing.T) // dest + db + schedule tham chi�
 func TestSettings(t *testing.T)               // Get chưa có → ok=false; Set "a"; Set "b" (upsert) → "b", true
 ```
 
-- [ ] **Step 2: Chạy `go test ./internal/store/`** → FAIL.
-- [ ] **Step 3: Implement** (`database/sql` + driver `sqlite` của modernc). Schedule trong `TestDestinationDeleteInUse` chèn bằng SQL thô nếu Task 3 chưa có.
-- [ ] **Step 4: Chạy lại** → PASS.
-- [ ] **Step 5: Commit** `feat(store): sqlite store with databases, destinations, settings`.
+- [ ] **Step 3: Chạy `go test ./internal/store/...`** → FAIL.
+- [ ] **Step 4: Implement** (`pgxpool`). Schedule trong `TestDestinationDeleteInUse` chèn bằng SQL thô nếu Task 3 chưa có.
+- [ ] **Step 5: Chạy lại** → PASS.
+- [ ] **Step 6: Commit** `feat(store): postgres metadata store with databases, destinations, settings`.
 
 ---
 
@@ -424,7 +434,7 @@ Luồng `CreateDatabase`:
 5. Lỗi ở bước 4 → `removeNode`, trả lỗi.
 6. Thành công + có destination → tạo schedule mặc định (Global Constraints), gọi `Sched.Reload` nếu `Sched != nil`.
 
-- [ ] **Step 1: Viết fakes** trong `fakes_test.go`: `fakeRuntime` (ghi lại các lần Run/Remove; field `healthErr error`; `execFn func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int`) và `newTestApp(t) (*App, *fakeRuntime)` dùng store tạm, CA tạm, TraefikDir tạm, Alert ghi vào slice.
+- [ ] **Step 1: Viết fakes** trong `fakes_test.go`: `fakeRuntime` (ghi lại các lần Run/Remove; field `healthErr error`; `execFn func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int`) và `newTestApp(t) (*App, *fakeRuntime)` dùng `storetest.New(t)`, CA tạm, TraefikDir tạm, Alert ghi vào slice.
 - [ ] **Step 2: Viết test**
 
 ```go
@@ -710,14 +720,15 @@ func TestRestoreResolvesDestinationName(t *testing.T) // GET /api/destinations t
 **Interfaces:**
 - Consumes: tất cả.
 
-`fridge server` đọc env: `FRIDGE_LISTEN` (`:8080`), `FRIDGE_DATA` (`/data`), `FRIDGE_TRAEFIK_DIR` (`/traefik`), `FRIDGE_NETWORK` (`fridge-net`), `FRIDGE_API_BACKEND` (`http://fridge:8080`), `FRIDGE_SECRET_KEY` (bắt buộc), `FRIDGE_TOKEN` (bắt buộc), `FRIDGE_ALERT_WEBHOOK` (tùy chọn). Thiếu biến bắt buộc → thoát kèm thông báo rõ.
-Thứ tự khởi động: `store.Open(<data>/fridge.db)` → `FailRunning("interrupted by restart")` → `container.New` + `EnsureNetwork` → `pki.LoadOrCreate(<data>/ca)` → tạo thư mục `<traefik>/dynamic`, `<traefik>/certs` → `proxy.WriteBase(Allowlist())` → `NewScheduler` + `Reload` + `Start` → `http.Server` với `api.New`. SIGINT/SIGTERM → `Shutdown`, `Sched.Stop`, `a.Wait()` tối đa 30s. `HealthTimeout` = 120s.
+`fridge server` đọc env: `FRIDGE_DATABASE_URL` (bắt buộc), `FRIDGE_LISTEN` (`:8080`), `FRIDGE_DATA` (`/data`, chứa CA), `FRIDGE_TRAEFIK_DIR` (`/traefik`), `FRIDGE_NETWORK` (`fridge-net`), `FRIDGE_API_BACKEND` (`http://fridge:8080`), `FRIDGE_SECRET_KEY` (bắt buộc), `FRIDGE_TOKEN` (bắt buộc), `FRIDGE_ALERT_WEBHOOK` (tùy chọn). Thiếu biến bắt buộc → thoát kèm thông báo rõ.
+Thứ tự khởi động: `store.Open(ctx, FRIDGE_DATABASE_URL)` (retry tối đa 30s chờ `fridge-meta` sẵn sàng) → `FailRunning("interrupted by restart")` → `container.New` + `EnsureNetwork` → `pki.LoadOrCreate(<data>/ca)` → tạo thư mục `<traefik>/dynamic`, `<traefik>/certs` → `proxy.WriteBase(Allowlist())` → `NewScheduler` + `Reload` + `Start` → `http.Server` với `api.New`. SIGINT/SIGTERM → `Shutdown`, `Sched.Stop`, `a.Wait()` tối đa 30s. `HealthTimeout` = 120s.
 
 `deploy/traefik.yml`: entryPoints `pg: ":5432"`, `api: ":8080"`; `providers.file {directory: /traefik/dynamic, watch: true}`; `ping: {}`; log INFO.
 
 `deploy/docker-compose.yml`:
 - `traefik`: image `traefik:v3.5` (hoặc tag v3 ổn định mới nhất, pin cụ thể), ports `5432:5432`, `8080:8080`, mount `./traefik.yml:/etc/traefik/traefik.yml:ro` + volume `traefik:/traefik`, network `fridge-net`, `restart: always`, healthcheck `traefik healthcheck --ping`.
-- `fridge`: build `..` với `deploy/Dockerfile`, env như trên (đọc từ `.env`), volume `fridge-data:/data`, `traefik:/traefik`, `/var/run/docker.sock:/var/run/docker.sock`, network `fridge-net`, `restart: unless-stopped`, không publish port (đi qua Traefik `api`).
+- `fridge-meta`: `postgres:17`, env `POSTGRES_DB=fridge`, `POSTGRES_USER=fridge`, `POSTGRES_PASSWORD=${FRIDGE_META_PASSWORD}`, volume `fridge-meta:/var/lib/postgresql/data`, network `fridge-net`, healthcheck `pg_isready -U fridge -d fridge`, `restart: always`, không publish port.
+- `fridge`: build `..` với `deploy/Dockerfile`, `depends_on: fridge-meta (condition: service_healthy)`, env như trên (đọc từ `.env`; `FRIDGE_DATABASE_URL=postgres://fridge:${FRIDGE_META_PASSWORD}@fridge-meta:5432/fridge?sslmode=disable`), volume `fridge-data:/data`, `traefik:/traefik`, `/var/run/docker.sock:/var/run/docker.sock`, network `fridge-net`, `restart: unless-stopped`, không publish port (đi qua Traefik `api`).
 - `minio` (profile `dev`): `minio/minio server /data --console-address :9001`, ports `9000`, `9001`, network `fridge-net`.
 - `networks.fridge-net.name: fridge-net`.
 
@@ -741,7 +752,7 @@ func TestE2EBackupRestoreAcrossVersions(t *testing.T) {
 - [ ] **Step 3: Implement** `server` + 3 file deploy + README.
 - [ ] **Step 4: `go build ./... && go vet ./... && go test ./...`** → tất cả PASS.
 - [ ] **Step 5: Smoke test thủ công qua compose, chạy trong WSL** (CLI build bằng `go build -o /tmp/fridge ./cmd/fridge`; `FRIDGE_URL=http://localhost:8080`; ghi kết quả vào mô tả commit):
-  1. Tạo `deploy/.env` có `FRIDGE_SECRET_KEY` (`openssl rand -base64 32`), `FRIDGE_TOKEN`; `docker compose -f deploy/docker-compose.yml --profile dev up -d --build`. Tạo bucket `fridge` trên MinIO console.
+  1. Tạo `deploy/.env` có `FRIDGE_SECRET_KEY` (`openssl rand -base64 32`), `FRIDGE_TOKEN`, `FRIDGE_META_PASSWORD`; `docker compose -f deploy/docker-compose.yml --profile dev up -d --build`. Tạo bucket `fridge` trên MinIO console.
   2. `fridge dest add local --endpoint http://minio:9000 --bucket fridge --access-key minioadmin --secret-key minioadmin --path-style` → `fridge dest test local` OK.
   3. `fridge create postgres abc --domain abc.com --version 16`, `fridge create postgres xyz --domain xyz.com`.
   4. Client chạy trong Docker để có SNI: `docker run --rm --add-host abc.com:host-gateway postgres:17 psql "<conn abc>" -c "create table only_abc(x int)"`; làm tương tự với xyz và `\dt` → mỗi bên chỉ thấy bảng của mình qua **cùng port 5432**.

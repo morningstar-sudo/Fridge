@@ -35,7 +35,7 @@ Team nội bộ (dev/ops) hiện tạo DB bằng tay/docker-compose cho từng d
 ```
                  ┌──────────── Fridge (Go binary) ────────────┐
  Web UI / CLI ──▶│ REST API · Web UI (embed) · Scheduler       │
-                 │ SQLite (metadata) · Docker SDK · S3 client  │
+                 │ Postgres (metadata) · Docker SDK · S3 client│
                  └───────┬───────────────┬──────────────┬──────┘
           writes yaml    │   admin SQL   │  docker API  │ upload dumps
                          ▼               ▼              ▼
@@ -51,7 +51,7 @@ Team nội bộ (dev/ops) hiện tạo DB bằng tay/docker-compose cho từng d
 ### Stack (lựa chọn của Claude, người dùng giao quyền)
 
 - **Go**, 1 binary `fridge`: `fridge server` (API + UI + scheduler) và các lệnh CLI gọi API.
-- **SQLite** (`modernc.org/sqlite`, pure Go) cho metadata.
+- **Postgres 17** cho metadata (driver `github.com/jackc/pgx/v5`), chạy container riêng `fridge-meta` trong compose — không do Fridge quản lý, không route qua Traefik, không publish port. *(Người dùng đổi từ SQLite sang Postgres.)*
 - **Docker Engine SDK** (`github.com/docker/docker/client`).
 - **Traefik v3** (TCP routers, `HostSNI`, có hỗ trợ Postgres STARTTLS) — file provider, Fridge ghi file dynamic, Traefik watch.
 - **ProxySQL 2.x** — Fridge cấu hình qua admin interface (port 6032, giao thức MySQL).
@@ -61,7 +61,7 @@ Team nội bộ (dev/ops) hiện tạo DB bằng tay/docker-compose cho từng d
 
 ## Thành phần chi tiết
 
-### 1. Mô hình dữ liệu (SQLite)
+### 1. Mô hình dữ liệu (Postgres metadata)
 
 - `users(id, email, password_hash, role[admin|member], created_at)`
 - `api_tokens(id, user_id, token_hash, name, last_used_at)`
@@ -119,7 +119,7 @@ Mỗi engine cung cấp: image + env + volume path, cách tạo user/db ban đ�
 
 **TLS cert** — hỗ trợ **cả hai**, chọn theo từng DB (cột `tls_mode`):
 - `acme`: domain public → Traefik `certResolver` Let's Encrypt **DNS-01** (provider + token cấu hình 1 lần, vd Cloudflare).
-- `internal`: domain nội bộ → Fridge tự sinh **internal CA** lần đầu (`crypto/x509` stdlib, lưu cạnh SQLite), ký cert lá cho từng domain, ghi vào phần `tls.certificates` của file dynamic Traefik. `fridge ca` / nút UI tải CA cert để team cài 1 lần. Tự gia hạn cert lá trước hạn 30 ngày (job trong scheduler).
+- `internal`: domain nội bộ → Fridge tự sinh **internal CA** lần đầu (`crypto/x509` stdlib, lưu ở `/data/ca` của Fridge), ký cert lá cho từng domain, ghi vào phần `tls.certificates` của file dynamic Traefik. `fridge ca` / nút UI tải CA cert để team cài 1 lần. Tự gia hạn cert lá trước hạn 30 ngày (job trong scheduler).
 
 **IP allowlist** (người dùng chốt):
 - Danh sách CIDR toàn cục, mặc định 3 dải private: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`. Admin sửa được qua UI/API/CLI.
@@ -132,7 +132,7 @@ Mỗi engine cung cấp: image + env + volume path, cách tạo user/db ban đ�
 - **Create**: validate → ghi DB `creating` → tạo volume + container (healthcheck) → chờ healthy → tạo user/db → ghi route (Traefik file / ProxySQL) → `running` → trả connection string.
   Lỗi giữa chừng → rollback (xóa container/volume/route), status `error`.
 - **Delete (admin)**: chạy backup cuối → stop + remove container → gỡ route → giữ volume + backup thêm 7 ngày (soft-delete) → job dọn sau đó. Bắt buộc gõ lại tên DB để xác nhận (UI & CLI).
-- **Reconcile** khi Fridge khởi động và mỗi 5 phút: so trạng thái mong muốn (SQLite) với Docker + file Traefik + ProxySQL runtime, sửa lệch, log/alert.
+- **Reconcile** khi Fridge khởi động và mỗi 5 phút: so trạng thái mong muốn (Postgres metadata) với Docker + file Traefik + ProxySQL runtime, sửa lệch, log/alert.
 
 ### 5. Backup & restore
 
@@ -212,7 +212,7 @@ CLI tương ứng: `fridge create postgres abc --domain abc.com --version 16`, `
 
 ```
 cmd/fridge/main.go
-internal/store/      # SQLite, migrations
+internal/store/      # Postgres (pgx), migrations
 internal/engine/     # engine.go (interface) + postgres.go mysql.go mariadb.go mongo.go redis.go
 internal/docker/     # bọc Docker SDK: create/exec/stream
 internal/proxy/      # traefik.go (ghi yaml), proxysql.go (admin SQL)
