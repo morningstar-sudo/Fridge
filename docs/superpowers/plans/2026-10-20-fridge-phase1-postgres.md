@@ -761,7 +761,7 @@ func TestE2EBackupRestoreAcrossVersions(t *testing.T) {
 - [ ] **Step 3: Implement** `server` + 3 file deploy + README.
 - [ ] **Step 4: `go build ./... && go vet ./... && go test ./...`** → tất cả PASS.
 - [ ] **Step 5: Smoke test thủ công qua compose, chạy trong WSL** (CLI build bằng `go build -o /tmp/fridge ./cmd/fridge`; `FRIDGE_URL=http://localhost:8080`; ghi kết quả vào mô tả commit):
-  1. Tạo `deploy/.env` có `FRIDGE_SECRET_KEY` (`openssl rand -base64 32`), `FRIDGE_TOKEN`; `docker compose -f deploy/docker-compose.yml --profile dev up -d --build`. Tạo bucket `fridge` trên MinIO console.
+  1. Tạo `deploy/.env` có `FRIDGE_SECRET_KEY` (`openssl rand -base64 32`), `FRIDGE_TOKEN`, `FRIDGE_META_PASSWORD`; `docker compose -f deploy/docker-compose.yml --profile dev up -d --build`. Tạo bucket `fridge` trên MinIO console.
   2. `fridge dest add local --endpoint http://minio:9000 --bucket fridge --access-key minioadmin --secret-key minioadmin --path-style` → `fridge dest test local` OK.
   3. `fridge create postgres abc --domain abc.com --version 16`, `fridge create postgres xyz --domain xyz.com`.
   4. Client chạy trong Docker để có SNI: `docker run --rm --add-host abc.com:host-gateway postgres:17 psql "<conn abc>" -c "create table only_abc(x int)"`; làm tương tự với xyz và `\dt` → mỗi bên chỉ thấy bảng của mình qua **cùng port 5432**.
