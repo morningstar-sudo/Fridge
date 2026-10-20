@@ -1,0 +1,184 @@
+# Fridge — Web admin, tài khoản & phân quyền theo tài nguyên (giai đoạn 2)
+
+Bổ sung cho `2026-10-20-fridge-design.md`. Giai đoạn này được người dùng **đưa lên trước** health/monitor/limits. Nền tảng: giai đoạn 1 đã xong (Postgres, Traefik SNI, backup/restore S3, REST API, CLI) trên nhánh `feat/phase1-postgres`.
+
+## Vì sao
+
+Hiện chỉ có CLI + một token tĩnh `FRIDGE_TOKEN` dùng chung: ai có token làm được mọi thứ, hệ thống không biết ai là ai. Team cần một giao diện web để làm việc hằng ngày, có tài khoản riêng, và mỗi người chỉ quản lý tài nguyên của mình.
+
+## Mục tiêu
+
+- **Web admin** dùng **Vanilla JS + Bootstrap 5** (người dùng chốt), nhúng trong binary `fridge`, phủ các luồng của giai đoạn 1.
+- **Tài khoản**: lần đầu bắt buộc tạo admin bằng setup token trong env; đăng nhập bằng **SCRAM-SHA-256** (mật khẩu không bao giờ rời trình duyệt/CLI); **session stateful** lưu server-side.
+- **Vai trò**: `admin` (quản lý hệ thống và **toàn bộ** tài nguyên) và `user`.
+- **Sở hữu theo tài nguyên**: DB và S3 destination có owner; owner DB có thể thêm người quản lý; destination có thể được admin đánh dấu **dùng chung**.
+- **HTTPS mặc định** cho web admin + API bằng cert tự ký tự sinh khi dựng server.
+- CLI đăng nhập bằng cùng cơ chế (session của chính user), **bỏ `FRIDGE_TOKEN` tĩnh**.
+
+## Non-goals (giai đoạn này)
+
+- RBAC chi tiết hơn admin/user; nhóm/team.
+- **API token** cho script/CI — sẽ là một hệ thống **riêng**, không dùng chung với session ID (người dùng chốt). Thiết kế middleware xác thực sao cho thêm loại thứ hai không phải viết lại.
+- Upload cert SSL tùy chỉnh (sau).
+- Trang health/monitor/limits (giai đoạn 3), audit log, xóa DB, restore ghi đè (giai đoạn sau).
+- Log chạy trực tiếp (SSE) — dùng polling.
+
+## Anti-goals
+
+1. Mật khẩu (hoặc thứ gì đủ để đăng nhập thay mật khẩu) đi qua mạng hoặc nằm trong DB ở dạng dùng lại được.
+2. User thấy hoặc đụng được DB/destination/backup không thuộc quyền mình — kể cả gián tiếp (restore bản backup của người khác, đoán id).
+3. Tự khóa mình không có đường thoát (quên mật khẩu admin duy nhất, allowlist chặn chính mình).
+4. Dùng web khó hơn CLI.
+
+## Ràng buộc
+
+- Một controller duy nhất (không cần store phân tán; rate-limit và trạng thái SCRAM dở dang để trong RAM là được).
+- Không thêm dependency Go mới (SCRAM, PBKDF2, HMAC dùng stdlib: `crypto/pbkdf2`, `crypto/hmac`, `crypto/sha256`). Bootstrap 5 + Bootstrap Icons **vendored** vào `internal/web/static/vendor/` (mạng nội bộ có thể không có internet) — không CDN, không build step, không npm.
+- Data plane vẫn độc lập với Fridge (anti-goal của spec gốc).
+
+## Thiết kế
+
+### 1. Mô hình dữ liệu (migration mới, không sửa migration cũ)
+
+- `users(id, username UNIQUE, role[admin|user], scram_salt BYTEA, scram_iterations INT, stored_key BYTEA, server_key BYTEA, disabled BOOL, created_at, created_by NULL)`
+- `invites(id, token_hash UNIQUE, username, role, purpose[new_user|reset_password], user_id NULL, created_by, expires_at, used_at NULL)`
+- `sessions(id_hash UNIQUE, user_id, created_at, last_seen_at, expires_at, ip, user_agent)` — `id_hash` = SHA-256 của session ID; DB lộ cũng không dùng được.
+- `databases` thêm `owner_id BIGINT NULL REFERENCES users(id)`.
+- `database_members(database_id, user_id, added_by, added_at, PRIMARY KEY(database_id, user_id))`.
+- `destinations` thêm `owner_id BIGINT NULL REFERENCES users(id)`, `shared BOOL NOT NULL DEFAULT false`.
+- **Dữ liệu cũ**: DB/destination có `owner_id NULL` được gán cho admin đầu tiên ngay khi bước setup tạo admin xong.
+
+### 2. Khởi tạo lần đầu
+
+- Env mới **`FRIDGE_SETUP_TOKEN`** (người dùng chốt: "1 token trong env").
+- Khi bảng `users` **rỗng**: mọi trang web chuyển tới màn **Tạo admin** (nhập setup token, username, mật khẩu ×2). Sai token → từ chối (so sánh constant-time).
+- Khi **đã có user**: bỏ qua hoàn toàn — endpoint setup trả 409, setup token vô hiệu, server khởi động được dù không có biến này.
+- Chưa có user mà thiếu `FRIDGE_SETUP_TOKEN` → server vẫn chạy nhưng log cảnh báo rõ và màn setup báo "chưa cấu hình setup token".
+- Tài khoản tạo ở bước này là `admin`.
+
+### 3. SCRAM-SHA-256 (RFC 5802 / RFC 7677)
+
+- Dùng **đúng định dạng message chuẩn** (`n,,n=<user>,r=<cnonce>` …), bọc trong JSON. Nhờ vậy test được bằng test vector RFC 7677 và CLI/JS dùng cùng thuật toán.
+- PBKDF2-HMAC-SHA-256, **600 000 vòng** (OWASP), salt 16 byte ngẫu nhiên. *(Lựa chọn của Claude.)*
+- **Đăng ký** (setup, chấp nhận lời mời, đổi mật khẩu): client tự tính `SaltedPassword` → gửi `salt, iterations, stored_key, server_key`. Server không bao giờ thấy mật khẩu. **Client sinh salt** (16 byte ngẫu nhiên từ `crypto.getRandomValues`). Mật khẩu tối thiểu 12 ký tự — kiểm ở client (server không thấy mật khẩu; ghi rõ đây là kiểm soát phía client).
+- **Đăng nhập**: 2 lượt:
+  - `POST /api/auth/scram/start {client_first}` → `{server_first, scram_id}` (`scram_id` = khóa trạng thái trong RAM, sống 60s).
+  - `POST /api/auth/scram/finish {scram_id, client_final}` → kiểm `ClientProof`; đúng → tạo session, trả `{server_final, user}`. Client **phải** kiểm `ServerSignature` (chống server giả).
+- **Không lộ username có tồn tại hay không**: username không có/bị khóa vẫn trả `server_first` với salt giả xác định (`HMAC(FRIDGE_SECRET_KEY, username)` cắt 16 byte) và lỗi chung "sai tên đăng nhập hoặc mật khẩu".
+- **Chống dò**: sai 5 lần trong 1 phút theo (username, IP) → khóa 5 phút (RAM). *(Lựa chọn của Claude.)*
+- Đổi mật khẩu: phải chứng minh mật khẩu cũ bằng một vòng SCRAM mới (re-auth) trong cùng request flow, rồi gửi bộ khóa mới; mọi session khác của user bị xóa.
+
+### 4. Session stateful (người dùng chốt)
+
+- Session ID: 32 byte ngẫu nhiên (base64url). Server lưu hash trong `sessions`.
+- **Web**: cookie `fridge_session`, `HttpOnly; Secure; SameSite=Strict; Path=/`.
+- **CLI**: `Authorization: Bearer <session id>` — cùng bảng, cùng quyền. `fridge login` chạy SCRAM, lưu session ID vào `~/.config/fridge/session` (0600); env `FRIDGE_TOKEN` (nếu đặt) ghi đè file. `fridge logout` xóa session phía server + file. `fridge whoami`.
+- Hết hạn: không hoạt động **12 giờ** hoặc tuyệt đối **7 ngày**; `last_seen_at` cập nhật tối đa 1 lần/phút. Job dọn session hết hạn mỗi giờ. *(Lựa chọn của Claude.)*
+- **CSRF**: request dùng cookie và không phải GET/HEAD phải có `Origin` (hoặc `Sec-Fetch-Site: same-origin`) khớp host; request dùng Bearer không cần.
+- Middleware xác thực trả về một `Principal{UserID, Role}`; nguồn hiện tại: cookie hoặc Bearer session. API token sau này là nguồn thứ ba.
+
+### 5. Vai trò & quyền
+
+| Hành động | admin | user |
+|---|---|---|
+| DB mình là owner hoặc người quản lý: xem, connection string, backup, lịch, restore | ✓ | ✓ |
+| DB của người khác | ✓ tất cả | ✗ — **404** (không lộ tồn tại) |
+| Tạo DB (người tạo = owner) | ✓ | ✓ |
+| Thêm/gỡ người quản lý DB | ✓ | chỉ **owner** |
+| Destination của mình: thêm/sửa/xóa/test/duyệt bucket | ✓ | ✓ |
+| Destination của người khác | ✓ tất cả | ✗ (404) — trừ khi `shared` |
+| Đánh dấu/bỏ đánh dấu destination **dùng chung** | ✓ | ✗ |
+| Destination `shared`: chọn khi đặt lịch backup | ✓ | ✓ (không sửa/xóa/xem secret) |
+| Allowlist, cert, cài đặt hệ thống | ✓ | ✗ (403) |
+| Tạo lời mời user, khóa/mở, nâng/hạ admin, reset mật khẩu | ✓ | ✗ |
+| Xem/thu hồi session | mọi session | session của mình |
+| Đổi mật khẩu của mình | ✓ | ✓ |
+
+- Người quản lý DB (thêm bởi owner) làm được mọi việc trên DB trừ thêm/gỡ người quản lý.
+- Destination do admin tạo **mặc định riêng**; chỉ thành dùng chung khi admin **đánh dấu** (người dùng chốt).
+- Đặt lịch backup: chỉ chọn destination của chính mình hoặc `shared`. Lịch có sẵn vẫn chạy với destination cũ kể cả khi người đặt mất quyền.
+- **Duyệt file để restore**:
+  - Trên destination **của mình** (hoặc admin): duyệt toàn bucket, kể cả file upload tay.
+  - Trên destination **shared**: không liệt kê bucket; chỉ thấy các bản backup (từ bảng `backups`) thuộc DB mình có quyền.
+  - Nút "Restore…" trên một dòng backup của DB mình có quyền luôn dùng được, bất kể destination thuộc ai.
+- Restore vào node mới: người bấm = owner node mới.
+- Không cho hạ quyền/khóa **admin hoạt động cuối cùng**.
+- Job hệ thống (scheduler, recovery khi khởi động) chạy không gắn user.
+
+### 6. Quản lý user
+
+- Admin tạo **lời mời** (username, role) → link dùng một lần `https://<host>:8443/#/invite/<token>`, hết hạn **48 giờ**; người được mời tự đặt mật khẩu bằng SCRAM. Người tạo không bao giờ biết mật khẩu. *(Lựa chọn của Claude.)*
+- Reset mật khẩu = lời mời `purpose=reset_password` cho user có sẵn; dùng xong xóa mọi session của user đó.
+- Khóa user → xóa mọi session, chặn đăng nhập. DB/destination của user bị khóa vẫn nằm đó; admin vẫn quản lý được.
+
+### 7. HTTPS (người dùng chốt: mặc định tự ký, tự sinh khi dựng server)
+
+- Khi khởi động, nếu chưa có, Fridge ký cert cho web admin bằng **CA nội bộ** đã có, SAN = `localhost`, `127.0.0.1` + các tên trong env tùy chọn **`FRIDGE_PUBLIC_HOSTS`** (phân tách bằng dấu phẩy, tên hoặc IP). Cert này được đặt làm **cert mặc định của Traefik** (`tls.stores.default.defaultCertificate`), nên truy cập bằng bất kỳ tên/IP nào cũng có HTTPS (trình duyệt cảnh báo nếu tên không khớp/chưa cài CA).
+- Cert sinh lại khi `FRIDGE_PUBLIC_HOSTS` đổi hoặc còn < 30 ngày.
+- Traefik: entrypoint `websecure :8443` (TLS) phục vụ web + API; entrypoint `web :8080` chỉ **redirect** sang HTTPS. *(Cổng do Claude chọn.)* Compose publish `8443` và `8080`.
+- Trang Settings có nút tải CA cert để team cài một lần.
+- Cert SSL tùy chỉnh: để sau (chừa chỗ: file cert/key do người dùng đặt sẽ thắng cert tự sinh).
+
+### 8. Web admin (Vanilla JS + Bootstrap 5)
+
+- File tĩnh trong `internal/web/static/` nhúng bằng `embed`, phục vụ ở `/` cùng server với API. Một trang HTML + JS module, **router theo hash** (`#/databases`, `#/databases/abc`, …). Không build step.
+- Header bảo mật: `Content-Security-Policy: default-src 'self'` (không inline script/style), `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`.
+- **Bố cục** (người dùng duyệt mockup A): **sidebar trái đóng/mở được** (thu gọn còn icon, trạng thái nhớ trong `localStorage`), mục: Databases · Restore · Destinations · Settings (admin thấy thêm Users, Sessions toàn hệ thống). Góc dưới sidebar: tên user · Đổi mật khẩu · Đăng xuất.
+- **Màn hình**:
+  - **Tạo admin** (lần đầu) · **Đăng nhập** · **Chấp nhận lời mời** · **Đổi mật khẩu**.
+  - **Databases**: bảng (tên, engine/version, domain, trạng thái, backup gần nhất, owner — admin thấy cột owner), nút "+ Tạo DB" (form: engine, version dropdown từ `/api/engines`, tên, domain).
+  - **Chi tiết DB** (mockup đã duyệt): header (tên, trạng thái, version, domain, **Backup now**); tab **Kết nối** (connection string mật khẩu ẩn + Hiện + Copy, host/user/db, link tải CA); tab **Backups** (bảng: thời gian, nguồn lịch/tay, destination, dung lượng, trạng thái, Tải · Restore… · Log); tab **Lịch backup** (CRUD, chọn destination của mình/shared); tab **Người quản lý** (owner/admin thêm/gỡ theo username).
+  - **Restore**: chọn destination → duyệt (theo quy tắc mục 5) → chọn file → tên/domain/version node mới → Restore → trang trạng thái polling.
+  - **Destinations**: bảng của mình (admin: tất cả + cột owner + công tắc "dùng chung"), thêm/sửa/xóa/Test.
+  - **Settings**: allowlist (admin), tải CA cert, phiên đăng nhập của tôi (thu hồi). Admin: **Users** (mời, khóa/mở, nâng/hạ, reset mật khẩu), **Sessions** toàn hệ thống.
+- Thao tác chạy nền (backup, restore) cập nhật bằng **polling** 2–3 giây.
+
+### 9. API
+
+- Mọi route `/api/*` hiện có giữ nguyên đường dẫn nhưng **áp quyền** theo mục 5 (lọc danh sách, 404 cho tài nguyên không thuộc quyền, 403 cho thao tác cấm trên tài nguyên thấy được).
+- Thêm (tên endpoint do builder quyết, gợi ý): `GET /api/setup/status`, `POST /api/setup`, `POST /api/auth/scram/start|finish`, `POST /api/auth/logout`, `GET /api/me`, `POST /api/me/password`, sessions (list/revoke), users + invites (admin), `GET|POST|DELETE /api/databases/{db}/members`, `PATCH /api/destinations/{id}` (cờ `shared`, admin).
+- Response JSON có thêm `owner` (username) cho DB/destination.
+
+### 10. Đường thoát khi tự khóa (anti-goal 3)
+
+Lệnh chạy **bên trong container** (`docker exec <fridge> /fridge recover …`), đọc env của server và thao tác thẳng vào DB + file Traefik, không qua API/đăng nhập:
+- `fridge recover allowlist <cidr>...` — đặt lại allowlist.
+- `fridge recover reset-password <username>` — in link lời mời reset mật khẩu.
+- `fridge recover promote <username>` — nâng một user thành admin.
+
+### 11. Cấu hình
+
+- **Bỏ** `FRIDGE_TOKEN` khỏi server, compose, `.env.example`, README.
+- **Thêm** `FRIDGE_SETUP_TOKEN` (cần khi chưa có user), `FRIDGE_PUBLIC_HOSTS` (tùy chọn).
+- CLI: `FRIDGE_URL` mặc định `https://localhost:8443`; CLI tin CA nội bộ qua `--ca-file`/`FRIDGE_CA_FILE` hoặc `fridge login --insecure` lần đầu để tải CA (builder quyết chi tiết, nhưng mặc định **không** tắt kiểm tra TLS).
+
+### 12. Quyết định bổ sung (lựa chọn của Claude, sau builder check)
+
+- **IP thật của client**: Fridge chỉ tin `X-Forwarded-For` khi request đến từ Traefik (env `FRIDGE_TRUSTED_PROXY`, mặc định hostname `traefik`, resolve lúc khởi động); container fridge không publish port. IP này dùng cho khóa đăng nhập, `sessions.ip` và log. CSRF so `Origin` với `Host` mà Traefik chuyển nguyên.
+- **CA cert công khai**: `GET /api/ca` **không cần đăng nhập** (chỉ là cert công khai). `fridge login` lần đầu chưa có CA → tải CA, in fingerprint SHA-256, hỏi xác nhận (TOFU), lưu vào `~/.config/fridge/ca.pem` và dùng từ đó; `--ca-file`/`FRIDGE_CA_FILE` để chỉ định sẵn. Không có chế độ tắt kiểm tra TLS.
+- **Traefik**: cert mặc định không ảnh hưởng route DB — các router `:5432` đã chọn cert theo SNI (`tls.certificates` từng domain); SNI lạ vốn không có router. Đổi entrypoint `api :8080` → `websecure :8443` + `web :8080` (redirect) được chấp nhận; `ping :8082` giữ nguyên.
+- **Backup khi destination không còn trong tầm nhìn**: ai có quyền với DB thì luôn thấy, tải (presign phía server), restore các bản backup của DB đó, bất kể destination thuộc ai hay đã bỏ dùng chung. Không cho xóa destination khi còn lịch backup (của bất kỳ ai) trỏ tới (giữ quy tắc ErrInUse hiện có). Bỏ cờ dùng chung không phá lịch có sẵn của người khác.
+- **Người quản lý DB**: xem connection string (kể cả mật khẩu), Backup now, đặt lịch (destination của mình hoặc shared), restore vào node mới (họ là owner node mới) — đúng như bảng mục 5.
+- **SCRAM**: server từ chối đăng ký với `iterations < 600000` hoặc `> 10000000`, salt khác 16 byte. User giả trả `iterations = 600000` cố định; bước finish trả cùng lỗi chung và có thời gian xử lý tương đương. **Re-auth** (đổi mật khẩu): một vòng SCRAM start/finish với `purpose=reauth` → trả `reauth_token` dùng một lần, sống 2 phút, gắn với session hiện tại; `POST /api/me/password` cần token này.
+- **Nâng cấp từ giai đoạn 1** (chưa có user): bắt buộc làm setup. Trong lúc chưa setup, `/api/*` (trừ setup/status/ca/healthz/readyz) trả **401 `{"error":"setup required"}`**; CLI in hướng dẫn mở web để setup.
+- **Host trong link mời**: lấy từ `Host` của request tạo lời mời; lệnh `recover reset-password` (không có request) dùng tên đầu tiên trong `FRIDGE_PUBLIC_HOSTS`, không có thì `localhost`.
+- **Kiểm thử JS**: trang `/test/scram.html` (+ file JS riêng, tuân CSP) chạy test vector RFC 7677 trong trình duyệt, hiện PASS/FAIL. Vô hại nên nhúng luôn; không cần Node/npm.
+
+## Để builder tự quyết
+
+Tên endpoint/JSON cụ thể, cấu trúc file JS, cách vendor Bootstrap (phiên bản 5.3.x), giao diện chi tiết từng form, cách tổ chức package Go cho auth/web, chi tiết UX CLI trust CA.
+
+## Verification
+
+1. DB metadata rỗng + `FRIDGE_SETUP_TOKEN` → mở `https://localhost:8443` → bị chuyển tới Tạo admin; sai token bị từ chối; đúng → vào Databases. Restart server → không còn màn setup; `POST /api/setup` trả 409.
+2. Bắt gói tin (hoặc log request phía server) khi tạo admin và đăng nhập: không có mật khẩu dạng rõ; DB chỉ chứa salt/stored_key/server_key.
+3. Test vector SCRAM-SHA-256 của RFC 7677 pass cho phía server (Go) và phía CLI; JS kiểm bằng cùng vector trong một trang test.
+4. Sai mật khẩu 5 lần/phút → khóa 5 phút; username không tồn tại trả cùng thông điệp và cùng dạng `server_first`.
+5. User A tạo DB `a1` và destination `dA`; user B không thấy `a1`/`dA` (404 qua API, không có trong UI); A thêm B làm người quản lý `a1` → B thấy và backup được, nhưng không thêm người khác được; admin thấy tất cả.
+6. Admin tạo destination `dAdmin` (mặc định riêng: B không thấy), rồi đánh dấu `shared` → B chọn được khi đặt lịch, không thấy secret, không duyệt được bucket; chỉ thấy backup của DB mình trên destination đó.
+7. Session: đăng xuất/đổi mật khẩu/khóa user → session ID cũ (web và CLI) trả 401 ngay; quá 12h không hoạt động → 401.
+8. CSRF: POST bằng cookie với `Origin` lạ → 403.
+9. `http://localhost:8080` redirect sang `https://…:8443`; cert là cert tự sinh từ CA nội bộ, có SAN `localhost` và các tên trong `FRIDGE_PUBLIC_HOSTS`.
+10. `fridge login` → `fridge ls` chỉ hiện DB của user đó; `fridge logout` → lệnh tiếp theo 401.
+11. `docker exec … /fridge recover allowlist 10.0.0.0/8` mở lại truy cập sau khi tự khóa; `recover reset-password` in link dùng được.
+12. Sidebar thu gọn/mở, trạng thái giữ sau reload; mọi trang chạy với CSP `default-src 'self'` không lỗi console.

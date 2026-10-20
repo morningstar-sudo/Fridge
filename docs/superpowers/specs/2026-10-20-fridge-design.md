@@ -264,10 +264,11 @@ deploy/traefik.yml          # static config
 ## Giai đoạn triển khai
 
 1. **Xương sống với Postgres**: store, Docker, engine Postgres có catalog version, Traefik SNI route + IP allowlist, internal CA, API + CLI, S3 destinations + test, schedule + Backup now, restore từ file S3 vào node mới, alert backup fail, `/healthz` + `/readyz` + healthcheck compose. Chạy được end-to-end.
-2. **Health, monitor & giới hạn tài nguyên** (mục 9–11): health checker + `/api/health` + cảnh báo chuyển trạng thái; collector host/DB + lịch sử 24h + `/metrics` + cảnh báo ngưỡng; giới hạn CPU/RAM bắt buộc, quota disk cứng bằng loop device, tinh chỉnh Postgres theo RAM, `fridge top`, `fridge limits`.
-3. **Thêm 4 engine**: Mongo, Redis (Traefik SNI), MySQL, MariaDB (ProxySQL) — mỗi engine kèm lệnh đếm kết nối, tinh chỉnh theo RAM, healthcheck.
-4. **An toàn**: ACME DNS-01, test-restore định kỳ, auth + role + audit, soft-delete, restore ghi đè, reconcile loop, alert no-backup-26h.
-5. **Web UI** (htmx) phủ các luồng trên, gồm: dropdown version, nhập giới hạn tài nguyên, trang Destinations, tab Backups, trình duyệt file S3 + Restore 1 click có log trực tiếp, trang Health, biểu đồ tài nguyên 24h.
+2. **Web admin, tài khoản & phân quyền theo tài nguyên** — thiết kế riêng: `2026-10-20-fridge-web-admin-design.md` (Vanilla JS + Bootstrap 5, setup token, SCRAM-SHA-256, session stateful, admin/user, owner DB/destination, HTTPS tự ký). Thay cho mục 6 (Auth & quyền) của tài liệu này.
+3. **Health, monitor & giới hạn tài nguyên** (mục 9–11): health checker + `/api/health` + cảnh báo chuyển trạng thái; collector host/DB + lịch sử 24h + `/metrics` + cảnh báo ngưỡng; giới hạn CPU/RAM bắt buộc, quota disk cứng bằng loop device, tinh chỉnh Postgres theo RAM, `fridge top`, `fridge limits`.
+4. **Thêm 4 engine**: Mongo, Redis (Traefik SNI), MySQL, MariaDB (ProxySQL) — mỗi engine kèm lệnh đếm kết nối, tinh chỉnh theo RAM, healthcheck.
+5. **An toàn**: ACME DNS-01, test-restore định kỳ, audit, soft-delete, restore ghi đè, reconcile loop, alert no-backup-26h.
+6. **Bổ sung Web UI** cho các giai đoạn sau: nhập giới hạn tài nguyên, trang Health, biểu đồ tài nguyên 24h, log chạy trực tiếp (SSE), các engine mới.
 
 ## Để builder tự quyết
 
