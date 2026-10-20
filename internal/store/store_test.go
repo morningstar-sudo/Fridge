@@ -98,8 +98,8 @@ func TestDestinationDeleteInUse(t *testing.T) {
 	if err := s.DeleteDestination(ctx, dest.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.GetDestination(ctx, dest.ID); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("want ErrNotFound, got %v", err)
+	if g, err := s.GetDestination(ctx, dest.ID); err != nil || g.DeletedAt == nil {
+		t.Fatalf("want soft-deleted row, got %+v %v", g, err)
 	}
 }
 

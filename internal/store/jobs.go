@@ -19,6 +19,7 @@ type Backup struct {
 	SizeBytes                                                 int64
 	StartedAt                                                 time.Time
 	FinishedAt                                                *time.Time
+	StartedByID                                               *int64
 }
 
 type Restore struct {
@@ -27,14 +28,15 @@ type Restore struct {
 	TargetDatabaseID                                             *int64
 	StartedAt                                                    time.Time
 	FinishedAt                                                   *time.Time
+	StartedByID                                                  *int64
 }
 
 type scanner interface{ Scan(...any) error }
 
 const (
 	schedCols   = `id, database_id, destination_id, cron, prefix, keep_latest, enabled`
-	backupCols  = `id, database_id, destination_id, schedule_id, trigger, engine, engine_version, status, s3_key, log, error, size_bytes, started_at, finished_at`
-	restoreCols = `id, destination_id, s3_key, source_engine, source_version, mode, status, log, error, target_database_id, started_at, finished_at`
+	backupCols  = `id, database_id, destination_id, schedule_id, trigger, engine, engine_version, status, s3_key, log, error, size_bytes, started_at, finished_at, started_by_id`
+	restoreCols = `id, destination_id, s3_key, source_engine, source_version, mode, status, log, error, target_database_id, started_at, finished_at, started_by_id`
 )
 
 func (x *Schedule) scan(r scanner) error {
@@ -42,11 +44,11 @@ func (x *Schedule) scan(r scanner) error {
 }
 
 func (x *Backup) scan(r scanner) error {
-	return r.Scan(&x.ID, &x.DatabaseID, &x.DestinationID, &x.ScheduleID, &x.Trigger, &x.Engine, &x.EngineVersion, &x.Status, &x.S3Key, &x.Log, &x.Error, &x.SizeBytes, &x.StartedAt, &x.FinishedAt)
+	return r.Scan(&x.ID, &x.DatabaseID, &x.DestinationID, &x.ScheduleID, &x.Trigger, &x.Engine, &x.EngineVersion, &x.Status, &x.S3Key, &x.Log, &x.Error, &x.SizeBytes, &x.StartedAt, &x.FinishedAt, &x.StartedByID)
 }
 
 func (x *Restore) scan(r scanner) error {
-	return r.Scan(&x.ID, &x.DestinationID, &x.S3Key, &x.SourceEngine, &x.SourceVersion, &x.Mode, &x.Status, &x.Log, &x.Error, &x.TargetDatabaseID, &x.StartedAt, &x.FinishedAt)
+	return r.Scan(&x.ID, &x.DestinationID, &x.S3Key, &x.SourceEngine, &x.SourceVersion, &x.Mode, &x.Status, &x.Log, &x.Error, &x.TargetDatabaseID, &x.StartedAt, &x.FinishedAt, &x.StartedByID)
 }
 
 // list runs q and scans every row with scan.
@@ -122,9 +124,9 @@ func (s *Store) DeleteSchedulesForDatabase(ctx context.Context, databaseID int64
 // StartBackup inserts a running backup; ErrConflict if the database already has one.
 func (s *Store) StartBackup(ctx context.Context, b *Backup) error {
 	b.Status = "running"
-	return mapErr(s.pool.QueryRow(ctx, `INSERT INTO backups(database_id, destination_id, schedule_id, trigger, engine, engine_version, status, s3_key)
-		VALUES($1,$2,$3,$4,$5,$6,'running',$7) RETURNING id, started_at`,
-		b.DatabaseID, b.DestinationID, b.ScheduleID, b.Trigger, b.Engine, b.EngineVersion, b.S3Key).Scan(&b.ID, &b.StartedAt))
+	return mapErr(s.pool.QueryRow(ctx, `INSERT INTO backups(database_id, destination_id, schedule_id, trigger, engine, engine_version, status, s3_key, started_by_id)
+		VALUES($1,$2,$3,$4,$5,$6,'running',$7,$8) RETURNING id, started_at`,
+		b.DatabaseID, b.DestinationID, b.ScheduleID, b.Trigger, b.Engine, b.EngineVersion, b.S3Key, b.StartedByID).Scan(&b.ID, &b.StartedAt))
 }
 
 func (s *Store) FinishBackup(ctx context.Context, id int64, status string, size int64, log, errText string) error {
@@ -154,9 +156,9 @@ func (s *Store) DeleteBackup(ctx context.Context, id int64) error {
 
 func (s *Store) StartRestore(ctx context.Context, r *Restore) error {
 	r.Status = "running"
-	return mapErr(s.pool.QueryRow(ctx, `INSERT INTO restores(destination_id, s3_key, source_engine, source_version, target_database_id, mode, status)
-		VALUES($1,$2,$3,$4,$5,$6,'running') RETURNING id, started_at`,
-		r.DestinationID, r.S3Key, r.SourceEngine, r.SourceVersion, r.TargetDatabaseID, r.Mode).Scan(&r.ID, &r.StartedAt))
+	return mapErr(s.pool.QueryRow(ctx, `INSERT INTO restores(destination_id, s3_key, source_engine, source_version, target_database_id, mode, status, started_by_id)
+		VALUES($1,$2,$3,$4,$5,$6,'running',$7) RETURNING id, started_at`,
+		r.DestinationID, r.S3Key, r.SourceEngine, r.SourceVersion, r.TargetDatabaseID, r.Mode, r.StartedByID).Scan(&r.ID, &r.StartedAt))
 }
 
 func (s *Store) SetRestoreTarget(ctx context.Context, id, databaseID int64) error {
@@ -192,4 +194,18 @@ func (s *Store) FailRunning(ctx context.Context, reason string) (int, error) {
 		n += int(tag.RowsAffected())
 	}
 	return n, nil
+}
+
+func (s *Store) GetBackupByKey(ctx context.Context, destID int64, key string) (Backup, error) {
+	var x Backup
+	err := x.scan(s.pool.QueryRow(ctx, `SELECT `+backupCols+` FROM backups WHERE destination_id=$1 AND s3_key=$2`, destID, key))
+	return x, mapErr(err)
+}
+
+// ListOKBackupsOnDestination lists finished backups, newest first; visibleTo limits them
+// to databases that user owns or is a member of (nil = all).
+func (s *Store) ListOKBackupsOnDestination(ctx context.Context, destID int64, visibleTo *int64) ([]Backup, error) {
+	return list(ctx, s, scanBackup, `SELECT `+backupCols+` FROM backups WHERE destination_id=$1 AND status='ok'
+		AND ($2::bigint IS NULL OR database_id IN (SELECT id FROM databases WHERE owner_id=$2
+			UNION SELECT database_id FROM database_members WHERE user_id=$2)) ORDER BY id DESC`, destID, visibleTo)
 }
