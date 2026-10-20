@@ -100,3 +100,22 @@ func TestRunExecRemove(t *testing.T) {
 		t.Fatalf("second remove: %v", err)
 	}
 }
+
+func TestSubnets(t *testing.T) {
+	ctx := context.Background()
+	c, err := New("fridge-test-subnets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.EnsureNetwork(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.cli.NetworkRemove(ctx, "fridge-test-subnets") })
+	ps, err := c.Subnets(ctx, "fridge-test-subnets")
+	if err != nil || len(ps) == 0 || !ps[0].IsValid() {
+		t.Fatalf("got %v %v", ps, err)
+	}
+	if _, err := c.Subnets(ctx, "fridge-no-such-net"); err == nil {
+		t.Fatal("want error for missing network")
+	}
+}

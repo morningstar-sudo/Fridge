@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/netip"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -205,4 +206,26 @@ func (c *Client) Remove(ctx context.Context, id, vol string) error {
 		}
 	}
 	return nil
+}
+
+// Subnets returns the IPAM subnets of the named networks (default: the client's network).
+func (c *Client) Subnets(ctx context.Context, names ...string) ([]netip.Prefix, error) {
+	if len(names) == 0 {
+		names = []string{c.network}
+	}
+	var out []netip.Prefix
+	for _, n := range names {
+		ins, err := c.cli.NetworkInspect(ctx, n, network.InspectOptions{})
+		if err != nil {
+			return nil, err
+		}
+		for _, cfg := range ins.IPAM.Config {
+			p, err := netip.ParsePrefix(cfg.Subnet)
+			if err != nil {
+				return nil, fmt.Errorf("network %s: subnet %q: %w", n, cfg.Subnet, err)
+			}
+			out = append(out, p)
+		}
+	}
+	return out, nil
 }

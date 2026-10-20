@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync/atomic"
@@ -10,18 +13,44 @@ import (
 )
 
 func TestServerRequiresEnv(t *testing.T) {
-	for _, k := range []string{"FRIDGE_DATABASE_URL", "FRIDGE_SECRET_KEY", "FRIDGE_TOKEN"} {
+	for _, k := range []string{"FRIDGE_DATABASE_URL", "FRIDGE_SECRET_KEY"} {
 		t.Setenv(k, "")
 	}
-	t.Setenv("FRIDGE_TOKEN", "x")
 	err := runServer()
-	if err == nil || !strings.Contains(err.Error(), "FRIDGE_DATABASE_URL, FRIDGE_SECRET_KEY") || strings.Contains(err.Error(), "FRIDGE_TOKEN") {
+	if err == nil || !strings.Contains(err.Error(), "FRIDGE_DATABASE_URL, FRIDGE_SECRET_KEY") {
 		t.Fatalf("got %v", err)
 	}
 	t.Setenv("FRIDGE_DATABASE_URL", "postgres://x")
 	t.Setenv("FRIDGE_SECRET_KEY", "short")
 	if err := runServer(); err == nil || !strings.Contains(err.Error(), "FRIDGE_SECRET_KEY") {
 		t.Fatalf("bad key: got %v", err)
+	}
+}
+
+type fakeSubnets struct {
+	ps  []netip.Prefix
+	err error
+}
+
+func (f fakeSubnets) Subnets(context.Context, ...string) ([]netip.Prefix, error) { return f.ps, f.err }
+
+func TestTrustedProxies(t *testing.T) {
+	ctx := context.Background()
+	net1 := netip.MustParsePrefix("172.30.0.0/16")
+	t.Setenv("FRIDGE_TRUSTED_PROXY", "")
+	if p, err := trustedProxies(ctx, fakeSubnets{ps: []netip.Prefix{net1}}, "n"); err != nil || len(p) != 1 || p[0] != net1 {
+		t.Fatal(p, err)
+	}
+	if p, err := trustedProxies(ctx, fakeSubnets{err: errors.New("docker down")}, "n"); err != nil || p != nil {
+		t.Fatal("docker error must fall back to loopback only:", p, err)
+	}
+	t.Setenv("FRIDGE_TRUSTED_PROXY", "10.0.0.0/8, 192.168.0.0/16")
+	if p, err := trustedProxies(ctx, fakeSubnets{ps: []netip.Prefix{net1}}, "n"); err != nil || len(p) != 2 {
+		t.Fatal(p, err)
+	}
+	t.Setenv("FRIDGE_TRUSTED_PROXY", "bad")
+	if _, err := trustedProxies(ctx, fakeSubnets{}, "n"); err == nil {
+		t.Fatal("bad CIDR accepted")
 	}
 }
 

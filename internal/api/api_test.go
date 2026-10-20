@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"fridge/internal/app"
+	"fridge/internal/auth"
 	"fridge/internal/container"
 	"fridge/internal/objstore"
 	"fridge/internal/pki"
@@ -58,9 +59,29 @@ func (f *fakeObjs) PresignGet(context.Context, string, time.Duration) (string, e
 	return "http://presigned", nil
 }
 
-const tok = "s3cret-token"
+var tok string // session ID of the admin "alice", set by newSrv (tests here do not run in parallel)
 
 func newSrv(t *testing.T) (http.Handler, *fakeRT, *app.App) {
+	t.Helper()
+	h, rt, a := newRawSrv(t, "setup-tok", Options{})
+	setupAlice(t, h)
+	relaxOwner(t, a)
+	_, tok = loginAs(t, h, "alice", pwAlice)
+	return h, rt, a
+}
+
+// relaxOwner drops the NOT NULL that setup puts on owner_id: the phase-1 handlers kept here
+// do not set owners until Task 6 wires OwnerID into them.
+func relaxOwner(t *testing.T, a *app.App) {
+	t.Helper()
+	_, err := a.Store.Pool().Exec(context.Background(), `ALTER TABLE databases ALTER owner_id DROP NOT NULL;
+		ALTER TABLE destinations ALTER owner_id DROP NOT NULL`)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func newRawSrv(t *testing.T, setupToken string, o Options) (http.Handler, *fakeRT, *app.App) {
 	t.Helper()
 	key := make([]byte, 32)
 	rand.Read(key)
@@ -75,7 +96,11 @@ func newSrv(t *testing.T) (http.Handler, *fakeRT, *app.App) {
 	rt := &fakeRT{}
 	a := &app.App{Store: storetest.New(t), Box: box, RT: rt, CA: ca, TraefikDir: t.TempDir(), HealthTimeout: time.Second}
 	a.OpenObjects = func(store.Destination, string) (app.ObjectStore, error) { return &fakeObjs{}, nil }
-	return New(a, tok), rt, a
+	au, err := auth.New(a.Store, key, setupToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return New(a, au, o), rt, a
 }
 
 func do(h http.Handler, method, path, body string, auth bool) *httptest.ResponseRecorder {
@@ -101,18 +126,6 @@ func TestAuthRequired(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 	if w := do(h, "GET", "/api/engines", "", true); w.Code != 200 {
-		t.Fatal(w.Code)
-	}
-}
-
-func TestEmptyTokenRejectsAll(t *testing.T) {
-	_, _, a := newSrv(t)
-	h := New(a, "")
-	r := httptest.NewRequest("GET", "/api/engines", nil)
-	r.Header.Set("Authorization", "Bearer ")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	if w.Code != 401 {
 		t.Fatal(w.Code)
 	}
 }

@@ -15,16 +15,17 @@ import (
 
 // Scheduler runs enabled backup schedules via cron.
 type Scheduler struct {
-	a  *App
-	mu sync.Mutex
-	c  *cron.Cron
+	a   *App
+	mu  sync.Mutex
+	c   *cron.Cron
+	ids []cron.EntryID // schedule entries from the last Reload; fixed jobs are never listed
 }
 
 func NewScheduler(a *App) *Scheduler {
 	return &Scheduler{a: a, c: cron.New(cron.WithLocation(time.Local))}
 }
 
-// Reload replaces all cron entries with one per enabled schedule.
+// Reload replaces the schedule entries with one per enabled schedule; fixed jobs stay.
 func (s *Scheduler) Reload(ctx context.Context) error {
 	scs, err := s.a.Store.ListEnabledSchedules(ctx)
 	if err != nil {
@@ -32,15 +33,27 @@ func (s *Scheduler) Reload(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, e := range s.c.Entries() {
-		s.c.Remove(e.ID)
+	for _, id := range s.ids {
+		s.c.Remove(id)
 	}
+	s.ids = nil
 	for _, sc := range scs {
-		if _, err := s.c.AddFunc(sc.Cron, func() { s.run(sc) }); err != nil {
+		id, err := s.c.AddFunc(sc.Cron, func() { s.run(sc) })
+		if err != nil {
 			log.Printf("schedule %d: bad cron %q: %v", sc.ID, sc.Cron, err)
+			continue
 		}
+		s.ids = append(s.ids, id)
 	}
 	return nil
+}
+
+// AddFixed registers a job that Reload never removes.
+func (s *Scheduler) AddFixed(spec string, fn func()) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.c.AddFunc(spec, fn)
+	return err
 }
 
 func (s *Scheduler) run(sc store.Schedule) {

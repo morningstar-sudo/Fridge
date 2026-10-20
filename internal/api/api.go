@@ -1,27 +1,37 @@
-// Package api exposes the app layer over HTTP with static bearer-token auth.
+// Package api exposes the app layer over HTTP with session authentication.
 package api
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"fridge/internal/app"
+	"fridge/internal/auth"
 	"fridge/internal/engine"
 	"fridge/internal/objstore"
 	"fridge/internal/store"
 )
 
-type server struct{ a *app.App }
+type server struct {
+	a       *app.App
+	au      *auth.Service
+	trusted func(net.IP) bool
+}
 
-// New builds the HTTP handler. An empty token rejects every /api request.
-func New(a *app.App, token string) http.Handler {
-	s := &server{a}
+// Options configures New.
+type Options struct {
+	Web          http.Handler         // nil: 404 for paths outside /api, /healthz, /readyz
+	TrustedProxy func(ip net.IP) bool // nil: loopback only
+}
+
+// New builds the HTTP handler: public routes, then everything else behind session auth.
+func New(a *app.App, au *auth.Service, o Options) http.Handler {
+	s := &server{a: a, au: au, trusted: o.TrustedProxy}
 	m := http.NewServeMux()
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	m.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
@@ -54,23 +64,17 @@ func New(a *app.App, token string) http.Handler {
 	api.HandleFunc("GET /api/restores/{id}", s.getRestore)
 	api.HandleFunc("GET /api/settings/allowlist", s.getAllow)
 	api.HandleFunc("PUT /api/settings/allowlist", s.putAllow)
-	api.HandleFunc("GET /api/ca", func(w http.ResponseWriter, r *http.Request) {
+	m.HandleFunc("GET /api/ca", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.Write(a.CA.CertPEM())
 	})
-	m.Handle("/api/", auth(token, api))
-	return m
-}
-
-func auth(token string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if token == "" || !ok || subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
-			writeJSON(w, 401, map[string]string{"error": "unauthorized"})
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+	s.publicRoutes(m)
+	s.loginRoutes(api)
+	m.Handle("/api/", s.requireLogin(api))
+	if o.Web != nil {
+		m.Handle("/", o.Web)
+	}
+	return headers(m)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -86,8 +90,16 @@ func fail(w http.ResponseWriter, err error) {
 		code = 400
 	case errors.Is(err, store.ErrNotFound):
 		code = 404
-	case errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrInUse):
+	case errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrInUse), errors.Is(err, store.ErrLastAdmin), errors.Is(err, auth.ErrSetupDone):
 		code = 409
+	case errors.Is(err, auth.ErrInvalid), errors.Is(err, auth.ErrInviteInvalid):
+		code = 400
+	case errors.Is(err, auth.ErrBadCredentials), errors.Is(err, auth.ErrUnauthenticated):
+		code = 401
+	case errors.Is(err, auth.ErrForbidden), errors.Is(err, auth.ErrBadSetupToken):
+		code = 403
+	case errors.Is(err, auth.ErrLocked), errors.Is(err, auth.ErrBusy):
+		code = 429
 	}
 	msg := err.Error()
 	if code == 500 {
