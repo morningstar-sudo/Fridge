@@ -213,9 +213,10 @@ Lệnh chạy **bên trong container** (`docker exec <fridge> /fridge recover �
 
 ### 13b. User/mật khẩu của DB do người dùng đặt (người dùng chốt)
 
-- Form **Tạo DB** và form **restore vào node mới** có ô **User** và **Mật khẩu**, mỗi ô có nút **Ngẫu nhiên** sinh chuỗi trên trình duyệt (`crypto.getRandomValues`): user `u_` + 8 ký tự `[a-z0-9]`, mật khẩu 24 ký tự `[A-Za-z0-9-_.~]`; ô mật khẩu có Hiện/Ẩn + Copy.
-- Để trống → server tự sinh như giai đoạn 1 (`<tên>_app` + `crypto/rand.Text()`). *(Lựa chọn của Claude, giữ tương thích CLI/API.)*
-- Ràng buộc *(lựa chọn của Claude)*: user `^[a-z_][a-z0-9_]{0,62}$`, cấm `postgres` và tiền tố `pg_`; mật khẩu 12–128 ký tự ASCII in được, không khoảng trắng. Sai → 400.
+- Form **Tạo DB** và form **restore vào node mới** có ô **User** và **Mật khẩu**, mỗi ô có nút **Ngẫu nhiên** sinh chuỗi trên trình duyệt (`crypto.getRandomValues`): hậu tố user 8 ký tự `[a-z0-9]`, mật khẩu 24 ký tự `[A-Za-z0-9-_.~]`; ô mật khẩu có Hiện/Ẩn + Copy.
+- **Tên user bắt buộc có tiền tố `<username owner>_`** (người dùng chốt — tránh lộ tài khoản tenant khác qua kiểm tra trùng tên): người dùng chỉ nhập hậu tố `^[a-z0-9_]{1,15}$`, UI hiện tiền tố cố định; trùng tên chỉ kiểm trong phạm vi owner; áp cho mọi engine. Username tài khoản Fridge vì vậy siết thành `^[a-z][a-z0-9_]{2,15}$` (không `.`/`-`, ≤ 16 ký tự → tổng ≤ 32 ký tự, vừa giới hạn MySQL).
+- Để trống → hậu tố = tên DB, mật khẩu `crypto/rand.Text()`. *(Lựa chọn của Claude, giữ tương thích CLI/API.)*
+- Ràng buộc *(lựa chọn của Claude)*: mật khẩu 12–128 ký tự ASCII in được, không khoảng trắng. Sai → 400.
 - Mật khẩu DB đi lên server qua HTTPS (bắt buộc, vì Fridge phải tạo user trong Postgres) và lưu mã hóa AES-GCM như hiện tại. Connection string dựng bằng `url.UserPassword` để ký tự đặc biệt đúng.
 - Tạo/restore DB với user/mật khẩu tự đặt được ghi audit (không ghi mật khẩu).
 - CLI: `fridge create … --db-user U --db-password-stdin` hoặc `--random-credentials` (CLI tự sinh như trên và in ra một lần).

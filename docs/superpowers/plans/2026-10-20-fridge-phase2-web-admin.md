@@ -16,7 +16,8 @@
 - **Không thêm dependency Go mới.** Dùng stdlib + các module đã có trong `go.mod`.
 - Frontend: **Vanilla JS (ES modules) + Bootstrap 5.3.3 + Bootstrap Icons 1.11.3 vendored** trong `internal/web/static/vendor/`; không CDN, không npm, không build step; **không inline script/style** (CSP `default-src 'self'`).
 - SCRAM-SHA-256 theo RFC 5802/7677, chỉ `n,,` (không channel binding). PBKDF2 **600000** vòng khi đăng ký; server nhận `iterations` trong [600000, 10000000], salt đúng **16 byte**.
-- Username: `^[a-z][a-z0-9._-]{2,31}$`. Mật khẩu ≥ **12** ký tự (kiểm ở client).
+- Username tài khoản Fridge: `^[a-z][a-z0-9_]{2,15}$` (3–16 ký tự, không `.`/`-` — dùng làm tiền tố tên user DB). Mật khẩu ≥ **12** ký tự (kiểm ở client).
+- Tên user ứng dụng của DB = `<username owner>_<hậu tố>` **bắt buộc** (mọi engine); hậu tố `^[a-z0-9_]{1,15}$`; tổng ≤ 32 ký tự (giới hạn MySQL). Trùng tên chỉ kiểm trong phạm vi owner.
 - Session ID 32 byte ngẫu nhiên (base64url, không padding); DB chỉ lưu **SHA-256**. Cookie `fridge_session`: `HttpOnly; Secure; SameSite=Strict; Path=/`. Hết hạn: không hoạt động **12h**, tuyệt đối **7 ngày**; cập nhật `last_seen_at` tối đa 1 lần/phút; dọn session hết hạn mỗi giờ.
 - Khóa đăng nhập: **5** lần sai trong **1 phút** theo (username, IP) → khóa **5 phút**. Trạng thái SCRAM dở dang sống **60s**. Lời mời hết hạn **48h**, dùng một lần. Reauth token sống **2 phút**, dùng một lần.
 - Tài nguyên không có quyền xem → **404**; thao tác cấm trên tài nguyên thấy được → **403**; trước khi setup → `/api/*` (trừ route công khai) trả **401 `{"error":"setup required"}`**.
@@ -320,8 +321,9 @@ func TestRevokeSession(t *testing.T)       // user không revoke được sessio
 - Produces:
 
 ```go
-// CreateRequest thêm OwnerID int64 (0 = không owner, chỉ dùng cho job hệ thống), DBUser, DBPassword string (rỗng cả hai → sinh như cũ; chỉ một trong hai rỗng → user rỗng = "<tên>_app", password rỗng = rand.Text()).
-//   Validate: DBUser `^[a-z_][a-z0-9_]{0,62}$`, ≠ "postgres", không tiền tố "pg_"; DBPassword 12–128 ký tự ASCII in được (0x21–0x7E) → sai ErrInvalid.
+// CreateRequest thêm OwnerID int64 (0 = không owner, chỉ dùng cho job hệ thống), DBUser, DBPassword string (password rỗng → rand.Text(); quy tắc DBUser bên dưới).
+//   DBUser là HẬU TỐ: tên thật = "<owner username>_" + DBUser; DBUser `^[a-z0-9_]{1,15}$` (nếu client gửi kèm sẵn đúng tiền tố "<owner>_" thì bỏ tiền tố rồi kiểm); rỗng → hậu tố = tên DB (`-`→`_`, cắt 15 ký tự). Tên thật trùng một DB đang hoạt động KHÁC của cùng owner → ErrConflict (không bao giờ so với owner khác).
+//   Validate: DBPassword 12–128 ký tự ASCII in được (0x21–0x7E) → sai ErrInvalid.
 // RestoreRequest thêm OwnerID int64 → node mới & restores.started_by_id; RestoreRequest.New (CreateRequest) mang DBUser/DBPassword.
 // engine.Postgres.ConnString: dùng url.UserPassword(user, password) thay QueryEscape.
 // Hai user trên mỗi node (spec 13b-2):
@@ -360,7 +362,8 @@ func TestTwoUsersPerNode(t *testing.T)     // tạo "shop" và "blog" → RunSpe
 func TestRotateSuperuser(t *testing.T)     // rotate → Exec ALTER ROLE "su_shop" (stdin) rồi mật khẩu lưu đổi; execFn lỗi → mật khẩu lưu giữ nguyên, trả lỗi
 func TestRestoreUsesAppRole(t *testing.T)  // restore .dump → cmd chứa "--role=<app user>"; restore .sql.gz → stdin bắt đầu bằng `SET ROLE "<app user>";`
 func TestLegacyDBUsesSingleUser(t *testing.T) // DB có AdminUser "" → DumpCmd -U <db_user>
-func TestCustomDBCredentials(t *testing.T) // DBUser "shop_rw", DBPassword "S3cure-pass.~x" → RunSpec Env có POSTGRES_USER=shop_rw, POSTGRES_PASSWORD=…; ConnString giải mã đúng qua url.Parse (User.Password() == mật khẩu); bảng lỗi: "Postgres", "pg_x", "postgres", mật khẩu 11 ký tự, có dấu cách, có ký tự non-ASCII → ErrInvalid; để trống → "<tên>_app" + mật khẩu 26 ký tự
+func TestDBUserPrefix(t *testing.T)       // owner "alice", DBUser "shop" → POSTGRES app role "alice_shop"; DBUser "alice_shop" → "alice_shop" (không nhân đôi); DBUser "bob_x" → "alice_bob_x"; rỗng với DB "my-db" → "alice_my_db"; hậu tố 16 ký tự hoặc có "-" → ErrInvalid; owner bob tạo DBUser "shop" khi alice đã có "alice_shop" → OK ("bob_shop")
+func TestCustomDBCredentials(t *testing.T) // owner alice, DBUser "shop_rw", DBPassword "S3cure-pass.~x" → stdin SQL tạo role "alice_shop_rw" với mật khẩu đó; ConnString (role app) giải mã đúng qua url.Parse (User.Username()=="alice_shop_rw", User.Password()==mật khẩu); bảng lỗi mật khẩu: 11 ký tự, có dấu cách, có ký tự non-ASCII → ErrInvalid; để trống mật khẩu → 26 ký tự ngẫu nhiên
 func TestAccessHelpers(t *testing.T)       // bảng: admin/owner/member/khác × CanAccessDB, IsDBOwner; CanManage/CanUse với dest riêng/shared
 func TestMembersApp(t *testing.T)          // AddMember "nobody" → ErrInvalid; thêm B → B thấy DB qua VisibleDatabases; Remove → mất
 func TestListRestorableShared(t *testing.T) // dS shared (admin); backup db1(A) + db2(B) trên dS → A: chỉ key db1, có DatabaseName; admin: liệt kê bucket (fakeObjects có thêm "upload/x.sql.gz")
@@ -642,7 +645,7 @@ func TestWriteBaseHTTPS(t *testing.T)      // yaml: fridge-web entryPoints [webs
   - `fridge superuser show <db> [--reveal]`, `fridge superuser rotate <db>`; `fridge show <db> [--reveal] [--superuser]`
   - `fridge show <db> [--reveal]` (`--reveal` gọi `/connection`, có ghi audit), `fridge audit [--user U] [--action A] [--db D] [--since 24h] [--csv]`.
   - `fridge recover …` ghi audit với actor `recover` (`recover.allowlist`, `recover.reset_password`, `recover.promote`).
-  - `fridge create` và `fridge restore` thêm `--db-user U`, `--db-password-stdin`, `--random-credentials` (sinh user `u_`+8 `[a-z0-9]`, mật khẩu 24 ký tự `[A-Za-z0-9-_.~]` bằng `crypto/rand`, in ra một lần); `--random-credentials` loại trừ hai cờ kia.
+  - `fridge create` và `fridge restore` thêm `--db-user U`, `--db-password-stdin`, `--random-credentials` (`--db-user` là hậu tố; sinh hậu tố 8 ký tự `[a-z0-9]`, mật khẩu 24 ký tự `[A-Za-z0-9-_.~]` bằng `crypto/rand`, in ra một lần); `--random-credentials` loại trừ hai cờ kia.
   - Mọi request: `FRIDGE_URL` mặc định `https://localhost:8443`; token = env `FRIDGE_TOKEN` nếu có, ngược lại từ file session; TLS tin CA từ `--ca-file`/`FRIDGE_CA_FILE`/`ca.pem` đã lưu + system pool; **không** có cờ insecure. 401 → in `not logged in — run: fridge login`; `setup required` → in hướng dẫn mở web hoặc `fridge setup`.
   - `fridge recover allowlist <cidr>... | reset-password <user> | promote <user>`: chạy **trong container**, đọc env server (`FRIDGE_DATABASE_URL`, `FRIDGE_SECRET_KEY`, `FRIDGE_TRAEFIK_DIR`, `FRIDGE_API_BACKEND`, `FRIDGE_PUBLIC_HOSTS`), thao tác thẳng store/proxy (allowlist → `SetSetting` + `WriteBase`; reset → `auth.CreateResetInvite(nil, id)` in `https://<host đầu tiên hoặc localhost>:8443/#/invite/<token>`; promote → `auth.Promote`).
 
@@ -706,7 +709,7 @@ func TestNoInlineScripts(t *testing.T)  // quét mọi .html trong embed: không
 **Files:** Create `internal/web/static/js/pages/{databases.js,database.js,restore.js,destinations.js}`, cập nhật `router.js`, `app.css`
 
 **Interfaces:** chỉ dùng API Task 6–10 qua `api.js`.
-- **Databases**: bảng (tên, engine/version, domain, trạng thái màu, backup gần nhất, cột owner nếu admin), nút "+ Tạo DB" (modal: engine, version dropdown từ `/api/engines`, tên, domain, **User** + **Mật khẩu** tùy chọn — mỗi ô có nút 🎲 **Ngẫu nhiên** (`crypto.getRandomValues`: user `u_`+8 `[a-z0-9]`, mật khẩu 24 `[A-Za-z0-9-_.~]`), ô mật khẩu có Hiện/Ẩn + Copy, kiểm tra cùng quy tắc với server trước khi gửi; để trống = server tự sinh) → sau tạo chuyển sang chi tiết. Form restore vào node mới có cùng 2 ô.
+- **Databases**: bảng (tên, engine/version, domain, trạng thái màu, backup gần nhất, cột owner nếu admin), nút "+ Tạo DB" (modal: engine, version dropdown từ `/api/engines`, tên, domain, **User** (input-group: tiền tố cố định `<username>_` + ô hậu tố) + **Mật khẩu** tùy chọn — mỗi ô có nút 🎲 **Ngẫu nhiên** (`crypto.getRandomValues`: hậu tố 8 `[a-z0-9]`, mật khẩu 24 `[A-Za-z0-9-_.~]`), ô mật khẩu có Hiện/Ẩn + Copy, kiểm tra cùng quy tắc với server trước khi gửi; để trống = server tự sinh) → sau tạo chuyển sang chi tiết. Form restore vào node mới có cùng 2 ô.
 - **Chi tiết DB** (mockup đã duyệt): header + nút **Backup now** (poll trạng thái backup 2–3s); tab **Kết nối** (khối **User ứng dụng** và — chỉ owner/admin — khối **Superuser** `su_<tên DB>` với Hiện/Copy và nút **Rotate** (có xác nhận); nhãn "kiểu cũ" nếu `legacy`; connection string che mật khẩu; nút Hiện/Copy gọi `GET /api/databases/{db}/connection` — mỗi lần là một dòng audit; host/user/db, link tải CA `/api/ca`); tab **Backups** (bảng: thời gian, nguồn lịch/tay, destination, dung lượng, trạng thái, Tải · Restore… · Log trong modal); tab **Lịch backup** (CRUD, destination dropdown = destination có thể dùng); tab **Người quản lý** (chỉ owner/admin sửa; người khác chỉ xem).
 - **Restore**: chọn destination → bảng file (`/objects`, ô tìm kiếm, cột DB) → chọn file → nút **Kiểm tra kỹ** (job, hiện kết quả) và form node mới (tên, domain, version — gợi ý version nguồn) → **Restore** → trang trạng thái polling; lỗi mức 1 hiện ngay dưới form. "Restore…" từ tab Backups mở trang này với file chọn sẵn.
 - **Destinations**: bảng của mình (admin: tất cả + owner + công tắc dùng chung); thêm/sửa (secret để trống = giữ)/xóa (xác nhận)/Test.
