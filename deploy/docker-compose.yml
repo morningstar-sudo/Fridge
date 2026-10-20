@@ -3,6 +3,16 @@
 name: fridge
 
 services:
+  # Traefik's file provider fails for good if its directory is missing at start, and the
+  # volume starts empty. Creating it here keeps Traefik independent of Fridge.
+  traefik-init:
+    image: busybox:1.37
+    command: ["mkdir", "-p", "/traefik/dynamic", "/traefik/certs"]
+    volumes:
+      - traefik:/traefik
+    network_mode: none
+    restart: "no"
+
   traefik:
     image: traefik:v3.5
     ports:
@@ -13,11 +23,9 @@ services:
       - traefik:/traefik
     networks: [fridge-net]
     restart: always
-    # Fridge creates /traefik/dynamic on first start; a file provider that starts before the
-    # directory exists fails for good. Only orders `compose up`; on reboot the dir already exists.
     depends_on:
-      fridge:
-        condition: service_healthy
+      traefik-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "traefik", "healthcheck", "--ping"]
       interval: 10s
@@ -69,6 +77,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+      start_period: 30s
 
   minio:
     profiles: [dev]
