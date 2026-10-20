@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -88,7 +89,12 @@ func fail(w http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrInUse):
 		code = 409
 	}
-	writeJSON(w, code, map[string]string{"error": err.Error()})
+	msg := err.Error()
+	if code == 500 {
+		log.Printf("api: internal error: %v", err)
+		msg = "internal error"
+	}
+	writeJSON(w, code, map[string]string{"error": msg})
 }
 
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
@@ -371,11 +377,11 @@ func (s *server) testDest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if _, err := s.a.Store.GetDestination(r.Context(), id); err != nil {
+		fail(w, err) // lookup failures (404/500) are not a bad destination
+		return
+	}
 	if err := s.a.TestDestination(r.Context(), id); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			fail(w, err)
-			return
-		}
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}

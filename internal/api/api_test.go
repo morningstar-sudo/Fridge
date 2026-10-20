@@ -36,24 +36,26 @@ func (f *fakeRT) Exec(_ context.Context, _ string, _ []string, _ io.Reader, _, _
 }
 func (f *fakeRT) Remove(context.Context, string, string) error { return nil }
 
-type fakeObjs struct{}
+type fakeObjs struct {
+	testErr error
+	list    []objstore.Object
+	meta    map[string]string
+}
 
-func (fakeObjs) Test(context.Context) error { return nil }
-func (fakeObjs) Put(_ context.Context, _ string, r io.Reader, _ map[string]string) (int64, error) {
+func (f *fakeObjs) Test(context.Context) error { return f.testErr }
+func (f *fakeObjs) Put(_ context.Context, _ string, r io.Reader, _ map[string]string) (int64, error) {
 	return io.Copy(io.Discard, r)
 }
-func (fakeObjs) Get(context.Context, string) (io.ReadCloser, error) {
-	return nil, errors.New("n/a")
+func (f *fakeObjs) Get(context.Context, string) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
 }
-func (fakeObjs) Meta(context.Context, string) (map[string]string, error) {
-	return nil, errors.New("n/a")
+func (f *fakeObjs) Meta(context.Context, string) (map[string]string, error) { return f.meta, nil }
+func (f *fakeObjs) List(context.Context, string, string, int) ([]objstore.Object, bool, error) {
+	return f.list, true, nil
 }
-func (fakeObjs) List(context.Context, string, string, int) ([]objstore.Object, bool, error) {
-	return nil, false, nil
-}
-func (fakeObjs) Delete(context.Context, string) error { return nil }
-func (fakeObjs) PresignGet(context.Context, string, time.Duration) (string, error) {
-	return "http://x", nil
+func (f *fakeObjs) Delete(context.Context, string) error { return nil }
+func (f *fakeObjs) PresignGet(context.Context, string, time.Duration) (string, error) {
+	return "http://presigned", nil
 }
 
 const tok = "s3cret-token"
@@ -72,7 +74,7 @@ func newSrv(t *testing.T) (http.Handler, *fakeRT, *app.App) {
 	}
 	rt := &fakeRT{}
 	a := &app.App{Store: storetest.New(t), Box: box, RT: rt, CA: ca, TraefikDir: t.TempDir(), HealthTimeout: time.Second}
-	a.OpenObjects = func(store.Destination, string) (app.ObjectStore, error) { return fakeObjs{}, nil }
+	a.OpenObjects = func(store.Destination, string) (app.ObjectStore, error) { return &fakeObjs{}, nil }
 	return New(a, tok), rt, a
 }
 
