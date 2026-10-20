@@ -184,6 +184,21 @@ Lệnh chạy **bên trong container** (`docker exec <fridge> /fridge recover �
 - Quyền: giống quy tắc duyệt file restore (mục 5).
 - CLI: `fridge check --from <dest>:<key> [--wait]`; API: `POST /api/dump-checks`, `GET /api/dump-checks/{id}` (tên do builder quyết).
 
+### 14. Trang Images — quản lý docker image của DB (người dùng chốt)
+
+- **Chỉ admin** thấy (mục sidebar "Images"; API trả 403 cho user).
+- **Phạm vi**: chỉ image Fridge dùng cho DB = image trong catalog (vd `postgres:13`…`postgres:18`) ∪ image mà container DB của Fridge (label `fridge.db_id`) đang tham chiếu. Không liệt kê, không pull, không xóa image nào khác trên host (traefik, image của người khác…).
+- **Bảng**: tag, digest rút gọn, dung lượng, ngày tạo, **version thật** (từ biến `PG_VERSION` trong config image, vd `18.1`), **số DB đang dùng** (cả DB đang dừng) kèm danh sách tên, **lần dùng gần nhất** (thời điểm tạo/khởi động container DB gần nhất dùng image đó), trạng thái cập nhật.
+- **Pull sẵn**: chọn engine + version từ catalog, hoặc "Pull tất cả" → job nền (polling); trạng thái từng tag: chưa có / đang pull / đã có / lỗi.
+- **Prune**: màn xác nhận liệt kê đúng các image Fridge **không còn DB nào dùng** + tổng dung lượng giải phóng → xóa. Image đang được DB (kể cả DB dừng) dùng **không bao giờ** bị xóa; kiểm tra lại ngay trước khi xóa (tránh race với tạo DB).
+- **Kiểm tra bản mới** (người dùng chốt: vd `postgres:18` đang là 18.1, registry đã có 18.2 → báo "new version"):
+  - So digest image local của tag với digest hiện tại của cùng tag trên registry (Docker SDK `DistributionInspect`). Khác nhau → lấy config của manifest mới từ registry (Registry HTTP API v2, token ẩn danh của Docker Hub; stdlib, không thêm thư viện) để đọc `PG_VERSION` mới.
+  - Hiển thị huy hiệu **"New version: 18.1 → 18.2"** trên dòng image; sidebar mục Images có chấm báo khi có ít nhất một bản mới.
+  - Chạy khi admin bấm "Kiểm tra cập nhật" và tự động **mỗi ngày một lần** trong scheduler *(lựa chọn của Claude)*. Kết quả lưu trong bảng `image_checks(image_ref, local_digest, local_version, remote_digest, remote_version, checked_at, error)`.
+  - Server không ra được internet → hiện "không kiểm tra được" kèm lỗi, không chặn gì khác.
+  - Chỉ **báo** và cho **pull** bản mới. Áp bản mới cho DB đang chạy (tạo lại container với cùng volume) **để sau** — DB hiện có vẫn chạy image cũ cho tới khi được tạo lại. *(Lựa chọn của Claude; nêu rõ cho người dùng.)*
+- API (tên do builder quyết): `GET /api/images`, `POST /api/images/pull`, `GET /api/images/pull/{job}`, `POST /api/images/prune/preview`, `POST /api/images/prune`, `POST /api/images/check-updates`.
+
 ## Để builder tự quyết
 
 Tên endpoint/JSON cụ thể, cấu trúc file JS, cách vendor Bootstrap (phiên bản 5.3.x), giao diện chi tiết từng form, cách tổ chức package Go cho auth/web, chi tiết UX CLI trust CA.
@@ -203,4 +218,6 @@ Tên endpoint/JSON cụ thể, cấu trúc file JS, cách vendor Bootstrap (phi�
 11. `docker exec … /fridge recover allowlist 10.0.0.0/8` mở lại truy cập sau khi tự khóa; `recover reset-password` in link dùng được.
 12. Sidebar thu gọn/mở, trạng thái giữ sau reload; mọi trang chạy với CSP `default-src 'self'` không lỗi console.
 13. Restore một file rỗng / file ảnh đổi đuôi `.dump` / file gzip hỏng header / `.dump` từ PG17 vào node PG16 → 400 ngay với lý do cụ thể, không có container hay bản ghi restore nào được tạo.
+15. Images (admin): bảng chỉ có image catalog/DB, cột số DB đúng (tạo 2 DB `postgres:16`, dừng 1 → vẫn đếm 2); "Pull" `postgres:15` → xuất hiện; Prune preview chỉ liệt kê image không DB nào dùng, xóa xong image đang dùng còn nguyên; user thường gọi `/api/images` → 403.
+16. Kiểm tra bản mới: pull một tag cũ theo digest rồi gắn lại tag (vd `postgres:18` trỏ về bản 18.0) → "Kiểm tra cập nhật" báo `18.0 → 18.x`; tắt mạng ra ngoài → hiện "không kiểm tra được", trang vẫn dùng bình thường.
 14. "Kiểm tra kỹ" một `.dump` bị cắt nửa cuối → `failed` kèm lỗi của pg_restore; một `.sql.gz` cụt → `failed` (lỗi gzip); file nguyên vẹn → `ok` với version nguồn và số mục TOC; container tạm không còn sau khi xong.
