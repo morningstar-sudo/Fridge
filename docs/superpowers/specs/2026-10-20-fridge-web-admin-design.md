@@ -220,6 +220,16 @@ Lệnh chạy **bên trong container** (`docker exec <fridge> /fridge recover �
 - Tạo/restore DB với user/mật khẩu tự đặt được ghi audit (không ghi mật khẩu).
 - CLI: `fridge create … --db-user U --db-password-stdin` hoặc `--random-credentials` (CLI tự sinh như trên và in ra một lần).
 
+### 13c. Audit log & Hoạt động (người dùng chốt)
+
+- Bảng `audit_log` **chỉ thêm**: thời điểm, người làm (user, hoặc `system` cho job tự chạy, `recover` cho lệnh khẩn cấp, `anonymous` cho đăng nhập sai user không tồn tại), IP, hành động (mã cố định, vd `db.create`, `auth.login_failed`), đối tượng (loại + id/tên), DB liên quan (nếu có), thành công/thất bại, chi tiết ngắn (JSON). **Không bao giờ** ghi mật khẩu, secret, session/invite token.
+- Trigger DB chặn UPDATE; chặn DELETE trừ dòng cũ hơn **1 năm** (job dọn mỗi ngày) — admin cũng không sửa/xóa được lịch sử.
+- Sự kiện ghi: setup, đăng nhập (thành công/thất bại), đăng xuất, đổi mật khẩu, lời mời (tạo/nhận), khóa/mở, nâng/hạ quyền, thu hồi phiên; tạo DB, thêm/gỡ người quản lý, **xem mật khẩu DB**, Backup now, tải backup, restore, kiểm tra kỹ; destination tạo/sửa/xóa/dùng chung/test; lịch backup tạo/sửa/xóa; allowlist; pull/prune image; mọi lệnh `fridge recover`; backup theo lịch và xóa do retention (actor `system`).
+- **Xem mật khẩu DB thành hành động riêng**: API chi tiết DB trả connection string **đã che mật khẩu**; mật khẩu thật chỉ trả qua một endpoint riêng (nút "Hiện"/"Copy" trên web, `fridge show --reveal` trên CLI) và mỗi lần gọi đều ghi audit.
+- **Ai xem** (người dùng chốt): admin xem toàn bộ; user thường xem hành động của chính mình + mọi hành động trên DB mình là owner. Giữ **1 năm**.
+- Trang **Audit log**: lọc theo người, hành động, đối tượng/DB, khoảng thời gian; phân trang; **xuất CSV** (theo đúng bộ lọc và quyền). CLI `fridge audit [--user] [--action] [--db] [--since]`.
+- Trang **Hoạt động** (admin) — "ai đang làm gì": các job đang chạy (backup, restore, kiểm tra kỹ, pull image) kèm người khởi động + thời điểm; người đang online (phiên có hoạt động trong **5 phút** gần nhất *(lựa chọn của Claude)*); tự làm mới bằng polling.
+
 ### 14. Trang Images — quản lý docker image của DB (người dùng chốt)
 
 - **Chỉ admin** thấy (mục sidebar "Images"; API trả 403 cho user).

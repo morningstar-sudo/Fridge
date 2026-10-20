@@ -29,7 +29,7 @@
 1. **Quyền bị vượt qua đường gián tiếp** — restore theo key một bản backup của DB người khác trên destination dùng chung; tải backup của DB không có quyền; đặt lịch dùng destination riêng của người khác; "Kiểm tra kỹ" file của người khác; người quản lý (không phải owner) thêm member → đều phải bị chặn. Test ở Task 7 (`TestIndirectAccessBlocked`).
 2. **Session ID / token lộ ra ngoài** — không được xuất hiện trong body JSON trả cho web, trong URL, trong log; DB chỉ chứa hash; invite token chỉ có trong link. Test ở Task 4 (`TestSessionStoredHashed`) và Task 6 (`TestWebLoginNoTokenInBody`).
 3. **Setup chạy song song / chạy lại** — hai request setup đồng thời chỉ tạo đúng một admin; setup sau khi đã có user → 409. Test ở Task 1 (`TestCreateFirstAdminOnce`) và Task 4.
-4. **Tự khóa admin** — khóa/hạ quyền admin hoạt động cuối cùng bị từ chối; user bị khóa mất mọi session ngay; `fridge recover promote` cứu được. Test ở Task 4 (`TestLastAdminGuard`) và Task 11.
+4. **Tự khóa admin** — khóa/hạ quyền admin hoạt động cuối cùng bị từ chối; user bị khóa mất mọi session ngay; `fridge recover promote` cứu được. Test ở Task 4 (`TestLastAdminGuard`) và Task 12.
 5. **Giả mạo IP qua `X-Forwarded-For`** — request không đến từ proxy tin cậy mà gửi XFF thì XFF bị bỏ qua (không lách được khóa đăng nhập/allowlist log). Test ở Task 6 (`TestClientIPTrustsOnlyProxy`).
 
 ---
@@ -97,6 +97,7 @@ deploy/{docker-compose.yml,traefik.yml,.env.example}, README.md
        - `users`: `octet_length(scram_salt) = 16`, `octet_length(stored_key) = 32`, `octet_length(server_key) = 32`, `scram_iterations BETWEEN 600000 AND 10000000`.
        - `invites`: `role IN ('admin','user')`, `expires_at > created_at`, `(purpose = 'reset_password') = (user_id IS NOT NULL)`.
        - `sessions`: `expires_at > created_at`.
+    6b. `audit_log(id BIGINT identity PK, at TIMESTAMPTZ NOT NULL DEFAULT now(), actor_id BIGINT NULL REFERENCES users(id), actor TEXT NOT NULL, ip TEXT NOT NULL DEFAULT '', action TEXT NOT NULL CHECK (action ~ '^[a-z_]+\.[a-z_]+$'), target_type TEXT NOT NULL DEFAULT '', target_id TEXT NOT NULL DEFAULT '', db_id BIGINT NULL REFERENCES databases(id), success BOOLEAN NOT NULL, detail JSONB NOT NULL DEFAULT '{}')` + index `(at DESC)`, `(actor_id, at DESC)`, `(db_id, at DESC)`; trigger `BEFORE UPDATE OR DELETE ON audit_log`: UPDATE luôn `RAISE` (P0001); DELETE chỉ cho phép khi `OLD.at < now() - interval '365 days'`.
     7. Trigger `BEFORE INSERT OR UPDATE ON database_members`: `RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'owner cannot be a member'` khi `user_id` = `databases.owner_id`.
   - `CreateFirstAdmin` (cùng transaction, sau khi gán owner): `ALTER TABLE databases ALTER owner_id SET NOT NULL; ALTER TABLE destinations ALTER owner_id SET NOT NULL`.
   - `mapErr`: thêm sentinel `ErrInvalid` cho SQLSTATE `23514` (check) và `P0001` (trigger).
@@ -437,7 +438,50 @@ func TestAllowlistAdminOnly(t *testing.T)  // A GET/PUT → 403; admin OK
 
 ---
 
-### Task 8: Validate dump — mức 1 (header) và mức 2 ("Kiểm tra kỹ")
+### Task 8: Audit log & Hoạt động
+
+**Files:**
+- Create: `internal/store/audit.go` + test, `internal/audit/audit.go` + test, `internal/api/audit_routes.go` + test
+- Modify: `internal/api/{api.go,auth_routes.go,admin_routes.go}` (gọi ghi audit), `internal/app/{backup.go,scheduler.go}` (sự kiện `system`), `internal/auth` (đăng nhập thành công/thất bại cần IP → API ghi, không phải auth)
+
+**Interfaces:**
+```go
+// store
+type AuditEntry struct { ID int64; At time.Time; ActorID *int64; Actor, IP, Action, TargetType, TargetID string; DBID *int64; Success bool; Detail map[string]any }
+type AuditFilter struct { ActorID, DBID *int64; Action string /* tiền tố, vd "db." */; From, To *time.Time; BeforeID int64 /* phân trang lùi */; Limit int /* ≤ 500 */; VisibleTo *int64 /* nil = admin; ngược lại actor_id = user OR db_id thuộc DB user là owner */ }
+func (s *Store) InsertAudit(ctx, e AuditEntry) error
+func (s *Store) ListAudit(ctx, f AuditFilter) ([]AuditEntry, error) // mới nhất trước
+func (s *Store) PurgeAudit(ctx, olderThan time.Time) (int, error)
+func (s *Store) RunningJobs(ctx) ([]Job, error) // backups/restores/dump_checks đang running, kèm người khởi động (username hoặc "system") + DB + started_at
+func (s *Store) OnlineSessions(ctx, since time.Time) ([]Session, error)
+// audit
+type Logger struct { Store *store.Store }
+func (l *Logger) Record(ctx context.Context, e store.AuditEntry) // không bao giờ trả lỗi; lỗi → log.Printf
+func Actor(p auth.Principal) (id *int64, name string)
+```
+- Các mã hành động (cố định, dùng đúng chuỗi): `auth.setup`, `auth.login`, `auth.login_failed`, `auth.logout`, `auth.password_change`, `invite.create`, `invite.accept`, `user.role`, `user.disable`, `user.enable`, `user.reset_password`, `session.revoke`, `db.create`, `db.member_add`, `db.member_remove`, `db.reveal_password`, `backup.start`, `backup.download`, `restore.start`, `dumpcheck.start`, `dest.create`, `dest.update`, `dest.delete`, `dest.share`, `dest.test`, `schedule.create`, `schedule.update`, `schedule.delete`, `settings.allowlist`, `image.pull`, `image.prune`, `recover.allowlist`, `recover.reset_password`, `recover.promote`, `system.backup`, `system.retention_delete`.
+- Ghi ở tầng API sau khi biết kết quả (thành công **và** thất bại vì quyền/validate); `auth.login_failed` ghi actor = username nhập vào nếu tồn tại, ngược lại `anonymous` + `detail.username`. Scheduler ghi `system.backup` (kết quả backup) và `system.retention_delete`. `recover` (Task 12) ghi actor `recover`. **Detail không chứa** mật khẩu, credentials, secret, token.
+- **Xem mật khẩu DB**: `GET /api/databases/{db}` trả `connection_string` **đã che** (`postgresql://user:****@…`); thêm `GET /api/databases/{db}/connection` → `{connection_string}` đầy đủ + ghi `db.reveal_password` (quyền như đọc DB).
+- API: `GET /api/audit?actor_id=&action=&db=&from=&to=&before=&limit=` → `{entries, next_before}`; `GET /api/audit.csv` (cùng tham số, `Content-Disposition: attachment`, cột: at, actor, ip, action, target_type, target_id, db, success, detail); `GET /api/activity` (admin) → `{jobs, online}` với online = phiên `last_seen_at` trong 5 phút.
+- Scheduler thêm entry `"23 3 * * *"` gọi `PurgeAudit(now − 365 ngày)`.
+
+- [ ] **Step 1: Viết test**
+
+```go
+func TestAuditAppendOnly(t *testing.T)     // UPDATE audit_log → lỗi; DELETE dòng mới → lỗi; DELETE dòng at = now-366 ngày → OK (PurgeAudit trả 1)
+func TestAuditVisibility(t *testing.T)     // A owner a1, B member: B backup a1 → A thấy (db_id a1); B thấy của mình; C không thấy gì của a1; admin thấy hết
+func TestAuditRecordedForActions(t *testing.T) // qua API: đăng nhập sai → auth.login_failed; tạo DB → db.create success; B gọi /api/databases/a1 (404) không ghi db.*; B POST members a1 (403) → db.member_add success=false
+func TestRevealPasswordAudited(t *testing.T) // GET /api/databases/a1 → connection_string chứa "****", không có mật khẩu thật; GET …/connection → có mật khẩu; audit có db.reveal_password với actor đúng
+func TestAuditNoSecrets(t *testing.T)      // sau chuỗi hành động (setup, login, tạo dest với secret "TOPSECRET", tạo DB với mật khẩu "S3cure-pass.~x", đổi mật khẩu): dump toàn bộ audit_log::text không chứa "TOPSECRET", mật khẩu DB, session id, invite token
+func TestAuditCSV(t *testing.T)            // header đúng cột; số dòng = số entry theo bộ lọc
+func TestActivityAdminOnly(t *testing.T)   // user → 403; admin thấy job running (backup đang chạy bằng execFn chặn) với started_by + online gồm 2 phiên
+```
+- [ ] **Step 2:** FAIL. **Step 3:** implement (backups chưa có cột người khởi động: dùng audit `backup.start` để hiển thị người khởi động trong `RunningJobs` — JOIN audit theo `target_id` = id backup; job theo lịch → `system`). **Step 4:** `go test ./internal/... ` PASS.
+- [ ] **Step 5: Commit** `feat: append-only audit log and activity view`.
+
+---
+
+### Task 9: Validate dump — mức 1 (header) và mức 2 ("Kiểm tra kỹ")
 
 **Files:**
 - Create: `internal/dumpcheck/dumpcheck.go`, `dumpcheck_test.go`, `internal/dumpcheck/testdata/` (dump thật: `pg14.dump`, `pg17.dump` sinh bằng `pg_dump -Fc` từ container `postgres:14`/`postgres:17` chạy pg_dump cùng major, `pg13-by-pgdump17.dump` = server 13 dump bằng pg_dump 17, `plain.sql.gz`, `not-a-dump.dump` (một PNG nhỏ), `empty.dump`)
@@ -486,7 +530,7 @@ func TestDumpCheckDumpUsesTempContainer(t *testing.T) // fakeRuntime: Run với 
 
 ---
 
-### Task 9: Trang Images — dữ liệu & API
+### Task 10: Trang Images — dữ liệu & API
 
 **Files:**
 - Create: `internal/container/images.go`, `internal/registry/registry.go` + test, `internal/app/images.go` + test
@@ -533,7 +577,7 @@ func TestImagesAdminOnly(t *testing.T)    // api: user → 403
 
 ---
 
-### Task 10: HTTPS + deploy
+### Task 11: HTTPS + deploy
 
 **Files:**
 - Modify: `internal/pki/ca.go` (+ test), `internal/proxy/traefik.go` (+ test), `internal/app/app.go` (`WebCert, WebKey string`; `SetAllowlist` truyền), `cmd/fridge/main.go`, `deploy/traefik.yml`, `deploy/docker-compose.yml`, `README.md`
@@ -564,17 +608,19 @@ func TestWriteBaseHTTPS(t *testing.T)      // yaml: fridge-web entryPoints [webs
 
 ---
 
-### Task 11: CLI — login, CA TOFU, check, members, share, recover
+### Task 12: CLI — login, CA TOFU, check, members, share, recover
 
 **Files:** Modify `cmd/fridge/cli.go`, `cmd/fridge/main.go`; Create `cmd/fridge/login.go`, `cmd/fridge/recover.go` + tests
 
 **Interfaces:**
-- Consumes: API Task 6–9, `scram` Task 3, `auth` Task 4, `proxy`/`store` (recover).
+- Consumes: API Task 6–10, `scram` Task 3, `auth` Task 4, `proxy`/`store` (recover).
 - Produces lệnh:
   - `fridge login [--user U] [--password-stdin] [--yes] [--ca-file F]`: lần đầu chưa có CA → GET `/api/ca` (chỉ request này bỏ qua kiểm TLS), in `SHA256 fingerprint: AA:BB:…`, hỏi `Trust this CA? [y/N]` (`--yes` bỏ qua hỏi), lưu `~/.config/fridge/ca.pem`; SCRAM qua `/api/auth/scram/*` với `want_token:true`, `Verify` server signature; lưu `~/.config/fridge/session` (JSON `{url, session}`, 0600). Nhập mật khẩu không echo bằng `stty -echo` (lỗi → cảnh báo, đọc có echo).
   - `fridge logout`, `fridge whoami`.
   - `fridge setup --setup-token T --user U [--password-stdin]` (cho server không có trình duyệt; đăng ký Credentials tính bằng `scram`). *(Lựa chọn của plan)*
   - `fridge check --from <dest>:<key> [--wait]`, `fridge members ls|add|rm <db> [user]`, `fridge dest share <name|id> on|off`.
+  - `fridge show <db> [--reveal]` (`--reveal` gọi `/connection`, có ghi audit), `fridge audit [--user U] [--action A] [--db D] [--since 24h] [--csv]`.
+  - `fridge recover …` ghi audit với actor `recover` (`recover.allowlist`, `recover.reset_password`, `recover.promote`).
   - `fridge create` và `fridge restore` thêm `--db-user U`, `--db-password-stdin`, `--random-credentials` (sinh user `u_`+8 `[a-z0-9]`, mật khẩu 24 ký tự `[A-Za-z0-9-_.~]` bằng `crypto/rand`, in ra một lần); `--random-credentials` loại trừ hai cờ kia.
   - Mọi request: `FRIDGE_URL` mặc định `https://localhost:8443`; token = env `FRIDGE_TOKEN` nếu có, ngược lại từ file session; TLS tin CA từ `--ca-file`/`FRIDGE_CA_FILE`/`ca.pem` đã lưu + system pool; **không** có cờ insecure. 401 → in `not logged in — run: fridge login`; `setup required` → in hướng dẫn mở web hoặc `fridge setup`.
   - `fridge recover allowlist <cidr>... | reset-password <user> | promote <user>`: chạy **trong container**, đọc env server (`FRIDGE_DATABASE_URL`, `FRIDGE_SECRET_KEY`, `FRIDGE_TRAEFIK_DIR`, `FRIDGE_API_BACKEND`, `FRIDGE_PUBLIC_HOSTS`), thao tác thẳng store/proxy (allowlist → `SetSetting` + `WriteBase`; reset → `auth.CreateResetInvite(nil, id)` in `https://<host đầu tiên hoặc localhost>:8443/#/invite/<token>`; promote → `auth.Promote`).
@@ -595,7 +641,7 @@ func TestRecoverResetAndPromote(t *testing.T) // in link chứa "/#/invite/"; pr
 
 ---
 
-### Task 12: Web — khung, SCRAM JS, setup/đăng nhập/lời mời/đổi mật khẩu
+### Task 13: Web — khung, SCRAM JS, setup/đăng nhập/lời mời/đổi mật khẩu
 
 **Files:**
 - Create: `internal/web/web.go` + test, `internal/web/static/index.html`, `static/css/app.css`, `static/js/{app.js,api.js,scram.js,router.js,layout.js,ui.js}`, `static/js/pages/{setup.js,login.js,invite.js,password.js}`, `static/test/scram.html`, `static/js/test-scram.js`, `static/vendor/bootstrap/…` (5.3.3: `bootstrap.min.css`, `bootstrap.bundle.min.js`), `static/vendor/bootstrap-icons/…` (1.11.3: css + fonts)
@@ -628,24 +674,24 @@ func TestNoInlineScripts(t *testing.T)  // quét mọi .html trong embed: không
 - [ ] **Step 2:** FAIL. **Step 3:** implement (tải Bootstrap/Icons đúng phiên bản từ jsDelivr vào repo một lần; ghi phiên bản trong `static/vendor/VERSIONS.txt`).
 - [ ] **Step 4: Kiểm tra trình duyệt thật bằng Playwright trong Docker** (không phải dependency của dự án, không ảnh hưởng frontend):
   - Tạo `scripts/ui-smoke/smoke.mjs` + `scripts/ui-smoke/run.sh`; `run.sh` chạy `docker run --rm --network host -v "$PWD/scripts/ui-smoke:/work" -w /work mcr.microsoft.com/playwright:v1.49.0-noble sh -c 'npm i --no-save playwright@1.49.0 >/dev/null && node smoke.mjs'` với env `BASE=https://localhost:8443`, `SETUP_TOKEN`, `ADMIN_PW`. Browser mở với `ignoreHTTPSErrors: true`.
-  - `smoke.mjs` (phần của Task 12): mở `/test/scram.html` → `#result` chứa `PASS`; mở `/` trên DB trống → thấy form setup; điền setup token + admin → vào Databases; đăng xuất → đăng nhập lại; **gom mọi lỗi console/`securitypolicyviolation`** → có lỗi thì exit 1. In từng bước PASS/FAIL.
+  - `smoke.mjs` (phần của Task 13): mở `/test/scram.html` → `#result` chứa `PASS`; mở `/` trên DB trống → thấy form setup; điền setup token + admin → vào Databases; đăng xuất → đăng nhập lại; **gom mọi lỗi console/`securitypolicyviolation`** → có lỗi thì exit 1. In từng bước PASS/FAIL.
   - Chạy trên stack compose riêng (project `fridge-ui`, volume mới); ghi output vào report; dọn project.
 - [ ] **Step 5:** `go test ./internal/web/ ./cmd/fridge/` PASS. **Commit** `feat(web): admin shell, SCRAM in browser, setup/login/invite/password`.
 
 ---
 
-### Task 13: Web — Databases, chi tiết DB, Restore, Destinations
+### Task 14: Web — Databases, chi tiết DB, Restore, Destinations
 
 **Files:** Create `internal/web/static/js/pages/{databases.js,database.js,restore.js,destinations.js}`, cập nhật `router.js`, `app.css`
 
-**Interfaces:** chỉ dùng API Task 6–9 qua `api.js`.
+**Interfaces:** chỉ dùng API Task 6–10 qua `api.js`.
 - **Databases**: bảng (tên, engine/version, domain, trạng thái màu, backup gần nhất, cột owner nếu admin), nút "+ Tạo DB" (modal: engine, version dropdown từ `/api/engines`, tên, domain, **User** + **Mật khẩu** tùy chọn — mỗi ô có nút 🎲 **Ngẫu nhiên** (`crypto.getRandomValues`: user `u_`+8 `[a-z0-9]`, mật khẩu 24 `[A-Za-z0-9-_.~]`), ô mật khẩu có Hiện/Ẩn + Copy, kiểm tra cùng quy tắc với server trước khi gửi; để trống = server tự sinh) → sau tạo chuyển sang chi tiết. Form restore vào node mới có cùng 2 ô.
-- **Chi tiết DB** (mockup đã duyệt): header + nút **Backup now** (poll trạng thái backup 2–3s); tab **Kết nối** (connection string ẩn mật khẩu, nút Hiện/Copy, host/user/db, link tải CA `/api/ca`); tab **Backups** (bảng: thời gian, nguồn lịch/tay, destination, dung lượng, trạng thái, Tải · Restore… · Log trong modal); tab **Lịch backup** (CRUD, destination dropdown = destination có thể dùng); tab **Người quản lý** (chỉ owner/admin sửa; người khác chỉ xem).
+- **Chi tiết DB** (mockup đã duyệt): header + nút **Backup now** (poll trạng thái backup 2–3s); tab **Kết nối** (connection string che mật khẩu; nút Hiện/Copy gọi `GET /api/databases/{db}/connection` — mỗi lần là một dòng audit; host/user/db, link tải CA `/api/ca`); tab **Backups** (bảng: thời gian, nguồn lịch/tay, destination, dung lượng, trạng thái, Tải · Restore… · Log trong modal); tab **Lịch backup** (CRUD, destination dropdown = destination có thể dùng); tab **Người quản lý** (chỉ owner/admin sửa; người khác chỉ xem).
 - **Restore**: chọn destination → bảng file (`/objects`, ô tìm kiếm, cột DB) → chọn file → nút **Kiểm tra kỹ** (job, hiện kết quả) và form node mới (tên, domain, version — gợi ý version nguồn) → **Restore** → trang trạng thái polling; lỗi mức 1 hiện ngay dưới form. "Restore…" từ tab Backups mở trang này với file chọn sẵn.
 - **Destinations**: bảng của mình (admin: tất cả + owner + công tắc dùng chung); thêm/sửa (secret để trống = giữ)/xóa (xác nhận)/Test.
 
 - [ ] **Step 1:** Viết trang.
-- [ ] **Step 2: Mở rộng `scripts/ui-smoke/smoke.mjs`** (Task 12) với các bước, chạy trên stack compose `fridge-ui` (có MinIO dev):
+- [ ] **Step 2: Mở rộng `scripts/ui-smoke/smoke.mjs`** (Task 13) với các bước, chạy trên stack compose `fridge-ui` (có MinIO dev):
   - admin tạo destination MinIO → Test OK; tạo DB bằng nút 🎲 Ngẫu nhiên cho user/mật khẩu → connection string chứa đúng user vừa sinh; tạo DB → hiện trong bảng, trạng thái running; Hiện connection string thấy mật khẩu; Backup now → dòng backup `ok`; Restore… → Kiểm tra kỹ → `ok`; restore vào node mới → `ok`.
   - admin mời user B (lấy link từ UI) → mở link trong context trình duyệt mới, đặt mật khẩu, đăng nhập → B không thấy DB/destination của admin; admin bật **dùng chung** → B thấy destination đó trong dropdown Lịch backup nhưng không có nút Sửa.
   - Không có lỗi console/CSP ở bất kỳ trang nào.
@@ -653,22 +699,24 @@ func TestNoInlineScripts(t *testing.T)  // quét mọi .html trong embed: không
 
 ---
 
-### Task 14: Web — Settings, Users, Sessions, Images
+### Task 15: Web — Settings, Users, Sessions, Images, Audit log, Hoạt động
 
 **Files:** Create `internal/web/static/js/pages/{settings.js,users.js,sessions.js,images.js}`, cập nhật `router.js`, `layout.js` (chấm báo Images khi có bản mới)
 
 - **Settings**: allowlist (admin; textarea CIDR, lưu), tải CA cert, phiên của tôi (bảng: tạo lúc, hoạt động cuối, IP, UA, nút thu hồi; đánh dấu phiên hiện tại).
 - **Users** (admin): bảng user (username, role, trạng thái, tạo lúc), nút **Mời** (username, role → hiện link để copy), Khóa/Mở, Nâng/Hạ admin (lỗi admin cuối hiện rõ), **Reset mật khẩu** (hiện link).
 - **Sessions** (admin): mọi phiên, thu hồi.
+- **Audit log** (mọi user, dữ liệu theo quyền): bảng (thời gian, người, IP, hành động, đối tượng, DB, kết quả, chi tiết rút gọn), bộ lọc người/hành động/DB/khoảng thời gian, "Tải thêm" (phân trang `before`), nút **Xuất CSV** theo bộ lọc. Mục sidebar "Audit log".
+- **Hoạt động** (admin): job đang chạy (loại, DB, người khởi động, bắt đầu lúc, thời gian đã chạy) + người đang online; polling 3s. Mục sidebar "Hoạt động".
 - **Images** (admin): bảng (tag, digest rút gọn, dung lượng, ngày tạo, version, số DB đang dùng + danh sách tên, lần dùng cuối, huy hiệu **"New version: 18.1 → 18.2"**); nút Pull (chọn engine+version) / Pull tất cả (poll job), **Kiểm tra cập nhật**, **Prune** (modal xác nhận liệt kê image + tổng dung lượng → xóa). Sidebar mục Images có chấm khi có ít nhất một bản mới.
 
 - [ ] **Step 1:** Viết trang.
-- [ ] **Step 2: Mở rộng `smoke.mjs`**: khóa user B → trang của B (context riêng) bị đưa về đăng nhập ở request kế tiếp; hạ quyền admin duy nhất → thông báo lỗi hiển thị; thu hồi một phiên trong Settings → phiên đó mất; Images: Pull `postgres:15` → hiện "đã có"; Prune preview không chứa image đang được DB dùng; Kiểm tra cập nhật → mỗi dòng có trạng thái (hoặc "không kiểm tra được"); không lỗi console/CSP.
+- [ ] **Step 2: Mở rộng `smoke.mjs`**: khóa user B → trang của B (context riêng) bị đưa về đăng nhập ở request kế tiếp; hạ quyền admin duy nhất → thông báo lỗi hiển thị; thu hồi một phiên trong Settings → phiên đó mất; Audit log có dòng `db.reveal_password` sau khi bấm Hiện, Xuất CSV tải được; Hoạt động hiện backup đang chạy; Images: Pull `postgres:15` → hiện "đã có"; Prune preview không chứa image đang được DB dùng; Kiểm tra cập nhật → mỗi dòng có trạng thái (hoặc "không kiểm tra được"); không lỗi console/CSP.
 - [ ] **Step 3:** `go test ./...` PASS. **Commit** `feat(web): settings, users, sessions and images pages`.
 
 ---
 
-### Task 15: E2E + smoke giai đoạn 2
+### Task 16: E2E + smoke giai đoạn 2
 
 **Files:** Create `internal/api/e2e_auth_integration_test.go` (`//go:build integration`); Modify `README.md` nếu smoke phát hiện sai lệch
 
