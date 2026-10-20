@@ -215,7 +215,7 @@ Lệnh chạy **bên trong container** (`docker exec <fridge> /fridge recover �
 
 - Form **Tạo DB** và form **restore vào node mới** có ô **User** và **Mật khẩu**, mỗi ô có nút **Ngẫu nhiên** sinh chuỗi trên trình duyệt (`crypto.getRandomValues`): hậu tố user 8 ký tự `[a-z0-9]`, mật khẩu 24 ký tự `[A-Za-z0-9-_.~]`; ô mật khẩu có Hiện/Ẩn + Copy.
 - **Tên user bắt buộc có tiền tố `<username owner>_`** (người dùng chốt — tránh lộ tài khoản tenant khác qua kiểm tra trùng tên): người dùng chỉ nhập hậu tố `^[a-z0-9_]{1,15}$`, UI hiện tiền tố cố định; trùng tên chỉ kiểm trong phạm vi owner; áp cho mọi engine. Username tài khoản Fridge vì vậy siết thành `^[a-z][a-z0-9_]{2,15}$` (không `.`/`-`, ≤ 16 ký tự → tổng ≤ 32 ký tự, vừa giới hạn MySQL).
-- Để trống → hậu tố = tên DB, mật khẩu `crypto/rand.Text()`. *(Lựa chọn của Claude, giữ tương thích CLI/API.)*
+- Để trống → hậu tố = hậu tố tên DB (`-` → `_`), mật khẩu `crypto/rand.Text()`. *(Lựa chọn của Claude, giữ tương thích CLI/API.)*
 - Ràng buộc *(lựa chọn của Claude)*: mật khẩu 12–128 ký tự ASCII in được, không khoảng trắng. Sai → 400.
 - Mật khẩu DB đi lên server qua HTTPS (bắt buộc, vì Fridge phải tạo user trong Postgres) và lưu mã hóa AES-GCM như hiện tại. Connection string dựng bằng `url.UserPassword` để ký tự đặc biệt đúng.
 - Tạo/restore DB với user/mật khẩu tự đặt được ghi audit (không ghi mật khẩu).
@@ -233,12 +233,12 @@ Lệnh chạy **bên trong container** (`docker exec <fridge> /fridge recover �
 
 ### 13b-3. Tên nội bộ dạng hash, tên DB theo owner, domain đăng ký trước (người dùng chốt)
 
-- **Tên DB chỉ cần duy nhất trong phạm vi owner** (không còn duy nhất toàn hệ thống → không lộ DB của tenant khác).
+- **Tên DB bắt buộc tiền tố `<username owner>_`** (người dùng chốt, giống user ứng dụng): người dùng nhập hậu tố `^[a-z0-9][a-z0-9-]{0,29}$`, UI hiện tiền tố cố định; tên đầy đủ (vd `alice_shop`) dùng để hiển thị, gọi API/CLI và làm tên database bên trong engine. Vì tiền tố là username của chính mình nên tên DB **tự nhiên duy nhất toàn hệ thống** mà không lộ DB của tenant khác (trùng chỉ có thể là với DB của chính mình).
 - **Tên nội bộ không hiển thị** lấy từ `node_key = hex(sha256("<username owner>_<tên DB>_<unix nano lúc tạo>"))[:16]`, lưu ở `databases.node_key` (UNIQUE): container + volume `fridge-<engine>-<node_key>`; superuser `su_<node_key>` (thay cho `su_<tên DB>` ở mục 13b-2). Restore vào node mới sinh `node_key` mới.
 - **Domain đăng ký trước** (không xác thực DNS — có trường hợp dùng DNS nội bộ): bảng `domains(id, owner_id → users, name UNIQUE, created_at)`. Owner thêm/xóa domain của mình; domain trùng với domain đã có (của bất kỳ ai) → báo chung "domain không đăng ký được" (không nói ai đang dùng). Không xóa được domain đang có DB dùng. Admin thấy mọi domain, xóa được domain không còn dùng *(lựa chọn của Claude)*.
 - **Tạo/restore DB**: chọn domain từ danh sách đã đăng ký của **owner** node (dropdown); `databases.domain_id → domains`. Một domain dùng được cho nhiều DB khác engine, mỗi engine một DB (giữ unique `(engine, domain)`) *(lựa chọn của Claude)*.
 - **Dữ liệu giai đoạn 1**: lúc tạo admin đầu tiên, domain của các DB cũ được đăng ký cho admin và gắn `domain_id`; DB cũ giữ tên container/volume cũ (`node_key` rỗng = kiểu cũ).
-- **Gọi DB bằng tên** (API `{db}`, CLI): ưu tiên DB do chính người gọi sở hữu; nếu vẫn nhiều DB cùng tên trong phạm vi nhìn thấy (vd admin) → 409 "tên không duy nhất, dùng id".
+- **Gọi DB bằng tên** (API `{db}`, CLI): dùng tên đầy đủ có tiền tố — luôn duy nhất.
 - Audit: `domain.register`, `domain.remove`. CLI: `fridge domains add|ls|rm`. Web: mục **Domains** (bảng của mình; admin thấy tất cả + cột owner).
 
 ### 13c. Audit log & Hoạt động (người dùng chốt)
