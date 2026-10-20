@@ -57,17 +57,11 @@ func TestE2EBackupRestoreAcrossVersions(t *testing.T) {
 		Alert: func(ctx context.Context, text string) { t.Logf("alert: %s", text) },
 	}
 
-	// Leftovers from an aborted run would make container/volume creation fail.
-	names := []string{"it14", "it17", "it13"}
-	for _, n := range names {
-		rt.Remove(ctx, "fridge-postgres-"+n, "fridge-postgres-"+n)
-	}
+	// Node names carry a fresh random node_key, so leftovers of an aborted run never collide.
 	t.Cleanup(func() {
-		for _, n := range names {
-			if d, err := a.Store.GetDatabaseByName(ctx, n); err == nil {
-				a.removeNode(ctx, d)
-			}
-			rt.Remove(ctx, "fridge-postgres-"+n, "fridge-postgres-"+n) // also covers rows that never got written
+		dbs, _ := a.Store.ListDatabases(ctx)
+		for _, d := range dbs {
+			a.removeNode(ctx, d) // falls back to the volume name when no container id was recorded
 		}
 	})
 
@@ -94,6 +88,12 @@ func TestE2EBackupRestoreAcrossVersions(t *testing.T) {
 		t.Fatal(err)
 	}
 	psql(src, "create table t(x int); insert into t values (1),(2),(3)")
+	if got := psql(src, "select rolsuper from pg_roles where rolname=current_user"); got != "f" {
+		t.Fatalf("app user %s rolsuper = %q, want f", src.User, got)
+	}
+	if !strings.HasPrefix(src.AdminUser, "su_") {
+		t.Fatalf("admin user %q", src.AdminUser)
+	}
 
 	b, err := a.StartBackup(ctx, src.ID, dest.ID, nil, "manual", nil)
 	if err != nil {
@@ -103,7 +103,7 @@ func TestE2EBackupRestoreAcrossVersions(t *testing.T) {
 	if b, err = a.Store.GetBackup(ctx, b.ID); err != nil || b.Status != "ok" {
 		t.Fatalf("backup: %+v %v", b, err)
 	}
-	if !strings.HasPrefix(b.S3Key, "fridge/postgres-14/it14/it14-") || !strings.HasSuffix(b.S3Key, ".dump") {
+	if !strings.HasPrefix(b.S3Key, "fridge/postgres-14/root1_it14/root1_it14-") || !strings.HasSuffix(b.S3Key, ".dump") {
 		t.Fatalf("key %q", b.S3Key)
 	}
 	objs, err := objstore.New(dest, sk)
@@ -134,6 +134,9 @@ func TestE2EBackupRestoreAcrossVersions(t *testing.T) {
 	}
 	if got := psql(dst, "select count(*) from t"); got != "3" {
 		t.Fatalf("count on it17 = %q, want 3", got)
+	}
+	if got := psql(dst, "select tableowner from pg_tables where tablename='t'"); got != dst.User {
+		t.Fatalf("restored table owner = %q, want app user %q", got, dst.User)
 	}
 
 	_, err = startRestore(a, ctx, RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: b.S3Key,

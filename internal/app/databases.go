@@ -3,10 +3,14 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,16 +83,25 @@ func (a *App) CreateDatabase(ctx context.Context, req CreateRequest) (store.Data
 	if err != nil {
 		return store.Database{}, err
 	}
+	// name is "<owner>_<suffix>", so this hashes owner + "_" + suffix + "_" + nanos.
+	sum := sha256.Sum256([]byte(name + "_" + strconv.FormatInt(a.clock().UnixNano(), 10)))
+	nodeKey := hex.EncodeToString(sum[:])[:16]
+	adminPW := rand.Text()
+	adminEnc, err := a.Box.Encrypt(adminPW)
+	if err != nil {
+		return store.Database{}, err
+	}
 	d := store.Database{
 		Name: name, Engine: req.Engine, Version: version, Domain: req.Domain, TLSMode: req.TLSMode,
 		User: user, PasswordEnc: enc, DomainID: &domainID,
-		Volume: fmt.Sprintf("fridge-%s-%s", req.Engine, name), Status: "creating", OwnerID: &req.OwnerID,
+		Volume: fmt.Sprintf("fridge-%s-%s", req.Engine, nodeKey), Status: "creating", OwnerID: &req.OwnerID,
+		NodeKey: nodeKey, AdminUser: "su_" + nodeKey, AdminPasswordEnc: adminEnc,
 	}
 	if err := a.Store.CreateDatabase(ctx, &d); err != nil {
 		return store.Database{}, err
 	}
 
-	if err := a.provision(ctx, &d, eng, info, pw); err != nil {
+	if err := a.provision(ctx, &d, eng, info, pw, adminPW); err != nil {
 		a.removeNode(ctx, d)
 		return store.Database{}, err
 	}
@@ -104,8 +117,12 @@ func (a *App) CreateDatabase(ctx context.Context, req CreateRequest) (store.Data
 	return d, nil
 }
 
-func (a *App) provision(ctx context.Context, d *store.Database, eng engine.Engine, info engine.Info, pw string) error {
-	spec := eng.Spec(engine.Params{Name: d.Name, User: d.User, Password: pw, Version: d.Version})
+// provision runs the node as its superuser, then creates the non-superuser app user owning the database.
+// Passwords travel in env (container init) and on exec stdin, never in argv.
+func (a *App) provision(ctx context.Context, d *store.Database, eng engine.Engine, info engine.Info, pw, adminPW string) error {
+	p := nodeParams(*d)
+	p.Password, p.AdminPassword = pw, adminPW
+	spec := eng.Spec(p)
 	id, err := a.RT.Run(ctx, container.RunSpec{
 		Name: d.Volume, Image: spec.Image, Env: spec.Env, Volume: d.Volume, VolumePath: spec.VolumePath,
 		Healthcheck: spec.Healthcheck, Labels: map[string]string{"fridge.db_id": fmt.Sprint(d.ID)},
@@ -116,6 +133,13 @@ func (a *App) provision(ctx context.Context, d *store.Database, eng engine.Engin
 	d.ContainerID = id
 	if err := a.RT.WaitHealthy(ctx, id, a.HealthTimeout); err != nil {
 		return fmt.Errorf("wait healthy: %w", err)
+	}
+	code, err := a.RT.Exec(ctx, id, eng.AdminCmd(p), strings.NewReader(eng.AppUserSQL(d.User, pw, d.Name)), io.Discard, io.Discard)
+	switch {
+	case err != nil:
+		return fmt.Errorf("create app user: %w", err)
+	case code != 0: // stderr deliberately dropped: psql error context can echo the statement, password included
+		return fmt.Errorf("create app user: exited %d", code)
 	}
 	certPEM, keyPEM, err := a.CA.Issue(d.Domain, 365*24*time.Hour)
 	if err != nil {
@@ -163,7 +187,18 @@ func (a *App) ConnString(d store.Database) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return eng.ConnString(engine.Params{Name: d.Name, User: d.User, Password: pw, Version: d.Version}, d.Domain), nil
+	p := nodeParams(d)
+	p.Password = pw
+	return eng.ConnString(p, d.Domain), nil
+}
+
+// nodeParams is d without secrets. Legacy (phase-1) nodes have no superuser: their db_user is the admin.
+func nodeParams(d store.Database) engine.Params {
+	p := engine.Params{Name: d.Name, User: d.User, Version: d.Version, AdminUser: d.AdminUser}
+	if p.AdminUser == "" {
+		p.AdminUser = d.User
+	}
+	return p
 }
 
 // removeNode tears down container, volume, route and cert, then marks the row "error". Failures are only logged.

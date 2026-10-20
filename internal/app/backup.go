@@ -103,7 +103,7 @@ func (a *App) runBackup(objs ObjectStore, db store.Database, b store.Backup) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	eng, _, _ := engine.Get(db.Engine)
-	cmd := eng.DumpCmd(engine.Params{Name: db.Name, User: db.User, Version: db.Version})
+	cmd := eng.DumpCmd(nodeParams(db))
 
 	pr, pw := io.Pipe()
 	var stderr bytes.Buffer

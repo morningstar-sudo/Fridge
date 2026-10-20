@@ -1,0 +1,50 @@
+package app
+
+import (
+	"context"
+	"crypto/rand"
+	"fmt"
+	"io"
+	"strings"
+
+	"fridge/internal/engine"
+	"fridge/internal/store"
+)
+
+// RevealSuperuser returns the node superuser's credentials; a legacy node's admin is its db_user.
+func (a *App) RevealSuperuser(ctx context.Context, d store.Database) (user, password string, err error) {
+	if d.AdminUser == "" {
+		pw, err := a.Box.Decrypt(d.PasswordEnc)
+		return d.User, pw, err
+	}
+	pw, err := a.Box.Decrypt(d.AdminPasswordEnc)
+	return d.AdminUser, pw, err
+}
+
+// RotateSuperuser sets a fresh superuser password on the running node, then stores it.
+// ponytail: no per-node lock; two concurrent rotates can leave the stored password behind the node's. Lock in the caller if that matters.
+func (a *App) RotateSuperuser(ctx context.Context, d store.Database) error {
+	if d.AdminUser == "" {
+		return invalid("legacy database %s has no separate superuser", d.Name)
+	}
+	if d.Status != "running" {
+		return invalid("database %s is %s, not running", d.Name, d.Status)
+	}
+	eng, _, err := engine.Get(d.Engine)
+	if err != nil {
+		return err
+	}
+	pw := rand.Text()
+	enc, err := a.Box.Encrypt(pw)
+	if err != nil {
+		return err
+	}
+	code, err := a.RT.Exec(ctx, d.ContainerID, eng.AdminCmd(nodeParams(d)), strings.NewReader(eng.SetPasswordSQL(d.AdminUser, pw)), io.Discard, io.Discard)
+	switch {
+	case err != nil:
+		return fmt.Errorf("rotate superuser: %w", err)
+	case code != 0:
+		return fmt.Errorf("rotate superuser: exited %d", code)
+	}
+	return a.Store.SetDatabaseAdminPassword(ctx, d.ID, enc)
+}

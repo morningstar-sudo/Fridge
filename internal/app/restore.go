@@ -124,7 +124,7 @@ func (a *App) StartRestore(ctx context.Context, req RestoreRequest) (store.Resto
 	if err != nil {
 		return store.Restore{}, err
 	}
-	if _, _, err := eng.RestoreCmd(engine.Params{}, req.Key); err != nil {
+	if _, _, _, err := eng.RestoreCmd(engine.Params{}, req.Key); err != nil {
 		return store.Restore{}, invalid("%v", err)
 	}
 	if _, err := a.Store.GetDatabaseByName(ctx, nr.Name); err == nil {
@@ -179,11 +179,7 @@ func (a *App) runRestore(objs ObjectStore, eng engine.Engine, r store.Restore, n
 		if err := a.Store.SetRestoreTarget(ctx, r.ID, d.ID); err != nil {
 			return err
 		}
-		pw, err := a.Box.Decrypt(d.PasswordEnc)
-		if err != nil {
-			return err
-		}
-		cmd, gunzip, err := eng.RestoreCmd(engine.Params{Name: d.Name, User: d.User, Password: pw, Version: d.Version}, r.S3Key)
+		cmd, gunzip, setRole, err := eng.RestoreCmd(nodeParams(d), r.S3Key)
 		if err != nil {
 			return err
 		}
@@ -200,6 +196,9 @@ func (a *App) runRestore(objs ObjectStore, eng engine.Engine, r store.Restore, n
 			}
 			defer zr.Close()
 			in = zr
+		}
+		if setRole { // objects from a plain SQL file must belong to the app user, not the superuser
+			in = io.MultiReader(strings.NewReader("SET ROLE "+engine.QuoteIdent(d.User)+";\n"), in)
 		}
 		code, err := a.RT.Exec(runCtx, d.ContainerID, cmd, in, io.Discard, &stderr)
 		switch {

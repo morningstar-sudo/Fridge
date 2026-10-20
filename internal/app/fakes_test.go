@@ -23,10 +23,17 @@ import (
 
 type removeCall struct{ ID, Volume string }
 
+type execCall struct {
+	ID    string
+	Cmd   []string
+	Stdin string
+}
+
 type fakeRuntime struct {
 	mu        sync.Mutex
 	runs      []container.RunSpec
 	removes   []removeCall
+	execs     []execCall
 	healthErr error
 	pingErr   error
 	alerts    []string
@@ -56,6 +63,17 @@ func (f *fakeRuntime) Exec(ctx context.Context, id string, cmd []string, stdin i
 		<-ctx.Done()
 		return -1, ctx.Err()
 	}
+	c := execCall{ID: id, Cmd: cmd}
+	if stdin != nil {
+		b, err := io.ReadAll(stdin)
+		if err != nil {
+			return -1, err
+		}
+		c.Stdin, stdin = string(b), bytes.NewReader(b)
+	}
+	f.mu.Lock()
+	f.execs = append(f.execs, c)
+	f.mu.Unlock()
 	if f.execFn == nil {
 		return 0, nil
 	}

@@ -9,8 +9,9 @@ import (
 )
 
 // Params identifies one database instance for a given engine.
+// AdminUser is the node superuser; legacy single-user nodes pass AdminUser = User.
 type Params struct {
-	Name, User, Password, Version string
+	Name, User, Password, Version, AdminUser, AdminPassword string
 }
 
 // Spec describes the container an engine runs.
@@ -27,8 +28,12 @@ type Engine interface {
 	Spec(p Params) Spec
 	DumpCmd(p Params) []string
 	DumpExt() string
-	RestoreCmd(p Params, key string) (cmd []string, gunzip bool, err error)
-	ConnString(p Params, domain string) string
+	// setRole: the caller prefixes stdin with SET ROLE <User> so objects belong to the app user.
+	RestoreCmd(p Params, key string) (cmd []string, gunzip, setRole bool, err error)
+	ConnString(p Params, domain string) string // app user
+	AppUserSQL(user, password, db string) string
+	SetPasswordSQL(user, password string) string
+	AdminCmd(p Params) []string // superuser SQL shell; SQL (and passwords) go on stdin, never argv
 }
 
 // Info is the catalog entry for an engine.

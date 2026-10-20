@@ -101,8 +101,8 @@ func TestCustomDBCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if envOf(e.rt, "POSTGRES_USER") != "alice_shop_rw" || envOf(e.rt, "POSTGRES_PASSWORD") != pw {
-		t.Fatalf("env = %v", e.rt.runs[0].Env)
+	if x := lastExec(t, e.rt); !strings.Contains(x.Stdin, `CREATE ROLE "alice_shop_rw" LOGIN PASSWORD '`+pw+`'`) {
+		t.Fatalf("app user SQL = %q", x.Stdin)
 	}
 	cs, err := e.a.ConnString(d)
 	if err != nil {
@@ -120,8 +120,8 @@ func TestCustomDBCredentials(t *testing.T) {
 			t.Errorf("%s: err = %v", name, err)
 		}
 	}
-	if _, err := e.create(e.alice, e.dom(e.alice, "rnd"), "rnd", "rnd", ""); err != nil || len(envOf(e.rt, "POSTGRES_PASSWORD")) != 26 {
-		t.Fatalf("random pw %q err=%v", envOf(e.rt, "POSTGRES_PASSWORD"), err)
+	if d, err := e.create(e.alice, e.dom(e.alice, "rnd"), "rnd", "rnd", ""); err != nil || len(appPassword(t, e.a, d)) != 26 {
+		t.Fatalf("random pw err=%v", err)
 	}
 }
 

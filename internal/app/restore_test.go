@@ -127,7 +127,7 @@ func TestRestorePlainSQLGzNeedsEngine(t *testing.T) {
 	if got, _ := a.Store.GetRestore(context.Background(), r.ID); got.Status != "ok" {
 		t.Fatalf("restore %+v", got)
 	}
-	if cmd0 != "psql" || in != "select 1;" {
+	if cmd0 != "psql" || in != "SET ROLE \"root1_abc2\";\nselect 1;" {
 		t.Fatalf("exec %q %q", cmd0, in)
 	}
 }
@@ -137,6 +137,9 @@ func TestRestoreGarbageRollsBack(t *testing.T) {
 	key := "upload/x.dump"
 	dest := restoreFixture(t, a, objs, key, []byte("garbage"), nil)
 	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int {
+		if cmd[0] != "pg_restore" { // let provisioning succeed
+			return 0
+		}
 		stderr.Write([]byte("invalid input"))
 		return 1
 	}

@@ -27,7 +27,7 @@ func TestCreateDatabaseHappyPath(t *testing.T) {
 	if got.Status != "running" || got.ContainerID == "" {
 		t.Fatalf("stored = %+v", got)
 	}
-	if len(rt.runs) != 1 || rt.runs[0].Name != "fridge-postgres-root1_abc" || rt.runs[0].Image != "postgres:17" {
+	if len(rt.runs) != 1 || rt.runs[0].Name != d.Volume || !nodeNameRe.MatchString(d.Volume) || rt.runs[0].Image != "postgres:17" {
 		t.Fatalf("runs = %+v", rt.runs)
 	}
 	pw := ""
@@ -87,7 +87,7 @@ func TestCreateDatabaseRollbackOnUnhealthy(t *testing.T) {
 		t.Fatalf("dbs = %+v", dbs)
 	}
 	id := dbs[0].ID
-	if len(rt.removes) != 1 || rt.removes[0] != (removeCall{"ctr-fridge-postgres-root1_abc", "fridge-postgres-root1_abc"}) {
+	if v := dbs[0].Volume; len(rt.removes) != 1 || rt.removes[0] != (removeCall{"ctr-" + v, v}) || !nodeNameRe.MatchString(v) {
 		t.Fatalf("removes = %+v", rt.removes)
 	}
 	for _, p := range []string{
@@ -190,7 +190,7 @@ func TestRemoveNodeCleansProvisionedDatabase(t *testing.T) {
 			t.Errorf("%s still exists (%v)", p, err)
 		}
 	}
-	if len(rt.removes) != 1 || rt.removes[0] != (removeCall{"ctr-fridge-postgres-root1_abc", "fridge-postgres-root1_abc"}) {
+	if len(rt.removes) != 1 || rt.removes[0] != (removeCall{"ctr-" + d.Volume, d.Volume}) {
 		t.Fatalf("removes = %+v", rt.removes)
 	}
 	if got, _ := a.Store.GetDatabase(ctx, d.ID); got.Status != "error" {
@@ -253,7 +253,7 @@ func TestRecoverInterrupted(t *testing.T) {
 	if err := a.RecoverInterrupted(ctx); err != nil {
 		t.Fatal(err)
 	}
-	want := []removeCall{{"fridge-postgres-half", "fridge-postgres-half"}, {"ctr-fridge-postgres-root1_tgt", "fridge-postgres-root1_tgt"}}
+	want := []removeCall{{"fridge-postgres-half", "fridge-postgres-half"}, {"ctr-" + tgt.Volume, tgt.Volume}}
 	if len(rt.removes) != 2 || rt.removes[0] != want[0] || rt.removes[1] != want[1] {
 		t.Fatalf("removes = %+v", rt.removes)
 	}
