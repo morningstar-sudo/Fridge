@@ -121,6 +121,9 @@ var migrations = []string{
 	);
 
 	CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`,
+	// restores needs error + split source engine/version (Task 3).
+	`ALTER TABLE restores RENAME COLUMN source_engine_version TO source_version;
+	ALTER TABLE restores ADD COLUMN source_engine TEXT NOT NULL DEFAULT '', ADD COLUMN error TEXT NOT NULL DEFAULT '';`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

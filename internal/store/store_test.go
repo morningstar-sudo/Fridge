@@ -32,7 +32,7 @@ func TestReopenKeepsDataAndSkipsMigrations(t *testing.T) {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 	var n int
-	if err := s2.Pool().QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&n); err != nil || n != 1 {
+	if err := s2.Pool().QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&n); err != nil || n != 2 {
 		t.Fatalf("schema_migrations rows = %d, %v", n, err)
 	}
 }
