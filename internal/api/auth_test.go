@@ -218,9 +218,8 @@ func TestInviteTokenNotInPath(t *testing.T) {
 }
 
 func TestCSRF(t *testing.T) {
-	h, _, a := newRawSrv(t, "setup-tok", Options{})
+	h, _, _ := newRawSrv(t, "setup-tok", Options{})
 	setupAlice(t, h)
-	relaxOwner(t, a)
 	c, sid := loginAs(t, h, "alice", pwAlice)
 	ck := c.Name + "=" + c.Value
 	body := `{"engine":"postgres","name":"abc","domain":"abc.com"}`

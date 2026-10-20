@@ -59,6 +59,7 @@ type RestoreRequest struct {
 	Key, Engine      string
 	New              *CreateRequest
 	TargetDatabaseID int64
+	OwnerID          int64 // required, > 0: owns the new node, recorded as started_by
 }
 
 // StartRestore validates, records a running restore and restores into a brand-new node in the background.
@@ -69,7 +70,11 @@ func (a *App) StartRestore(ctx context.Context, req RestoreRequest) (store.Resto
 	if req.New == nil {
 		return store.Restore{}, invalid("new database is required")
 	}
+	if req.OwnerID <= 0 {
+		return store.Restore{}, invalid("owner is required")
+	}
 	nr := *req.New
+	nr.OwnerID = req.OwnerID
 	nr.Domain = strings.ToLower(strings.TrimSpace(nr.Domain))
 	if !nameRe.MatchString(nr.Name) {
 		return store.Restore{}, invalid("name must match %s", nameRe)
@@ -137,7 +142,7 @@ func (a *App) StartRestore(ctx context.Context, req RestoreRequest) (store.Resto
 		}
 	}
 
-	r := store.Restore{DestinationID: req.DestinationID, S3Key: req.Key, SourceEngine: srcEng, SourceVersion: srcVer, Mode: "new"}
+	r := store.Restore{DestinationID: req.DestinationID, S3Key: req.Key, SourceEngine: srcEng, SourceVersion: srcVer, Mode: "new", StartedByID: &req.OwnerID}
 	if warning != "" {
 		r.Log = warning + "\n"
 	}

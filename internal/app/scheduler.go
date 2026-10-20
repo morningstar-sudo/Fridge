@@ -57,7 +57,7 @@ func (s *Scheduler) AddFixed(spec string, fn func()) error {
 }
 
 func (s *Scheduler) run(sc store.Schedule) {
-	_, err := s.a.StartBackup(context.Background(), sc.DatabaseID, sc.DestinationID, &sc.ID, "schedule")
+	_, err := s.a.StartBackup(context.Background(), sc.DatabaseID, sc.DestinationID, &sc.ID, "schedule", nil)
 	switch {
 	case errors.Is(err, store.ErrConflict):
 		log.Printf("schedule %d: skipped, backup running", sc.ID)

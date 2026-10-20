@@ -176,3 +176,22 @@ func newTestApp(t *testing.T) (*App, *fakeRuntime, *fakeObjects) {
 	a.OpenObjects = func(d store.Destination, sk string) (ObjectStore, error) { return objs, nil }
 	return a, rt, objs
 }
+
+// mkUser inserts a user (no setup, so owner_id stays nullable in app tests).
+func mkUser(t *testing.T, a *App, name, role string) int64 {
+	t.Helper()
+	u := store.User{Username: name, Role: role, Salt: make([]byte, 16), Iterations: 600000, StoredKey: make([]byte, 32), ServerKey: make([]byte, 32)}
+	if err := a.Store.CreateUser(context.Background(), &u); err != nil {
+		t.Fatal(err)
+	}
+	return u.ID
+}
+
+// own returns the id of the default test owner "root1", creating it on first use.
+func own(t *testing.T, a *App) int64 {
+	t.Helper()
+	if u, err := a.Store.GetUserByName(context.Background(), "root1"); err == nil {
+		return u.ID
+	}
+	return mkUser(t, a, "root1", "admin")
+}

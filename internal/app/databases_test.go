@@ -16,7 +16,7 @@ import (
 func TestCreateDatabaseHappyPath(t *testing.T) {
 	a, rt, _ := newTestApp(t)
 	ctx := context.Background()
-	d, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "abc", Domain: "ABC.com "})
+	d, err := a.CreateDatabase(ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "abc", Domain: "ABC.com "})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestCreateDatabaseHappyPath(t *testing.T) {
 
 func TestCreateDatabaseValidation(t *testing.T) {
 	a, rt, _ := newTestApp(t)
-	ok := CreateRequest{Engine: "postgres", Name: "abc", Domain: "abc.com"}
+	ok := CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "abc", Domain: "abc.com"}
 	cases := map[string]func(*CreateRequest){
 		"version":    func(r *CreateRequest) { r.Version = "99" },
 		"name case":  func(r *CreateRequest) { r.Name = "Abc" },
@@ -78,7 +78,7 @@ func TestCreateDatabaseRollbackOnUnhealthy(t *testing.T) {
 	a, rt, _ := newTestApp(t)
 	ctx := context.Background()
 	rt.healthErr = errors.New("unhealthy")
-	req := CreateRequest{Engine: "postgres", Name: "abc", Domain: "abc.com"}
+	req := CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "abc", Domain: "abc.com"}
 	if _, err := a.CreateDatabase(ctx, req); err == nil {
 		t.Fatal("want error")
 	}
@@ -107,7 +107,7 @@ func TestCreateDatabaseRollbackOnUnhealthy(t *testing.T) {
 func TestCreateDatabaseDefaultSchedule(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	ctx := context.Background()
-	d1, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "one", Domain: "one.com"})
+	d1, err := a.CreateDatabase(ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "one", Domain: "one.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestCreateDatabaseDefaultSchedule(t *testing.T) {
 	}
 	var first int64
 	for _, n := range []string{"d1", "d2"} {
-		x := store.Destination{Name: n, Provider: "s3"}
+		x := store.Destination{Name: n, Provider: "s3", Shared: true}
 		if err := a.Store.CreateDestination(ctx, &x); err != nil {
 			t.Fatal(err)
 		}
@@ -124,7 +124,7 @@ func TestCreateDatabaseDefaultSchedule(t *testing.T) {
 			first = x.ID
 		}
 	}
-	d2, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "two", Domain: "two.com"})
+	d2, err := a.CreateDatabase(ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "two", Domain: "two.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,10 +163,10 @@ func TestRemoveNodeCleansProvisionedDatabase(t *testing.T) {
 	a, rt, _ := newTestApp(t)
 	ctx := context.Background()
 	a.Sched = NewScheduler(a)
-	if err := a.Store.CreateDestination(ctx, &store.Destination{Name: "s3", Provider: "s3"}); err != nil {
+	if err := a.Store.CreateDestination(ctx, &store.Destination{Name: "s3", Provider: "s3", Shared: true}); err != nil {
 		t.Fatal(err)
 	}
-	d, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "abc", Domain: "abc.com"})
+	d, err := a.CreateDatabase(ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "abc", Domain: "abc.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestCreateDatabaseRollbackSurvivesCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	rt.onWait = cancel
 	rt.healthErr = context.Canceled
-	if _, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "abc", Domain: "abc.com"}); err == nil {
+	if _, err := a.CreateDatabase(ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "abc", Domain: "abc.com"}); err == nil {
 		t.Fatal("want error")
 	}
 	if len(rt.removes) != 1 {
@@ -221,11 +221,11 @@ func TestCreateDatabaseRollbackSurvivesCancelledContext(t *testing.T) {
 func TestRecoverInterrupted(t *testing.T) {
 	a, rt, _ := newTestApp(t)
 	ctx := context.Background()
-	dest := store.Destination{Name: "s3", Provider: "s3"}
+	dest := store.Destination{Name: "s3", Provider: "s3", Shared: true}
 	if err := a.Store.CreateDestination(ctx, &dest); err != nil {
 		t.Fatal(err)
 	}
-	keep, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "keep", Domain: "keep.com"})
+	keep, err := a.CreateDatabase(ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "keep", Domain: "keep.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func TestRecoverInterrupted(t *testing.T) {
 	if err := a.Store.CreateDatabase(ctx, &half); err != nil {
 		t.Fatal(err)
 	}
-	tgt, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "tgt", Domain: "tgt.com"})
+	tgt, err := a.CreateDatabase(ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "tgt", Domain: "tgt.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +275,7 @@ func TestRecoverInterrupted(t *testing.T) {
 		t.Fatalf("alerts = %q", rt.alerts)
 	}
 	for _, n := range []string{"half", "tgt"} {
-		if _, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: n, Domain: n + ".com"}); err != nil {
+		if _, err := a.CreateDatabase(ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: n, Domain: n + ".com"}); err != nil {
 			t.Fatalf("reuse %s: %v", n, err)
 		}
 	}

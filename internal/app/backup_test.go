@@ -52,7 +52,7 @@ func TestBackupHappyPath(t *testing.T) {
 		stdout.Write([]byte("DUMPDATA"))
 		return 0
 	}
-	b, err := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual")
+	b, err := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestBackupDumpFailsMidStream(t *testing.T) {
 		stderr.Write([]byte("boom"))
 		return 1
 	}
-	b, err := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual")
+	b, err := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestBackupUploadFails(t *testing.T) {
 	d, dest := fixture(t, a)
 	objs.putErr = errors.New("s3 down")
 	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int { return 0 }
-	b, err := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual")
+	b, err := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,10 +126,10 @@ func TestBackupConcurrent(t *testing.T) {
 		return 0
 	}
 	ctx := context.Background()
-	if _, err := a.StartBackup(ctx, d.ID, dest.ID, nil, "schedule"); err != nil {
+	if _, err := a.StartBackup(ctx, d.ID, dest.ID, nil, "schedule", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.StartBackup(ctx, d.ID, dest.ID, nil, "manual"); !errors.Is(err, store.ErrConflict) {
+	if _, err := a.StartBackup(ctx, d.ID, dest.ID, nil, "manual", nil); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("err = %v", err)
 	}
 	close(gate)
@@ -142,7 +142,7 @@ func TestBackupNoDestination(t *testing.T) {
 	if err := a.Store.CreateDatabase(context.Background(), &d); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.StartBackup(context.Background(), d.ID, 0, nil, "manual"); !errors.Is(err, ErrInvalid) {
+	if _, err := a.StartBackup(context.Background(), d.ID, 0, nil, "manual", nil); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -161,7 +161,7 @@ func TestRetention(t *testing.T) {
 	}
 	var keys []string
 	run := func(schedID *int64, trigger string) {
-		b, err := a.StartBackup(ctx, d.ID, dest.ID, schedID, trigger)
+		b, err := a.StartBackup(ctx, d.ID, dest.ID, schedID, trigger, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -214,7 +214,7 @@ func TestBackupTimeout(t *testing.T) {
 	d, dest := fixture(t, a)
 	a.backupTimeout = 50 * time.Millisecond
 	rt.hang = true
-	b, err := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual")
+	b, err := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestBackupInvalidUTF8Log(t *testing.T) {
 		stderr.Write([]byte("bad \xff\xfe bytes"))
 		return 0
 	}
-	b, _ := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual")
+	b, _ := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual", nil)
 	a.Wait()
 	got, _ := a.Store.GetBackup(context.Background(), b.ID)
 	if got.Status != "ok" || len(rt.alerts) != 0 {
@@ -249,7 +249,7 @@ func TestBackupFinishFailureAlerts(t *testing.T) {
 		a.Store.Close() // FinishBackup will now fail
 		return 0
 	}
-	if _, err := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual"); err != nil {
+	if _, err := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual", nil); err != nil {
 		t.Fatal(err)
 	}
 	a.Wait()
@@ -270,12 +270,12 @@ func TestBackupSameSecondKeyConflict(t *testing.T) {
 		return 0
 	}
 	ctx := context.Background()
-	b, err := a.StartBackup(ctx, d.ID, dest.ID, nil, "manual")
+	b, err := a.StartBackup(ctx, d.ID, dest.ID, nil, "manual", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	a.Wait()
-	if _, err := a.StartBackup(ctx, d.ID, dest.ID, nil, "manual"); !errors.Is(err, store.ErrConflict) {
+	if _, err := a.StartBackup(ctx, d.ID, dest.ID, nil, "manual", nil); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("err = %v", err)
 	}
 	a.Wait()

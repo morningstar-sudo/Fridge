@@ -77,7 +77,7 @@ func TestRestoreHappyPath(t *testing.T) {
 		cmd0, in = cmd[0], string(b)
 		return 0
 	}
-	r, err := a.StartRestore(context.Background(), RestoreRequest{DestinationID: dest.ID, Key: key, New: &CreateRequest{Name: "abc2", Domain: "abc2.com", Version: "17"}})
+	r, err := a.StartRestore(context.Background(), RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: key, New: &CreateRequest{OwnerID: own(t, a), Name: "abc2", Domain: "abc2.com", Version: "17"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestRestoreBlocksDowngrade(t *testing.T) {
 	a, rt, objs := newTestApp(t)
 	key := "fridge/postgres-17/abc/abc-1.dump"
 	dest := restoreFixture(t, a, objs, key, []byte("D"), nil)
-	_, err := a.StartRestore(context.Background(), RestoreRequest{DestinationID: dest.ID, Key: key, New: &CreateRequest{Name: "abc2", Domain: "abc2.com", Version: "14"}})
+	_, err := a.StartRestore(context.Background(), RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: key, New: &CreateRequest{OwnerID: own(t, a), Name: "abc2", Domain: "abc2.com", Version: "14"}})
 	if !errors.Is(err, ErrInvalid) || len(rt.runs) != 0 {
 		t.Fatalf("err=%v runs=%d", err, len(rt.runs))
 	}
@@ -109,8 +109,8 @@ func TestRestorePlainSQLGzNeedsEngine(t *testing.T) {
 	a, rt, objs := newTestApp(t)
 	key := "upload/x.sql.gz"
 	dest := restoreFixture(t, a, objs, key, gz("select 1;"), nil)
-	nr := &CreateRequest{Name: "abc2", Domain: "abc2.com"}
-	if _, err := a.StartRestore(context.Background(), RestoreRequest{DestinationID: dest.ID, Key: key, New: nr}); !errors.Is(err, ErrInvalid) {
+	nr := &CreateRequest{OwnerID: own(t, a), Name: "abc2", Domain: "abc2.com"}
+	if _, err := a.StartRestore(context.Background(), RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: key, New: nr}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("want ErrInvalid, got %v", err)
 	}
 	var cmd0, in string
@@ -119,7 +119,7 @@ func TestRestorePlainSQLGzNeedsEngine(t *testing.T) {
 		cmd0, in = cmd[0], string(b)
 		return 0
 	}
-	r, err := a.StartRestore(context.Background(), RestoreRequest{DestinationID: dest.ID, Key: key, Engine: "postgres", New: nr})
+	r, err := a.StartRestore(context.Background(), RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: key, Engine: "postgres", New: nr})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestRestoreGarbageRollsBack(t *testing.T) {
 		stderr.Write([]byte("invalid input"))
 		return 1
 	}
-	r, err := a.StartRestore(context.Background(), RestoreRequest{DestinationID: dest.ID, Key: key, New: &CreateRequest{Name: "abc2", Domain: "abc2.com"}})
+	r, err := a.StartRestore(context.Background(), RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: key, New: &CreateRequest{OwnerID: own(t, a), Name: "abc2", Domain: "abc2.com"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestRestoreBadGzipRollsBack(t *testing.T) {
 	a, rt, objs := newTestApp(t)
 	key := "upload/x.sql.gz"
 	dest := restoreFixture(t, a, objs, key, []byte("not gzip"), nil)
-	r, err := a.StartRestore(context.Background(), RestoreRequest{DestinationID: dest.ID, Key: key, Engine: "postgres", New: &CreateRequest{Name: "abc2", Domain: "abc2.com"}})
+	r, err := a.StartRestore(context.Background(), RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: key, Engine: "postgres", New: &CreateRequest{OwnerID: own(t, a), Name: "abc2", Domain: "abc2.com"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestRestoreFallbackVersion(t *testing.T) {
 	a, _, objs := newTestApp(t)
 	key := "fridge/postgres-14/abc/abc-1.dump"
 	dest := restoreFixture(t, a, objs, key, []byte("D"), nil)
-	r, err := a.StartRestore(context.Background(), RestoreRequest{DestinationID: dest.ID, Key: key, New: &CreateRequest{Name: "abc2", Domain: "abc2.com"}})
+	r, err := a.StartRestore(context.Background(), RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: key, New: &CreateRequest{OwnerID: own(t, a), Name: "abc2", Domain: "abc2.com"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,11 +211,11 @@ func TestRestoreSyncRejections(t *testing.T) {
 		req  RestoreRequest
 		want error
 	}{
-		{"name used", RestoreRequest{DestinationID: dest.ID, Key: key, New: &CreateRequest{Name: "taken", Domain: "other.com"}}, store.ErrConflict},
-		{"domain used", RestoreRequest{DestinationID: dest.ID, Key: key, New: &CreateRequest{Name: "fresh", Domain: " TAKEN.com "}}, store.ErrConflict},
-		{"missing key", RestoreRequest{DestinationID: dest.ID, Key: "nope.dump", New: &CreateRequest{Name: "fresh", Domain: "fresh.com"}}, store.ErrNotFound},
-		{"no destination", RestoreRequest{DestinationID: 999, Key: key, New: &CreateRequest{Name: "fresh", Domain: "fresh.com"}}, ErrInvalid},
-		{"engine mismatch", RestoreRequest{DestinationID: dest.ID, Key: key, Engine: "redis", New: &CreateRequest{Name: "fresh", Domain: "fresh.com"}}, ErrInvalid},
+		{"name used", RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: key, New: &CreateRequest{OwnerID: own(t, a), Name: "taken", Domain: "other.com"}}, store.ErrConflict},
+		{"domain used", RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: key, New: &CreateRequest{OwnerID: own(t, a), Name: "fresh", Domain: " TAKEN.com "}}, store.ErrConflict},
+		{"missing key", RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: "nope.dump", New: &CreateRequest{OwnerID: own(t, a), Name: "fresh", Domain: "fresh.com"}}, store.ErrNotFound},
+		{"no destination", RestoreRequest{OwnerID: own(t, a), DestinationID: 999, Key: key, New: &CreateRequest{OwnerID: own(t, a), Name: "fresh", Domain: "fresh.com"}}, ErrInvalid},
+		{"engine mismatch", RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: key, Engine: "redis", New: &CreateRequest{OwnerID: own(t, a), Name: "fresh", Domain: "fresh.com"}}, ErrInvalid},
 	}
 	for _, c := range cases {
 		if _, err := a.StartRestore(ctx, c.req); !errors.Is(err, c.want) {

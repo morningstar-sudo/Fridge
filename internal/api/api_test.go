@@ -65,20 +65,8 @@ func newSrv(t *testing.T) (http.Handler, *fakeRT, *app.App) {
 	t.Helper()
 	h, rt, a := newRawSrv(t, "setup-tok", Options{})
 	setupAlice(t, h)
-	relaxOwner(t, a)
 	_, tok = loginAs(t, h, "alice", pwAlice)
 	return h, rt, a
-}
-
-// relaxOwner drops the NOT NULL that setup puts on owner_id: the phase-1 handlers kept here
-// do not set owners until Task 6 wires OwnerID into them.
-func relaxOwner(t *testing.T, a *app.App) {
-	t.Helper()
-	_, err := a.Store.Pool().Exec(context.Background(), `ALTER TABLE databases ALTER owner_id DROP NOT NULL;
-		ALTER TABLE destinations ALTER owner_id DROP NOT NULL`)
-	if err != nil {
-		t.Fatal(err)
-	}
 }
 
 func newRawSrv(t *testing.T, setupToken string, o Options) (http.Handler, *fakeRT, *app.App) {

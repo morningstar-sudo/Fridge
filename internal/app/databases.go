@@ -16,7 +16,10 @@ import (
 	"fridge/internal/store"
 )
 
-type CreateRequest struct{ Engine, Name, Domain, Version, TLSMode string }
+type CreateRequest struct {
+	Engine, Name, Domain, Version, TLSMode string
+	OwnerID                                int64 // required, > 0
+}
 
 var (
 	nameRe  = regexp.MustCompile(`^[a-z][a-z0-9-]{1,30}$`)
@@ -41,6 +44,9 @@ func invalid(format string, args ...any) error {
 
 func (a *App) CreateDatabase(ctx context.Context, req CreateRequest) (store.Database, error) {
 	req.Domain = strings.ToLower(strings.TrimSpace(req.Domain))
+	if req.OwnerID <= 0 {
+		return store.Database{}, invalid("owner is required")
+	}
 	switch req.TLSMode {
 	case "", "internal":
 		req.TLSMode = "internal"
@@ -72,7 +78,7 @@ func (a *App) CreateDatabase(ctx context.Context, req CreateRequest) (store.Data
 	d := store.Database{
 		Name: req.Name, Engine: req.Engine, Version: version, Domain: req.Domain, TLSMode: req.TLSMode,
 		User: req.Name + "_app", PasswordEnc: enc,
-		Volume: fmt.Sprintf("fridge-%s-%s", req.Engine, req.Name), Status: "creating",
+		Volume: fmt.Sprintf("fridge-%s-%s", req.Engine, req.Name), Status: "creating", OwnerID: &req.OwnerID,
 	}
 	if err := a.Store.CreateDatabase(ctx, &d); err != nil {
 		return store.Database{}, err
@@ -125,14 +131,14 @@ func (a *App) provision(ctx context.Context, d *store.Database, eng engine.Engin
 }
 
 func (a *App) defaultSchedule(ctx context.Context, d store.Database) error {
-	dests, err := a.Store.ListDestinations(ctx)
-	if err != nil || len(dests) == 0 {
+	dest, ok, err := a.ownerDestination(ctx, d)
+	if err != nil || !ok {
 		return err
 	}
 	h := fnv.New32a()
 	h.Write([]byte(d.Name))
 	sc := store.Schedule{
-		DatabaseID: d.ID, DestinationID: dests[0].ID, // ListDestinations is ordered by id
+		DatabaseID: d.ID, DestinationID: dest.ID,
 		Cron: fmt.Sprintf("%d 2 * * *", h.Sum32()%60), Prefix: "fridge", KeepLatest: 7, Enabled: true,
 	}
 	if err := a.Store.CreateSchedule(ctx, &sc); err != nil {

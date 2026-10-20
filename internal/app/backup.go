@@ -32,7 +32,7 @@ func (a *App) clock() time.Time {
 
 // StartBackup records a running backup and streams the dump to S3 in the background.
 // store.ErrConflict is returned as-is when this database already has a backup running.
-func (a *App) StartBackup(ctx context.Context, dbID, destID int64, scheduleID *int64, trigger string) (store.Backup, error) {
+func (a *App) StartBackup(ctx context.Context, dbID, destID int64, scheduleID *int64, trigger string, startedBy *int64) (store.Backup, error) {
 	db, err := a.Store.GetDatabase(ctx, dbID)
 	if err != nil {
 		return store.Backup{}, err
@@ -57,14 +57,14 @@ func (a *App) StartBackup(ctx context.Context, dbID, destID int64, scheduleID *i
 		if len(scs) > 0 {
 			destID, prefix = scs[0].DestinationID, scs[0].Prefix
 		} else {
-			dests, err := a.Store.ListDestinations(ctx)
+			dest, ok, err := a.ownerDestination(ctx, db)
 			if err != nil {
 				return store.Backup{}, err
 			}
-			if len(dests) == 0 {
-				return store.Backup{}, invalid("no destination configured")
+			if !ok {
+				return store.Backup{}, invalid("no usable destination")
 			}
-			destID = dests[0].ID
+			destID = dest.ID
 		}
 	}
 	objs, _, err := a.objects(ctx, destID)
@@ -79,7 +79,7 @@ func (a *App) StartBackup(ctx context.Context, dbID, destID int64, scheduleID *i
 		return store.Backup{}, err
 	}
 	b := store.Backup{
-		DatabaseID: dbID, DestinationID: destID, ScheduleID: scheduleID, Trigger: trigger,
+		DatabaseID: dbID, DestinationID: destID, ScheduleID: scheduleID, Trigger: trigger, StartedByID: startedBy,
 		Engine: db.Engine, EngineVersion: db.Version,
 		S3Key: BackupKey(prefix, db.Engine, db.Version, db.Name, a.clock(), eng.DumpExt()),
 	}

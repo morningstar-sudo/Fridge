@@ -282,6 +282,7 @@ func (s *server) engines(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) createDB(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
 	var in struct {
 		Engine  string `json:"engine"`
 		Name    string `json:"name"`
@@ -292,7 +293,7 @@ func (s *server) createDB(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
-	d, err := s.a.CreateDatabase(r.Context(), app.CreateRequest{Engine: in.Engine, Name: in.Name, Domain: in.Domain, Version: in.Version, TLSMode: in.TLSMode})
+	d, err := s.a.CreateDatabase(r.Context(), app.CreateRequest{Engine: in.Engine, Name: in.Name, Domain: in.Domain, Version: in.Version, TLSMode: in.TLSMode, OwnerID: p.UserID})
 	if err != nil {
 		fail(w, err)
 		return
@@ -341,7 +342,10 @@ func (s *server) createDest(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
-	d, err := s.a.CreateDestination(r.Context(), in.dest(0), in.SecretKey)
+	p, _ := principal(r)
+	nd := in.dest(0)
+	nd.OwnerID = &p.UserID
+	d, err := s.a.CreateDestination(r.Context(), nd, in.SecretKey)
 	if err != nil {
 		fail(w, err)
 		return
@@ -502,6 +506,7 @@ func (s *server) listBackups(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) startBackup(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
 	d, ok := s.dbOf(w, r)
 	if !ok {
 		return
@@ -512,7 +517,7 @@ func (s *server) startBackup(w http.ResponseWriter, r *http.Request) {
 	if r.ContentLength != 0 && !decode(w, r, &in) {
 		return
 	}
-	b, err := s.a.StartBackup(r.Context(), d.ID, in.DestinationID, nil, "manual")
+	b, err := s.a.StartBackup(r.Context(), d.ID, in.DestinationID, nil, "manual", &p.UserID)
 	if err != nil {
 		fail(w, err)
 		return
@@ -547,6 +552,7 @@ func (s *server) download(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) startRestore(w http.ResponseWriter, r *http.Request) {
+	p, _ := principal(r)
 	var in struct {
 		DestinationID int64  `json:"destination_id"`
 		Key           string `json:"key"`
@@ -560,7 +566,7 @@ func (s *server) startRestore(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
-	req := app.RestoreRequest{DestinationID: in.DestinationID, Key: in.Key, Engine: in.Engine}
+	req := app.RestoreRequest{DestinationID: in.DestinationID, Key: in.Key, Engine: in.Engine, OwnerID: p.UserID}
 	if in.New != nil {
 		req.New = &app.CreateRequest{Name: in.New.Name, Domain: in.New.Domain, Version: in.New.Version}
 	}

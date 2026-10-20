@@ -51,6 +51,9 @@ func (a *App) UpdateDestination(ctx context.Context, d store.Destination, secret
 	if err != nil {
 		return err
 	}
+	if old.DeletedAt != nil {
+		return invalid("destination deleted")
+	}
 	d.SecretKeyEnc = old.SecretKeyEnc
 	if secretKey != "" {
 		if d.SecretKeyEnc, err = a.Box.Encrypt(secretKey); err != nil {
@@ -72,6 +75,9 @@ func (a *App) objects(ctx context.Context, id int64) (ObjectStore, store.Destina
 	d, err := a.Store.GetDestination(ctx, id)
 	if err != nil {
 		return nil, d, err
+	}
+	if d.DeletedAt != nil {
+		return nil, d, invalid("destination deleted")
 	}
 	sk, err := a.Box.Decrypt(d.SecretKeyEnc)
 	if err != nil {
@@ -114,10 +120,14 @@ func (a *App) validSchedule(ctx context.Context, sc *store.Schedule) error {
 	if sc.Prefix == "" {
 		sc.Prefix = "fridge"
 	}
-	if _, err := a.Store.GetDestination(ctx, sc.DestinationID); errors.Is(err, store.ErrNotFound) {
+	dest, err := a.Store.GetDestination(ctx, sc.DestinationID)
+	if errors.Is(err, store.ErrNotFound) {
 		return invalid("destination %d does not exist", sc.DestinationID)
 	} else if err != nil {
 		return err
+	}
+	if dest.DeletedAt != nil {
+		return invalid("destination deleted")
 	}
 	return nil
 }

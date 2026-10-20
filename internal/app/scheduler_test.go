@@ -18,10 +18,10 @@ func TestFixedJobsSurviveReload(t *testing.T) {
 		t.Fatal("bad spec accepted")
 	}
 	fixed := s.c.Entries()[0].ID
-	if err := a.Store.CreateDestination(ctx, &store.Destination{Name: "s3", Provider: "s3"}); err != nil {
+	if err := a.Store.CreateDestination(ctx, &store.Destination{Name: "s3", Provider: "s3", Shared: true}); err != nil {
 		t.Fatal(err)
 	}
-	d, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "abc", Domain: "abc.com"})
+	d, err := a.CreateDatabase(ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "abc", Domain: "abc.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
