@@ -76,12 +76,14 @@ func (a *App) StartRestore(ctx context.Context, req RestoreRequest) (store.Resto
 	nr := *req.New
 	nr.OwnerID = req.OwnerID
 	nr.Domain = strings.ToLower(strings.TrimSpace(nr.Domain))
-	if !nameRe.MatchString(nr.Name) {
-		return store.Restore{}, invalid("name must match %s", nameRe)
-	}
 	if !validDomain(nr.Domain) {
 		return store.Restore{}, invalid("domain must be a hostname")
 	}
+	name, _, _, err := a.resolveNames(ctx, nr)
+	if err != nil {
+		return store.Restore{}, err
+	}
+	nr.Name = name // full name; CreateDatabase re-applies the (idempotent) prefix rule
 	objs, _, err := a.objects(ctx, req.DestinationID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {

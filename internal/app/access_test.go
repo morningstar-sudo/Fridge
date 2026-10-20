@@ -49,20 +49,20 @@ func TestOwnershipOnCreate(t *testing.T) {
 	a, _, objs := newTestApp(t)
 	x := mkActors(t, a)
 	ctx := context.Background()
-	d, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "abc", Domain: "abc.com", OwnerID: x.alice})
+	d, err := createDB(a, ctx, CreateRequest{Engine: "postgres", Name: "abc", Domain: "abc.com", OwnerID: x.alice})
 	if err != nil || d.OwnerID == nil || *d.OwnerID != x.alice {
 		t.Fatalf("%+v %v", d, err)
 	}
-	if _, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "abd", Domain: "abd.com"}); !errors.Is(err, ErrInvalid) {
+	if _, err := createDB(a, ctx, CreateRequest{Engine: "postgres", Name: "abd", Domain: "abd.com"}); !errors.Is(err, ErrInvalid) {
 		t.Fatal(err)
 	}
 	dest := mkDest(t, a, "s", x.root, true)
 	objs.objs["k.dump"] = fakeObj{[]byte("x"), map[string]string{"fridge-engine": "postgres", "fridge-version": "17"}}
 	nr := &CreateRequest{Name: "abc2", Domain: "abc2.com"}
-	if _, err := a.StartRestore(ctx, RestoreRequest{DestinationID: dest.ID, Key: "k.dump", New: nr}); !errors.Is(err, ErrInvalid) {
+	if _, err := startRestore(a, ctx, RestoreRequest{DestinationID: dest.ID, Key: "k.dump", New: nr}); !errors.Is(err, ErrInvalid) {
 		t.Fatal(err)
 	}
-	r, err := a.StartRestore(ctx, RestoreRequest{DestinationID: dest.ID, Key: "k.dump", New: nr, OwnerID: x.bob})
+	r, err := startRestore(a, ctx, RestoreRequest{DestinationID: dest.ID, Key: "k.dump", New: nr, OwnerID: x.bob})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestDefaultScheduleUsesOwnersDestination(t *testing.T) {
 	x := mkActors(t, a)
 	ctx := context.Background()
 	mkDest(t, a, "rootpriv", x.root, false)
-	d1, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "one", Domain: "one.com", OwnerID: x.alice})
+	d1, err := createDB(a, ctx, CreateRequest{Engine: "postgres", Name: "one", Domain: "one.com", OwnerID: x.alice})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestDefaultScheduleUsesOwnersDestination(t *testing.T) {
 		t.Fatal(scs)
 	}
 	dS := mkDest(t, a, "ds", x.root, true)
-	d2, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "two", Domain: "two.com", OwnerID: x.alice})
+	d2, err := createDB(a, ctx, CreateRequest{Engine: "postgres", Name: "two", Domain: "two.com", OwnerID: x.alice})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +297,7 @@ func TestDeletedDestinationBlocked(t *testing.T) {
 	}
 	objs.objs[b.S3Key] = fakeObj{[]byte("x"), nil}
 	_, e1 := a.BackupDownloadURL(ctx, b.ID)
-	_, e2 := a.StartRestore(ctx, RestoreRequest{DestinationID: dest.ID, Key: b.S3Key, OwnerID: x.alice, New: &CreateRequest{Name: "abc2", Domain: "abc2.com"}})
+	_, e2 := startRestore(a, ctx, RestoreRequest{DestinationID: dest.ID, Key: b.S3Key, OwnerID: x.alice, New: &CreateRequest{Name: "abc2", Domain: "abc2.com"}})
 	e3 := a.TestDestination(ctx, dest.ID)
 	e4 := a.UpdateDestination(ctx, store.Destination{ID: dest.ID, Name: "n", Endpoint: "http://h:1", Bucket: "b"}, "")
 	_, e5 := a.CreateSchedule(ctx, store.Schedule{DatabaseID: d.ID, DestinationID: dest.ID, Cron: "0 2 * * *", KeepLatest: 1})

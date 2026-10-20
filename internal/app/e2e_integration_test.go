@@ -89,7 +89,7 @@ func TestE2EBackupRestoreAcrossVersions(t *testing.T) {
 		return strings.TrimSpace(out.String())
 	}
 
-	src, err := a.CreateDatabase(ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "it14", Domain: "it14.fridge.test", Version: "14"})
+	src, err := createDB(a, ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "it14", Domain: "it14.fridge.test", Version: "14"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestE2EBackupRestoreAcrossVersions(t *testing.T) {
 		t.Fatalf("object meta: %v %v", meta, err)
 	}
 
-	r, err := a.StartRestore(ctx, RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: b.S3Key,
+	r, err := startRestore(a, ctx, RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: b.S3Key,
 		New: &CreateRequest{OwnerID: own(t, a), Name: "it17", Domain: "it17.fridge.test", Version: "17"}})
 	if err != nil {
 		t.Fatal(err)
@@ -136,7 +136,7 @@ func TestE2EBackupRestoreAcrossVersions(t *testing.T) {
 		t.Fatalf("count on it17 = %q, want 3", got)
 	}
 
-	_, err = a.StartRestore(ctx, RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: b.S3Key,
+	_, err = startRestore(a, ctx, RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: b.S3Key,
 		New: &CreateRequest{OwnerID: own(t, a), Name: "it13", Domain: "it13.fridge.test", Version: "13"}})
 	if !errors.Is(err, ErrInvalid) {
 		t.Fatalf("downgrade restore: got %v, want ErrInvalid", err)

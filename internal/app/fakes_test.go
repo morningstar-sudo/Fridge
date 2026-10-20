@@ -195,3 +195,28 @@ func own(t *testing.T, a *App) int64 {
 	}
 	return mkUser(t, a, "root1", "admin")
 }
+
+func regDomain(a *App, owner int64, domain string) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if _, err := a.Store.GetDomainByName(context.Background(), domain); err == nil {
+		return
+	}
+	if err := a.Store.CreateDomain(context.Background(), &store.Domain{OwnerID: owner, Name: domain}); err != nil {
+		panic(err)
+	}
+}
+
+// createDB registers the request's domain for its owner first (tests that don't care about domain ownership).
+func createDB(a *App, ctx context.Context, req CreateRequest) (store.Database, error) {
+	if req.OwnerID > 0 && validDomain(strings.ToLower(strings.TrimSpace(req.Domain))) {
+		regDomain(a, req.OwnerID, req.Domain)
+	}
+	return a.CreateDatabase(ctx, req)
+}
+
+func startRestore(a *App, ctx context.Context, req RestoreRequest) (store.Restore, error) {
+	if req.New != nil && req.OwnerID > 0 && validDomain(strings.ToLower(strings.TrimSpace(req.New.Domain))) {
+		regDomain(a, req.OwnerID, req.New.Domain)
+	}
+	return a.StartRestore(ctx, req)
+}

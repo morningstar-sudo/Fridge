@@ -218,10 +218,11 @@ func TestInviteTokenNotInPath(t *testing.T) {
 }
 
 func TestCSRF(t *testing.T) {
-	h, _, _ := newRawSrv(t, "setup-tok", Options{})
+	h, _, a := newRawSrv(t, "setup-tok", Options{})
 	setupAlice(t, h)
 	c, sid := loginAs(t, h, "alice", pwAlice)
 	ck := c.Name + "=" + c.Value
+	regDomains(t, a)
 	body := `{"engine":"postgres","name":"abc","domain":"abc.com"}`
 	if w := req(h, "POST", "/api/databases", body, "Cookie", ck, "Origin", "https://evil"); w.Code != 403 {
 		t.Fatal(w.Code)

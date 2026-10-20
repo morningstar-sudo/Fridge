@@ -79,10 +79,10 @@ func TestSchedules(t *testing.T) {
 	h, _, _ := newSrv(t)
 	do(h, "POST", "/api/destinations", destBody, true)
 	do(h, "POST", "/api/databases", dbBody, true)
-	if w := do(h, "POST", "/api/databases/abc/schedules", `{"destination_id":1,"cron":"nope","keep_latest":3}`, true); w.Code != 400 {
+	if w := do(h, "POST", "/api/databases/alice_abc/schedules", `{"destination_id":1,"cron":"nope","keep_latest":3}`, true); w.Code != 400 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	w := do(h, "POST", "/api/databases/abc/schedules", `{"destination_id":1,"cron":"0 3 * * *","keep_latest":3,"enabled":true}`, true)
+	w := do(h, "POST", "/api/databases/alice_abc/schedules", `{"destination_id":1,"cron":"0 3 * * *","keep_latest":3,"enabled":true}`, true)
 	var sc struct {
 		ID int64 `json:"id"`
 	}
@@ -90,7 +90,7 @@ func TestSchedules(t *testing.T) {
 	if w.Code != 201 || sc.ID == 0 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if w := do(h, "GET", "/api/databases/abc/schedules", "", true); w.Code != 200 || !strings.Contains(w.Body.String(), "0 3 * * *") {
+	if w := do(h, "GET", "/api/databases/alice_abc/schedules", "", true); w.Code != 200 || !strings.Contains(w.Body.String(), "0 3 * * *") {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	id := strconv.FormatInt(sc.ID, 10)
@@ -130,7 +130,7 @@ func TestBackupGetAndDownload(t *testing.T) {
 	h, _, a := newSrv(t)
 	do(h, "POST", "/api/databases", dbBody, true)
 	do(h, "POST", "/api/destinations", destBody, true)
-	do(h, "POST", "/api/databases/abc/backups", `{}`, true)
+	do(h, "POST", "/api/databases/alice_abc/backups", `{}`, true)
 	a.Wait()
 	w := do(h, "GET", "/api/backups/1", "", true)
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"status":"ok"`) {

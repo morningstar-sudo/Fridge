@@ -18,11 +18,11 @@ import (
 
 type CreateRequest struct {
 	Engine, Name, Domain, Version, TLSMode string
-	OwnerID                                int64 // required, > 0
+	OwnerID                                int64  // required, > 0
+	DBUser, DBPassword                     string // user-chosen suffix / password; empty = derived / random
 }
 
 var (
-	nameRe  = regexp.MustCompile(`^[a-z][a-z0-9-]{1,30}$`)
 	labelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 )
 
@@ -55,9 +55,6 @@ func (a *App) CreateDatabase(ctx context.Context, req CreateRequest) (store.Data
 	default:
 		return store.Database{}, invalid("tls_mode must be internal")
 	}
-	if !nameRe.MatchString(req.Name) {
-		return store.Database{}, invalid("name must match %s", nameRe)
-	}
 	if !validDomain(req.Domain) {
 		return store.Database{}, invalid("domain must be a hostname")
 	}
@@ -70,15 +67,22 @@ func (a *App) CreateDatabase(ctx context.Context, req CreateRequest) (store.Data
 		return store.Database{}, invalid("%v", err)
 	}
 
-	pw := rand.Text()
+	name, user, domainID, err := a.resolveNames(ctx, req)
+	if err != nil {
+		return store.Database{}, err
+	}
+	pw := req.DBPassword
+	if pw == "" {
+		pw = rand.Text()
+	}
 	enc, err := a.Box.Encrypt(pw)
 	if err != nil {
 		return store.Database{}, err
 	}
 	d := store.Database{
-		Name: req.Name, Engine: req.Engine, Version: version, Domain: req.Domain, TLSMode: req.TLSMode,
-		User: req.Name + "_app", PasswordEnc: enc,
-		Volume: fmt.Sprintf("fridge-%s-%s", req.Engine, req.Name), Status: "creating", OwnerID: &req.OwnerID,
+		Name: name, Engine: req.Engine, Version: version, Domain: req.Domain, TLSMode: req.TLSMode,
+		User: user, PasswordEnc: enc, DomainID: &domainID,
+		Volume: fmt.Sprintf("fridge-%s-%s", req.Engine, name), Status: "creating", OwnerID: &req.OwnerID,
 	}
 	if err := a.Store.CreateDatabase(ctx, &d); err != nil {
 		return store.Database{}, err

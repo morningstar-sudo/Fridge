@@ -66,6 +66,7 @@ func newSrv(t *testing.T) (http.Handler, *fakeRT, *app.App) {
 	h, rt, a := newRawSrv(t, "setup-tok", Options{})
 	setupAlice(t, h)
 	_, tok = loginAs(t, h, "alice", pwAlice)
+	regDomains(t, a)
 	return h, rt, a
 }
 
@@ -167,7 +168,7 @@ func TestNoSecretsInResponses(t *testing.T) {
 	}
 	do(h, "POST", "/api/databases", `{"engine":"postgres","name":"abc","domain":"abc.com"}`, true)
 	l := do(h, "GET", "/api/databases", "", true).Body.String()
-	if strings.Contains(l, "password_enc") || strings.Contains(l, "connection_string") || !strings.Contains(l, `"abc"`) {
+	if strings.Contains(l, "password_enc") || strings.Contains(l, "connection_string") || !strings.Contains(l, `"alice_abc"`) {
 		t.Fatal(l)
 	}
 }
@@ -179,7 +180,7 @@ func TestDatabaseByNameOrID(t *testing.T) {
 		ID               int64  `json:"id"`
 		ConnectionString string `json:"connection_string"`
 	}
-	json.Unmarshal(do(h, "GET", "/api/databases/abc", "", true).Body.Bytes(), &a)
+	json.Unmarshal(do(h, "GET", "/api/databases/alice_abc", "", true).Body.Bytes(), &a)
 	json.Unmarshal(do(h, "GET", "/api/databases/"+strconv.FormatInt(a.ID, 10), "", true).Body.Bytes(), &b)
 	if a.ID == 0 || a.ID != b.ID || a.ConnectionString == "" {
 		t.Fatal(a, b)
@@ -190,7 +191,7 @@ func TestBackupNowAccepted(t *testing.T) {
 	h, _, a := newSrv(t)
 	do(h, "POST", "/api/databases", `{"engine":"postgres","name":"abc","domain":"abc.com"}`, true)
 	do(h, "POST", "/api/destinations", `{"name":"d","endpoint":"https://s3.example.com","bucket":"b","access_key":"AK","secret_key":"x"}`, true)
-	w := do(h, "POST", "/api/databases/abc/backups", `{}`, true)
+	w := do(h, "POST", "/api/databases/alice_abc/backups", `{}`, true)
 	if w.Code != 202 {
 		t.Fatal(w.Code, w.Body.String())
 	}
@@ -203,4 +204,18 @@ func TestBackupNowAccepted(t *testing.T) {
 		t.Fatal(w.Body.String())
 	}
 	a.Wait()
+}
+
+// regDomains registers the domains the fixtures use for admin "alice".
+func regDomains(t *testing.T, a *app.App) {
+	t.Helper()
+	u, err := a.Store.GetUserByName(context.Background(), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{"abc.com", "abd.com", "abe.com", "copy.com"} {
+		if err := a.Store.CreateDomain(context.Background(), &store.Domain{OwnerID: u.ID, Name: d}); err != nil {
+			t.Fatal(err)
+		}
+	}
 }

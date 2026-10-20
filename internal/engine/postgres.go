@@ -63,6 +63,6 @@ func psql(p Params) []string {
 }
 
 func (postgres) ConnString(p Params, domain string) string {
-	return fmt.Sprintf("postgresql://%s:%s@%s:5432/%s?sslmode=require",
-		p.User, url.QueryEscape(p.Password), domain, p.Name)
+	return fmt.Sprintf("postgresql://%s@%s:5432/%s?sslmode=require",
+		url.UserPassword(p.User, p.Password), domain, p.Name)
 }

@@ -16,18 +16,18 @@ import (
 func TestCreateDatabaseHappyPath(t *testing.T) {
 	a, rt, _ := newTestApp(t)
 	ctx := context.Background()
-	d, err := a.CreateDatabase(ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "abc", Domain: "ABC.com "})
+	d, err := createDB(a, ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "abc", Domain: "ABC.com "})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.Domain != "abc.com" || d.Version != "17" || d.Status != "running" || d.User != "abc_app" {
+	if d.Domain != "abc.com" || d.Version != "17" || d.Status != "running" || d.User != "root1_abc" {
 		t.Fatalf("db = %+v", d)
 	}
 	got, _ := a.Store.GetDatabase(ctx, d.ID)
 	if got.Status != "running" || got.ContainerID == "" {
 		t.Fatalf("stored = %+v", got)
 	}
-	if len(rt.runs) != 1 || rt.runs[0].Name != "fridge-postgres-abc" || rt.runs[0].Image != "postgres:17" {
+	if len(rt.runs) != 1 || rt.runs[0].Name != "fridge-postgres-root1_abc" || rt.runs[0].Image != "postgres:17" {
 		t.Fatalf("runs = %+v", rt.runs)
 	}
 	pw := ""
@@ -43,7 +43,7 @@ func TestCreateDatabaseHappyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	cs, err := a.ConnString(d)
-	if err != nil || !strings.Contains(cs, "@abc.com:5432/abc?sslmode=require") {
+	if err != nil || !strings.Contains(cs, "@abc.com:5432/root1_abc?sslmode=require") {
 		t.Fatalf("conn = %q, %v", cs, err)
 	}
 }
@@ -65,7 +65,7 @@ func TestCreateDatabaseValidation(t *testing.T) {
 	for name, mut := range cases {
 		r := ok
 		mut(&r)
-		if _, err := a.CreateDatabase(context.Background(), r); !errors.Is(err, ErrInvalid) {
+		if _, err := createDB(a, context.Background(), r); !errors.Is(err, ErrInvalid) {
 			t.Errorf("%s: err = %v", name, err)
 		}
 	}
@@ -79,7 +79,7 @@ func TestCreateDatabaseRollbackOnUnhealthy(t *testing.T) {
 	ctx := context.Background()
 	rt.healthErr = errors.New("unhealthy")
 	req := CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "abc", Domain: "abc.com"}
-	if _, err := a.CreateDatabase(ctx, req); err == nil {
+	if _, err := createDB(a, ctx, req); err == nil {
 		t.Fatal("want error")
 	}
 	dbs, _ := a.Store.ListDatabases(ctx)
@@ -87,7 +87,7 @@ func TestCreateDatabaseRollbackOnUnhealthy(t *testing.T) {
 		t.Fatalf("dbs = %+v", dbs)
 	}
 	id := dbs[0].ID
-	if len(rt.removes) != 1 || rt.removes[0] != (removeCall{"ctr-fridge-postgres-abc", "fridge-postgres-abc"}) {
+	if len(rt.removes) != 1 || rt.removes[0] != (removeCall{"ctr-fridge-postgres-root1_abc", "fridge-postgres-root1_abc"}) {
 		t.Fatalf("removes = %+v", rt.removes)
 	}
 	for _, p := range []string{
@@ -99,7 +99,7 @@ func TestCreateDatabaseRollbackOnUnhealthy(t *testing.T) {
 		}
 	}
 	rt.healthErr = nil
-	if _, err := a.CreateDatabase(ctx, req); err != nil {
+	if _, err := createDB(a, ctx, req); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -107,7 +107,7 @@ func TestCreateDatabaseRollbackOnUnhealthy(t *testing.T) {
 func TestCreateDatabaseDefaultSchedule(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	ctx := context.Background()
-	d1, err := a.CreateDatabase(ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "one", Domain: "one.com"})
+	d1, err := createDB(a, ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "one", Domain: "one.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestCreateDatabaseDefaultSchedule(t *testing.T) {
 			first = x.ID
 		}
 	}
-	d2, err := a.CreateDatabase(ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "two", Domain: "two.com"})
+	d2, err := createDB(a, ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "two", Domain: "two.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestRemoveNodeCleansProvisionedDatabase(t *testing.T) {
 	if err := a.Store.CreateDestination(ctx, &store.Destination{Name: "s3", Provider: "s3", Shared: true}); err != nil {
 		t.Fatal(err)
 	}
-	d, err := a.CreateDatabase(ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "abc", Domain: "abc.com"})
+	d, err := createDB(a, ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "abc", Domain: "abc.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestRemoveNodeCleansProvisionedDatabase(t *testing.T) {
 			t.Errorf("%s still exists (%v)", p, err)
 		}
 	}
-	if len(rt.removes) != 1 || rt.removes[0] != (removeCall{"ctr-fridge-postgres-abc", "fridge-postgres-abc"}) {
+	if len(rt.removes) != 1 || rt.removes[0] != (removeCall{"ctr-fridge-postgres-root1_abc", "fridge-postgres-root1_abc"}) {
 		t.Fatalf("removes = %+v", rt.removes)
 	}
 	if got, _ := a.Store.GetDatabase(ctx, d.ID); got.Status != "error" {
@@ -206,7 +206,7 @@ func TestCreateDatabaseRollbackSurvivesCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	rt.onWait = cancel
 	rt.healthErr = context.Canceled
-	if _, err := a.CreateDatabase(ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "abc", Domain: "abc.com"}); err == nil {
+	if _, err := createDB(a, ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "abc", Domain: "abc.com"}); err == nil {
 		t.Fatal("want error")
 	}
 	if len(rt.removes) != 1 {
@@ -225,7 +225,7 @@ func TestRecoverInterrupted(t *testing.T) {
 	if err := a.Store.CreateDestination(ctx, &dest); err != nil {
 		t.Fatal(err)
 	}
-	keep, err := a.CreateDatabase(ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "keep", Domain: "keep.com"})
+	keep, err := createDB(a, ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "keep", Domain: "keep.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func TestRecoverInterrupted(t *testing.T) {
 	if err := a.Store.CreateDatabase(ctx, &half); err != nil {
 		t.Fatal(err)
 	}
-	tgt, err := a.CreateDatabase(ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "tgt", Domain: "tgt.com"})
+	tgt, err := createDB(a, ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "tgt", Domain: "tgt.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestRecoverInterrupted(t *testing.T) {
 	if err := a.RecoverInterrupted(ctx); err != nil {
 		t.Fatal(err)
 	}
-	want := []removeCall{{"fridge-postgres-half", "fridge-postgres-half"}, {"ctr-fridge-postgres-tgt", "fridge-postgres-tgt"}}
+	want := []removeCall{{"fridge-postgres-half", "fridge-postgres-half"}, {"ctr-fridge-postgres-root1_tgt", "fridge-postgres-root1_tgt"}}
 	if len(rt.removes) != 2 || rt.removes[0] != want[0] || rt.removes[1] != want[1] {
 		t.Fatalf("removes = %+v", rt.removes)
 	}
@@ -271,11 +271,11 @@ func TestRecoverInterrupted(t *testing.T) {
 	if s, _ := a.Store.ListSchedules(ctx, keep.ID); len(s) != 1 {
 		t.Fatalf("keep schedules = %+v", s)
 	}
-	if len(rt.alerts) != 1 || !strings.Contains(rt.alerts[0], "half, tgt") {
+	if len(rt.alerts) != 1 || !strings.Contains(rt.alerts[0], "half, root1_tgt") {
 		t.Fatalf("alerts = %q", rt.alerts)
 	}
 	for _, n := range []string{"half", "tgt"} {
-		if _, err := a.CreateDatabase(ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: n, Domain: n + ".com"}); err != nil {
+		if _, err := createDB(a, ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: n, Domain: n + ".com"}); err != nil {
 			t.Fatalf("reuse %s: %v", n, err)
 		}
 	}
