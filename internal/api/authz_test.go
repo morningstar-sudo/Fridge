@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"fridge/internal/app"
+	"fridge/internal/store"
 )
 
 const pwRoot = "root password 1234"
@@ -212,6 +213,10 @@ func TestDestinationOwnership(t *testing.T) {
 	e.want(t, e.bob, "POST", "/api/destinations/"+dA+"/test", "", 404)
 	e.want(t, e.bob, "GET", "/api/destinations/"+dA+"/objects", "", 404)
 	e.want(t, e.alice, "PATCH", "/api/destinations/"+dA, `{"shared":true}`, 403)
+	if w := e.want(t, e.root, "PATCH", "/api/destinations/"+dA, `{"shared":true}`, 400); !strings.Contains(w.Body.String(), "only admin destinations can be shared") {
+		t.Fatal(w.Body.String())
+	}
+	e.want(t, e.root, "PATCH", "/api/destinations/"+dA, `{"shared":false}`, 204)
 
 	dAdmin := e.dest(t, e.root, "dadmin", true)
 	var ds []map[string]any
@@ -247,6 +252,40 @@ func TestScheduleDestinationRules(t *testing.T) {
 	sc := id(t, e.want(t, e.bob, "POST", "/api/databases/bob_x/schedules", sched(dS), 201))
 	e.want(t, e.bob, "PUT", "/api/schedules/"+sc, sched(dA), 400)
 	e.want(t, e.bob, "PUT", "/api/schedules/"+sc, sched(dS), 200)
+
+	// a member cannot route the owner's data into a bucket only the member controls
+	dB := e.dest(t, e.bob, "db", false)
+	e.want(t, e.alice, "POST", "/api/databases/alice_app/members", `{"username":"bob"}`, 204)
+	e.want(t, e.bob, "POST", "/api/databases/alice_app/schedules", sched(dB), 400)
+	msc := id(t, e.want(t, e.bob, "POST", "/api/databases/alice_app/schedules", sched(dS), 201))
+	e.want(t, e.bob, "PUT", "/api/schedules/"+msc, sched(dB), 400)
+	e.want(t, e.bob, "POST", "/api/databases/alice_app/backups", `{"destination_id":`+dB+`}`, 400)
+	// nor can the owner pick the member's bucket
+	e.want(t, e.alice, "POST", "/api/databases/alice_app/schedules", sched(dB), 400)
+}
+
+func TestBackupFallbackSkipsForeignSchedule(t *testing.T) {
+	e := newTenants(t)
+	ctx := context.Background()
+	dB := e.dest(t, e.bob, "db", false)
+	d, err := e.a.Store.GetDatabaseByName(ctx, "alice_app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a schedule that predates the rules: alice_app -> bob's private bucket
+	if err := e.a.Store.CreateSchedule(ctx, &store.Schedule{DatabaseID: d.ID, DestinationID: mustInt(t, dB), Cron: "0 1 * * *", Prefix: "fridge", KeepLatest: 1, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	e.want(t, e.alice, "POST", "/api/databases/alice_app/backups", `{}`, 400) // nothing usable: refused, not sent to bob
+	dS := e.dest(t, e.root, "ds", true)
+	var b struct {
+		DestinationID int64 `json:"destination_id"`
+	}
+	json.Unmarshal(e.want(t, e.alice, "POST", "/api/databases/alice_app/backups", `{}`, 202).Body.Bytes(), &b)
+	e.a.Wait()
+	if strconv.FormatInt(b.DestinationID, 10) != dS {
+		t.Fatalf("backup went to %d, want %s", b.DestinationID, dS)
+	}
 }
 
 func TestIndirectAccessBlocked(t *testing.T) {

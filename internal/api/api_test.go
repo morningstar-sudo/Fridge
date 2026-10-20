@@ -26,14 +26,20 @@ import (
 	"fridge/internal/store/storetest"
 )
 
-type fakeRT struct{ pingErr error }
+type fakeRT struct {
+	pingErr error
+	dump    string // written to every exec's stdout (a backup's dump)
+}
 
 func (f *fakeRT) Ping(context.Context) error { return f.pingErr }
 func (f *fakeRT) Run(_ context.Context, s container.RunSpec) (string, error) {
 	return "ctr-" + s.Name, nil
 }
 func (f *fakeRT) WaitHealthy(context.Context, string, time.Duration) error { return nil }
-func (f *fakeRT) Exec(_ context.Context, _ string, _ []string, _ io.Reader, _, _ io.Writer) (int, error) {
+func (f *fakeRT) Exec(_ context.Context, _ string, _ []string, _ io.Reader, stdout, _ io.Writer) (int, error) {
+	if f.dump != "" {
+		io.WriteString(stdout, f.dump)
+	}
 	return 0, nil
 }
 func (f *fakeRT) Remove(context.Context, string, string) error { return nil }
@@ -55,6 +61,7 @@ type fakeObjs struct {
 	testErr error
 	list    []objstore.Object
 	meta    map[string]string
+	body    string // what Get returns
 }
 
 func (f *fakeObjs) Test(context.Context) error { return f.testErr }
@@ -62,16 +69,13 @@ func (f *fakeObjs) Put(_ context.Context, _ string, r io.Reader, _ map[string]st
 	return io.Copy(io.Discard, r)
 }
 func (f *fakeObjs) Get(context.Context, string) (io.ReadCloser, error) {
-	return io.NopCloser(strings.NewReader("")), nil
+	return io.NopCloser(strings.NewReader(f.body)), nil
 }
 func (f *fakeObjs) Meta(context.Context, string) (map[string]string, error) { return f.meta, nil }
 func (f *fakeObjs) List(context.Context, string, string, int) ([]objstore.Object, bool, error) {
 	return f.list, true, nil
 }
 func (f *fakeObjs) Delete(context.Context, string) error { return nil }
-func (f *fakeObjs) PresignGet(context.Context, string, time.Duration) (string, error) {
-	return "http://presigned", nil
-}
 
 var tok string // session ID of the admin "alice", set by newSrv (tests here do not run in parallel)
 

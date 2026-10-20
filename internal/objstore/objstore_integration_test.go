@@ -5,7 +5,6 @@ package objstore
 import (
 	"context"
 	"io"
-	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -51,19 +50,6 @@ func TestMinioRoundTrip(t *testing.T) {
 	}
 	if err != nil || !found {
 		t.Fatal(objs, err)
-	}
-	u, err := s.PresignGet(ctx, key, time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := http.Get(u)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, _ = io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if string(b) != "hello" {
-		t.Fatalf("presigned got %q", b)
 	}
 	if err := s.Delete(ctx, key); err != nil {
 		t.Fatal(err)

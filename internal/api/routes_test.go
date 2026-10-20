@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path"
 	"strconv"
 	"strings"
 	"testing"
@@ -127,7 +128,10 @@ func TestAllowlistAndCA(t *testing.T) {
 }
 
 func TestBackupGetAndDownload(t *testing.T) {
-	h, _, a := newSrv(t)
+	h, rt, a := newSrv(t)
+	rt.dump = "PGDMP-bytes"
+	fo := &fakeObjs{body: rt.dump}
+	a.OpenObjects = func(store.Destination, string) (app.ObjectStore, error) { return fo, nil }
 	do(h, "POST", "/api/databases", dbBody, true)
 	do(h, "POST", "/api/destinations", destBody, true)
 	do(h, "POST", "/api/databases/alice_abc/backups", `{}`, true)
@@ -136,8 +140,16 @@ func TestBackupGetAndDownload(t *testing.T) {
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"status":"ok"`) {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if w := do(h, "GET", "/api/backups/1/download", "", true); w.Code != 200 || !strings.Contains(w.Body.String(), `"url":"http://presigned"`) {
-		t.Fatal(w.Code, w.Body.String())
+	var b struct {
+		S3Key string `json:"s3_key"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &b)
+	w = do(h, "GET", "/api/backups/1/download", "", true)
+	hd := w.Header()
+	if w.Code != 200 || w.Body.String() != "PGDMP-bytes" || hd.Get("Content-Type") != "application/octet-stream" ||
+		hd.Get("Content-Length") != "11" || hd.Get("Content-Disposition") != `attachment; filename="`+path.Base(b.S3Key)+`"` ||
+		!strings.HasSuffix(b.S3Key, ".dump") || strings.Contains(w.Body.String(), "X-Amz-Credential") {
+		t.Fatal(w.Code, hd, w.Body.String(), b.S3Key)
 	}
 	if w := do(h, "GET", "/api/backups/99", "", true); w.Code != 404 {
 		t.Fatal(w.Code)

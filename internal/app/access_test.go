@@ -315,7 +315,7 @@ func TestDeletedDestinationBlocked(t *testing.T) {
 		t.Fatal(err)
 	}
 	objs.objs[b.S3Key] = fakeObj{[]byte("x"), nil}
-	_, e1 := a.BackupDownloadURL(ctx, b.ID)
+	_, _, e1 := a.OpenBackup(ctx, b.ID)
 	_, e2 := startRestore(a, ctx, RestoreRequest{DestinationID: dest.ID, Key: b.S3Key, OwnerID: x.alice, New: &CreateRequest{Name: "abc2", Domain: "abc2.com"}})
 	e3 := a.TestDestination(ctx, dest.ID)
 	e4 := a.UpdateDestination(ctx, store.Destination{ID: dest.ID, Name: "n", Endpoint: "http://h:1", Bucket: "b"}, "")

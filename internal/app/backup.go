@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/minio/minio-go/v7"
+
 	"fridge/internal/engine"
 	"fridge/internal/store"
 )
@@ -54,9 +56,21 @@ func (a *App) StartBackup(ctx context.Context, dbID, destID int64, scheduleID *i
 		if err != nil {
 			return store.Backup{}, err
 		}
-		if len(scs) > 0 {
-			destID, prefix = scs[0].DestinationID, scs[0].Prefix
-		} else {
+		owner, err := a.ownerPrincipal(ctx, db)
+		if err != nil {
+			return store.Backup{}, err
+		}
+		for _, sc := range scs { // first schedule whose destination the owner may use
+			dest, err := a.Store.GetDestination(ctx, sc.DestinationID)
+			if err != nil {
+				return store.Backup{}, err
+			}
+			if CanUseDestination(owner, dest) {
+				destID, prefix = sc.DestinationID, sc.Prefix
+				break
+			}
+		}
+		if destID <= 0 {
 			dest, ok, err := a.ownerDestination(ctx, db)
 			if err != nil {
 				return store.Backup{}, err
@@ -178,20 +192,25 @@ func (a *App) retain(ctx context.Context, objs ObjectStore, scheduleID int64) {
 	}
 }
 
-// BackupDownloadURL returns a 15-minute presigned URL for an ok backup.
-func (a *App) BackupDownloadURL(ctx context.Context, backupID int64) (string, error) {
+// OpenBackup opens an ok backup's object for streaming through Fridge, so the
+// destination's endpoint, bucket and credentials never reach the client.
+func (a *App) OpenBackup(ctx context.Context, backupID int64) (io.ReadCloser, store.Backup, error) {
 	b, err := a.Store.GetBackup(ctx, backupID)
 	if err != nil {
-		return "", err
+		return nil, b, err
 	}
 	if b.Status != "ok" {
-		return "", invalid("backup %d is %s", b.ID, b.Status)
+		return nil, b, invalid("backup %d is %s", b.ID, b.Status)
 	}
 	objs, _, err := a.objects(ctx, b.DestinationID)
 	if err != nil {
-		return "", err
+		return nil, b, err
 	}
-	return objs.PresignGet(ctx, b.S3Key, 15*time.Minute)
+	rc, err := objs.Get(ctx, b.S3Key)
+	if minio.ToErrorResponse(err).Code == "NoSuchKey" {
+		err = fmt.Errorf("%w: object %q", store.ErrNotFound, b.S3Key)
+	}
+	return rc, b, err
 }
 
 // ponytail: fixed 6h ceiling per backup; make configurable if databases get huge.

@@ -237,10 +237,6 @@ func (f *fakeObjects) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-func (f *fakeObjects) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error) {
-	return "http://s3/" + key, nil
-}
-
 func (f *fakeObjects) has(key string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()

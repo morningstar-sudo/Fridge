@@ -117,14 +117,6 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	return s.c.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
 }
 
-func (s *Store) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error) {
-	u, err := s.c.PresignedGetObject(ctx, s.bucket, key, ttl, nil)
-	if err != nil {
-		return "", err
-	}
-	return u.String(), nil
-}
-
 // FilterSort keeps objects whose key contains q (case-insensitive), newest first, cut to limit.
 func FilterSort(objs []Object, q string, limit int) ([]Object, bool) {
 	q = strings.ToLower(q)

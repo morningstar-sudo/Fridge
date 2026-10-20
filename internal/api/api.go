@@ -4,9 +4,12 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"path"
 	"strconv"
 	"time"
 
@@ -196,15 +199,19 @@ func (s *server) destOf(w http.ResponseWriter, r *http.Request, manage bool) (st
 	return d, true
 }
 
-// usableDest writes 400 "destination not usable" unless the caller may back up to destination id.
+// usableDest writes 400 "destination not usable" unless both the caller and db's owner may use destination id.
 // Missing and foreign destinations look the same.
-func (s *server) usableDest(w http.ResponseWriter, r *http.Request, id int64) bool {
+func (s *server) usableDest(w http.ResponseWriter, r *http.Request, db store.Database, id int64) bool {
 	d, err := s.a.Store.GetDestination(r.Context(), id)
+	ok := false
+	if err == nil {
+		ok, err = s.a.CanUseDestinationFor(r.Context(), me(r), db, d)
+	}
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		fail(w, err)
 		return false
 	}
-	if err != nil || !app.CanUseDestination(me(r), d) {
+	if !ok {
 		writeJSON(w, 400, map[string]string{"error": "destination not usable"})
 		return false
 	}
@@ -571,23 +578,23 @@ type schedIn struct {
 }
 
 // schedOf loads {id}; 404 unless the caller may access the schedule's database.
-func (s *server) schedOf(w http.ResponseWriter, r *http.Request) (store.Schedule, bool) {
+func (s *server) schedOf(w http.ResponseWriter, r *http.Request) (store.Schedule, store.Database, bool) {
+	var d store.Database
 	id, ok := pathID(w, r)
 	if !ok {
-		return store.Schedule{}, false
+		return store.Schedule{}, d, false
 	}
 	sc, err := s.a.Store.GetSchedule(r.Context(), id)
 	if err == nil {
-		var d store.Database
 		if d, err = s.a.Store.GetDatabase(r.Context(), sc.DatabaseID); err == nil {
 			err = s.canAccess(r, d)
 		}
 	}
 	if err != nil {
 		fail(w, err)
-		return sc, false
+		return sc, d, false
 	}
-	return sc, true
+	return sc, d, true
 }
 
 func (s *server) listScheds(w http.ResponseWriter, r *http.Request) {
@@ -609,7 +616,7 @@ func (s *server) createSched(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in schedIn
-	if !decode(w, r, &in) || !s.usableDest(w, r, in.DestinationID) {
+	if !decode(w, r, &in) || !s.usableDest(w, r, d, in.DestinationID) {
 		return
 	}
 	sc, err := s.a.CreateSchedule(r.Context(), store.Schedule{DatabaseID: d.ID, DestinationID: in.DestinationID,
@@ -622,12 +629,12 @@ func (s *server) createSched(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) updateSched(w http.ResponseWriter, r *http.Request) {
-	old, ok := s.schedOf(w, r)
+	old, d, ok := s.schedOf(w, r)
 	if !ok {
 		return
 	}
 	var in schedIn
-	if !decode(w, r, &in) || !s.usableDest(w, r, in.DestinationID) {
+	if !decode(w, r, &in) || !s.usableDest(w, r, d, in.DestinationID) {
 		return
 	}
 	sc := store.Schedule{ID: old.ID, DestinationID: in.DestinationID, Cron: in.Cron, Prefix: in.Prefix, KeepLatest: in.KeepLatest, Enabled: in.Enabled}
@@ -644,7 +651,7 @@ func (s *server) updateSched(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) deleteSched(w http.ResponseWriter, r *http.Request) {
-	if sc, ok := s.schedOf(w, r); ok {
+	if sc, _, ok := s.schedOf(w, r); ok {
 		noContent(w, s.a.DeleteSchedule(r.Context(), sc.ID))
 	}
 }
@@ -675,7 +682,7 @@ func (s *server) startBackup(w http.ResponseWriter, r *http.Request) {
 	if r.ContentLength != 0 && !decode(w, r, &in) {
 		return
 	}
-	if in.DestinationID != 0 && !s.usableDest(w, r, in.DestinationID) {
+	if in.DestinationID != 0 && !s.usableDest(w, r, d, in.DestinationID) {
 		return
 	}
 	b, err := s.a.StartBackup(r.Context(), d.ID, in.DestinationID, nil, "manual", &p.UserID)
@@ -717,12 +724,21 @@ func (s *server) download(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	u, err := s.a.BackupDownloadURL(r.Context(), b.ID)
+	rc, b, err := s.a.OpenBackup(r.Context(), b.ID)
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	writeJSON(w, 200, map[string]string{"url": u})
+	defer rc.Close()
+	h := w.Header()
+	h.Set("Content-Type", "application/octet-stream")
+	h.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(b.S3Key)))
+	if b.SizeBytes > 0 { // recorded at upload; a cut stream then shows as a short body
+		h.Set("Content-Length", strconv.FormatInt(b.SizeBytes, 10))
+	}
+	if _, err := io.Copy(w, rc); err != nil {
+		log.Printf("api: download backup %d: %v", b.ID, err)
+	}
 }
 
 func (s *server) startRestore(w http.ResponseWriter, r *http.Request) {

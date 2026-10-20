@@ -106,7 +106,6 @@ type ObjectStore interface {
 	Meta(ctx context.Context, key string) (map[string]string, error)
 	List(ctx context.Context, prefix, q string, limit int) ([]objstore.Object, bool, error)
 	Delete(ctx context.Context, key string) error
-	PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error)
 }
 
 var _ ObjectStore = (*objstore.Store)(nil)
