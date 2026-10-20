@@ -48,6 +48,33 @@ Hiện chỉ có CLI + một token tĩnh `FRIDGE_TOKEN` dùng chung: ai có toke
 - `destinations` thêm `owner_id BIGINT NULL REFERENCES users(id)`, `shared BOOL NOT NULL DEFAULT false`.
 - **Dữ liệu cũ**: DB/destination có `owner_id NULL` được gán cho admin đầu tiên ngay khi bước setup tạo admin xong.
 
+### 1b. Ràng buộc toàn vẹn (người dùng yêu cầu "siết chặt quan hệ")
+
+- **Khóa ngoại đầy đủ**, mọi cột id là `BIGINT`:
+  - `backups.destination_id`, `restores.destination_id`, `dump_checks.destination_id` → `destinations`.
+  - `backups.schedule_id` → `backup_schedules` `ON DELETE SET NULL`: xóa lịch vẫn giữ lịch sử backup; backup đó không còn chịu retention.
+  - `invites`, `sessions`, `database_members` → `users`. Ngoài ra `database_members` → `databases` và `*_by_id` → `users`.
+- **Xóa destination = xóa mềm** (người dùng chốt): thêm cột `deleted_at`.
+  - Khi xóa: đặt `deleted_at`, xóa `secret_key_enc` và `access_key`, ẩn khỏi mọi danh sách và dropdown. Lịch sử backup/restore vẫn trỏ đúng tới bản ghi.
+  - Vẫn chặn xóa khi còn lịch backup trỏ tới destination đó.
+  - Destination đã xóa không còn tải, restore hay test được: báo "destination đã bị xóa".
+  - **Tên destination unique theo từng owner**, chỉ tính các destination chưa xóa.
+- **`owner_id NOT NULL`** trên `databases` và `destinations`, áp trong chính transaction tạo admin đầu tiên, sau khi gán owner cho dữ liệu cũ.
+- **CHECK** cho mọi cột liệt kê:
+  - trạng thái DB/backup/restore/dump_check, engine, `tls_mode`, `trigger`, `mode`, `role`, `purpose`;
+  - `size_bytes ≥ 0`, `keep_latest ≥ 1`, cron không rỗng;
+  - độ dài salt 16 byte và khóa SCRAM 32 byte, `iterations` ∈ [600000, 10000000];
+  - `expires_at > created_at`.
+- **Nhất quán theo trạng thái:**
+  - Job `running` ⇔ `finished_at IS NULL`.
+  - Backup `ok` ⇒ `s3_key` khác rỗng.
+  - Lời mời `reset_password` ⇔ có `user_id`.
+- **Trigger:** owner không được nằm trong danh sách người quản lý chính DB của mình.
+- **Nâng cấp dữ liệu giai đoạn 1:**
+  - Backup/restore trỏ tới destination đã bị xóa cứng trước đây được gắn vào một bản ghi destination "tombstone" (đã xóa mềm, giữ nguyên id cũ).
+  - `schedule_id` mồ côi được đặt NULL.
+  - Sau đó mới thêm khóa ngoại.
+
 ### 2. Khởi tạo lần đầu
 
 - Env mới **`FRIDGE_SETUP_TOKEN`** (người dùng chốt: "1 token trong env").

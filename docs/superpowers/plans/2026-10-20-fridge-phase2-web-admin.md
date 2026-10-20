@@ -82,6 +82,24 @@ deploy/{docker-compose.yml,traefik.yml,.env.example}, README.md
   - `ALTER TABLE restores ADD started_by_id BIGINT NULL REFERENCES users(id)`
   - `dump_checks(id identity PK, destination_id BIGINT NOT NULL, s3_key TEXT NOT NULL, status TEXT NOT NULL, result JSONB NOT NULL DEFAULT '{}', log TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', started_by_id BIGINT NULL REFERENCES users(id), started_at, finished_at NULL)`
   - `image_checks(image_ref TEXT PRIMARY KEY, local_digest, local_version, remote_digest, remote_version, error TEXT NOT NULL DEFAULT '', checked_at TIMESTAMPTZ NOT NULL)`
+  - **Ràng buộc toàn vẹn** (spec mục 1b), cùng migration 4, theo đúng thứ tự:
+    1. `destinations` thêm `deleted_at TIMESTAMPTZ NULL`; bỏ `UNIQUE(name)` cũ; tạo `CREATE UNIQUE INDEX destinations_owner_name ON destinations (COALESCE(owner_id, 0), name) WHERE deleted_at IS NULL`.
+    2. `backups.destination_id`, `restores.destination_id` → `BIGINT`.
+    3. Tombstone: với mỗi `destination_id` trong `backups ∪ restores` không còn trong `destinations` → `INSERT … OVERRIDING SYSTEM VALUE` (id cũ, name `'_deleted_'||id`, provider `'deleted'`, `deleted_at = now()`).
+    4. `UPDATE backups SET schedule_id = NULL WHERE schedule_id NOT IN (SELECT id FROM backup_schedules)`.
+    5. FK: `backups.destination_id`, `restores.destination_id`, `dump_checks.destination_id` → `destinations(id)`; `backups.schedule_id` → `backup_schedules(id) ON DELETE SET NULL`.
+    6. CHECK:
+       - `databases`: `status IN ('creating','running','stopped','error','deleted')`, `engine IN ('postgres','mysql','mariadb','mongo','redis')`, `tls_mode IN ('internal','acme')`.
+       - `backups`: `status IN ('running','ok','failed')`, `trigger IN ('schedule','manual','pre-delete','pre-restore')`, `size_bytes >= 0`, `(status = 'running') = (finished_at IS NULL)`, `status <> 'ok' OR s3_key <> ''`.
+       - `restores`: `mode IN ('new','overwrite')`, `status IN ('running','ok','failed')`, `(status = 'running') = (finished_at IS NULL)`.
+       - `dump_checks`: `status IN ('running','ok','failed')`, `(status = 'running') = (finished_at IS NULL)`.
+       - `backup_schedules`: `keep_latest >= 1`, `cron <> ''`.
+       - `users`: `octet_length(scram_salt) = 16`, `octet_length(stored_key) = 32`, `octet_length(server_key) = 32`, `scram_iterations BETWEEN 600000 AND 10000000`.
+       - `invites`: `role IN ('admin','user')`, `expires_at > created_at`, `(purpose = 'reset_password') = (user_id IS NOT NULL)`.
+       - `sessions`: `expires_at > created_at`.
+    7. Trigger `BEFORE INSERT OR UPDATE ON database_members`: `RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'owner cannot be a member'` khi `user_id` = `databases.owner_id`.
+  - `CreateFirstAdmin` (cùng transaction, sau khi gán owner): `ALTER TABLE databases ALTER owner_id SET NOT NULL; ALTER TABLE destinations ALTER owner_id SET NOT NULL`.
+  - `mapErr`: thêm sentinel `ErrInvalid` cho SQLSTATE `23514` (check) và `P0001` (trigger).
 
 ```go
 type User struct { ID int64; Username, Role string; Salt []byte; Iterations int; StoredKey, ServerKey []byte; Disabled bool; CreatedAt time.Time; CreatedBy *int64 }
@@ -120,6 +138,9 @@ func TestUserCRUD(t *testing.T)               // CreateUser trùng → ErrConfli
 func TestInviteSingleUse(t *testing.T)        // MarkInviteUsed lần 2 → ErrConflict
 func TestSessionLifecycle(t *testing.T)       // Create/Get/Touch; DeleteUserSessions(except=h1) giữ h1 xóa h2; DeleteExpiredSessions xóa đúng row quá idle và quá expires_at
 func TestFailRunningIncludesDumpChecks(t *testing.T)
+func TestMigration4Tombstones(t *testing.T)   // DB mới: chạy migration 1–3, chèn backup trỏ destination_id 99 (không tồn tại) + schedule_id 77 mồ côi, rồi chạy migration 4 → có destination id 99 deleted_at != NULL; backup.schedule_id NULL; FK tồn tại (cần helper chạy migration tới version N — thêm hàm không export `migrateTo(ctx, n)` dùng trong test)
+func TestIntegrityConstraints(t *testing.T)   // bảng: insert backup status "weird" → ErrInvalid; backup ok với s3_key "" → ErrInvalid; schedule keep_latest 0 → ErrInvalid; user salt 15 byte → ErrInvalid; invite reset không user_id → ErrInvalid; thêm owner làm member → ErrInvalid; backup trỏ destination không tồn tại → lỗi FK
+func TestOwnerNotNullAfterSetup(t *testing.T) // sau CreateFirstAdmin: INSERT databases với owner_id NULL → lỗi
 ```
 - [ ] **Step 2:** `bash scripts/test-db.sh && go test ./internal/store/...` → FAIL.
 - [ ] **Step 3: Implement.** Cập nhật assertion đếm `schema_migrations` hiện có thành 4.
@@ -147,8 +168,10 @@ func (s *Store) AddMember(ctx, dbID, userID int64, addedBy *int64) error   // tr
 func (s *Store) RemoveMember(ctx, dbID, userID int64) error                // không có → ErrNotFound
 func (s *Store) ListMembers(ctx, dbID int64) ([]Member, error)
 // Destination thêm: OwnerID *int64; OwnerName string; Shared bool. CreateDestination ghi owner_id, shared.
-func (s *Store) ListDestinationsVisible(ctx, userID int64) ([]Destination, error) // owner_id=user OR shared
+// Destination thêm DeletedAt *time.Time. GetDestination trả cả bản ghi đã xóa; ListDestinations / ListDestinationsVisible bỏ bản ghi đã xóa.
+func (s *Store) ListDestinationsVisible(ctx, userID int64) ([]Destination, error) // (owner_id=user OR shared) AND deleted_at IS NULL
 func (s *Store) SetDestinationShared(ctx, id int64, shared bool) error
+func (s *Store) DeleteDestination(ctx, id int64) error // ĐỔI: xóa mềm — còn lịch trỏ tới → ErrInUse; ngược lại deleted_at=now(), secret_key_enc='', access_key='', shared=false; đã xóa → ErrNotFound
 // Restore thêm: StartedByID *int64 (StartRestore ghi).
 func (s *Store) GetBackupByKey(ctx, destID int64, key string) (Backup, error)
 func (s *Store) ListOKBackupsOnDestination(ctx, destID int64, visibleTo *int64) ([]Backup, error) // nil = tất cả; ngược lại chỉ DB user thấy được (owner/member); mới nhất trước
@@ -167,6 +190,7 @@ func (s *Store) ListImageChecks(ctx) ([]ImageCheck, error)
 func TestVisibleDatabases(t *testing.T)    // A owner db1, B owner db2, A member của db2 → A thấy [db1, db2]; B thấy [db2]; OwnerName đúng
 func TestMembers(t *testing.T)             // Add trùng → ErrConflict; Remove không có → ErrNotFound; ListMembers có Username
 func TestVisibleDestinations(t *testing.T) // A dA (riêng), admin dS (shared=true), admin dP (riêng) → A thấy [dA, dS]
+func TestDestinationSoftDelete(t *testing.T) // còn schedule → ErrInUse; xóa lịch rồi xóa → không còn trong List/Visible, GetDestination vẫn có (DeletedAt != nil, secret rỗng); backups cũ vẫn JOIN được; tạo lại cùng owner + cùng tên → OK; owner khác cùng tên → OK, cùng owner trùng tên khi chưa xóa → ErrConflict
 func TestBackupsOnDestination(t *testing.T)// backup ok của db1(A) và db2(B) trên dS → visibleTo=&A chỉ trả db1; nil trả 2; GetBackupByKey tìm đúng, key lạ → ErrNotFound
 func TestDumpAndImageChecks(t *testing.T)  // Start/Finish/Get dump check (result JSON round-trip); Upsert image check 2 lần → 1 row, giá trị mới
 ```
@@ -307,6 +331,7 @@ func (a *App) ListRestorable(ctx, p auth.Principal, destID int64, prefix, q stri
 func (a *App) CanRestoreKey(ctx, p auth.Principal, destID int64, key string) (bool, error)
 	// CanManage(dest) || (GetBackupByKey(dest,key) thuộc DB mà CanAccessDB)
 ```
+- Destination đã xóa mềm (`DeletedAt != nil`): `objects`/`TestDestination`/`ListRestorable`/`BackupDownloadURL`/`StartRestore`/`StartDumpCheck` trả `ErrInvalid` "destination deleted"; `CanUseDestination` = false.
 - `defaultSchedule` chỉ chọn destination **owner của DB dùng được** (owner sở hữu hoặc shared, id nhỏ nhất); không có → không tạo lịch.
 
 - [ ] **Step 1: Viết test** (fake runtime/objects sẵn có; users tạo bằng store)
@@ -319,6 +344,7 @@ func TestListRestorableShared(t *testing.T) // dS shared (admin); backup db1(A) 
 func TestListRestorablePrivateHidden(t *testing.T) // dest riêng của B → A nhận store.ErrNotFound
 func TestCanRestoreKey(t *testing.T)       // A với key backup db2(B) trên dS → false; key db1 → true; B trên dest của mình với file lạ → true
 func TestDefaultScheduleUsesOwnersDestination(t *testing.T) // dest riêng của admin không được dùng cho DB của A; có dS shared → dùng dS
+func TestDeletedDestinationBlocked(t *testing.T) // backup ok trên dest rồi xóa mềm dest → BackupDownloadURL / StartRestore theo key đó → ErrInvalid chứa "destination deleted"; lịch sử backup vẫn liệt kê được
 ```
 - [ ] **Step 2:** FAIL. **Step 3:** implement; cập nhật call site/tests cũ (`CreateRequest`/`RestoreRequest` thêm field). **Step 4:** `go test ./internal/app/ && go test -race ./internal/app/` PASS.
 - [ ] **Step 5: Commit** `feat(app): resource ownership, members and access helpers`.
