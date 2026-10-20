@@ -93,3 +93,13 @@ type ObjectStore interface {
 }
 
 var _ ObjectStore = (*objstore.Store)(nil)
+
+// Ready reports whether the metadata DB and the container runtime respond.
+func (a *App) Ready(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if err := a.Store.Ping(ctx); err != nil {
+		return err
+	}
+	return a.RT.Ping(ctx)
+}
