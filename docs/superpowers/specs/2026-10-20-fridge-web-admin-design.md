@@ -220,6 +220,17 @@ Lệnh chạy **bên trong container** (`docker exec <fridge> /fridge recover �
 - Tạo/restore DB với user/mật khẩu tự đặt được ghi audit (không ghi mật khẩu).
 - CLI: `fridge create … --db-user U --db-password-stdin` hoặc `--random-credentials` (CLI tự sinh như trên và in ra một lần).
 
+### 13b-2. Hai user trên mỗi node DB (người dùng chốt)
+
+- **Superuser của owner**: mỗi owner có **một** superuser dùng chung cho **mọi** node mình sở hữu — tên `su_<username>` (`.`/`-` → `_`), mật khẩu ngẫu nhiên (`crypto/rand.Text()`), tạo khi owner tạo/restore node đầu tiên; lưu mã hóa trong bảng `owner_superusers(user_id PK → users, su_name UNIQUE, password_enc, created_at, rotated_at)`.
+  - Container khởi tạo với `POSTGRES_USER = su_name`, `POSTGRES_PASSWORD = mật khẩu superuser`, `POSTGRES_DB = <tên DB>`. Healthcheck, backup (`pg_dump`), restore, kiểm tra kỹ chạy bằng superuser này (qua socket nội bộ, không cần mật khẩu).
+  - **Owner** xem tên + mật khẩu và **rotate**: Fridge sinh mật khẩu mới, lưu, rồi `ALTER ROLE` trên mọi node đang chạy của owner; trả danh sách node lỗi kèm nút **Áp lại** (chạy lại `ALTER ROLE` với mật khẩu đang lưu). **Admin** xem được. **Người quản lý không thấy** *(lựa chọn của Claude)*. Mỗi lần xem/rotate ghi audit (`superuser.reveal`, `superuser.rotate`).
+  - Đánh đổi (đã nêu với người dùng): lộ superuser của một owner = lộ mọi node của người đó; có rotate để xử lý.
+- **User ứng dụng** (tên/mật khẩu tự đặt hoặc ngẫu nhiên — mục 13b): `CREATE ROLE … LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE`, là **owner của database** và schema `public` (người dùng chốt: "owner của database") — tự tạo/sửa/xóa bảng, index, schema, extension trusted; đọc ghi dữ liệu. Tạo sau khi container healthy bằng `psql` chạy dưới superuser, SQL đưa qua stdin (mật khẩu không nằm trên dòng lệnh).
+- **Restore**: chạy bằng superuser của owner node mới; object được gán cho user ứng dụng (`pg_restore --no-owner --no-acl --role=<app>`; file SQL thuần được thêm `SET ROLE <app>;` ở đầu luồng).
+- Owner và người quản lý thấy connection string của user ứng dụng; connection string superuser chỉ owner/admin.
+- **DB tạo ở giai đoạn 1** (một user, là superuser): cột `databases.admin_user` rỗng = "kiểu cũ" — vẫn chạy như trước, UI gắn nhãn "kiểu cũ"; muốn chuyển sang mô hình mới thì backup → restore sang node mới *(lựa chọn của Claude)*.
+
 ### 13c. Audit log & Hoạt động (người dùng chốt)
 
 - Bảng `audit_log` **chỉ thêm**: thời điểm, người làm (user, hoặc `system` cho job tự chạy, `recover` cho lệnh khẩn cấp, `anonymous` cho đăng nhập sai user không tồn tại), IP, hành động (mã cố định, vd `db.create`, `auth.login_failed`), đối tượng (loại + id/tên), DB liên quan (nếu có), thành công/thất bại, chi tiết ngắn (JSON). **Không bao giờ** ghi mật khẩu, secret, session/invite token.
