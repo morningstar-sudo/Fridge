@@ -218,6 +218,6 @@ Tên endpoint/JSON cụ thể, cấu trúc file JS, cách vendor Bootstrap (phi�
 11. `docker exec … /fridge recover allowlist 10.0.0.0/8` mở lại truy cập sau khi tự khóa; `recover reset-password` in link dùng được.
 12. Sidebar thu gọn/mở, trạng thái giữ sau reload; mọi trang chạy với CSP `default-src 'self'` không lỗi console.
 13. Restore một file rỗng / file ảnh đổi đuôi `.dump` / file gzip hỏng header / `.dump` từ PG17 vào node PG16 → 400 ngay với lý do cụ thể, không có container hay bản ghi restore nào được tạo.
+14. "Kiểm tra kỹ" một `.dump` bị cắt nửa cuối → `failed` kèm lỗi của pg_restore; một `.sql.gz` cụt → `failed` (lỗi gzip); file nguyên vẹn → `ok` với version nguồn và số mục TOC; container tạm không còn sau khi xong.
 15. Images (admin): bảng chỉ có image catalog/DB, cột số DB đúng (tạo 2 DB `postgres:16`, dừng 1 → vẫn đếm 2); "Pull" `postgres:15` → xuất hiện; Prune preview chỉ liệt kê image không DB nào dùng, xóa xong image đang dùng còn nguyên; user thường gọi `/api/images` → 403.
 16. Kiểm tra bản mới: pull một tag cũ theo digest rồi gắn lại tag (vd `postgres:18` trỏ về bản 18.0) → "Kiểm tra cập nhật" báo `18.0 → 18.x`; tắt mạng ra ngoài → hiện "không kiểm tra được", trang vẫn dùng bình thường.
-14. "Kiểm tra kỹ" một `.dump` bị cắt nửa cuối → `failed` kèm lỗi của pg_restore; một `.sql.gz` cụt → `failed` (lỗi gzip); file nguyên vẹn → `ok` với version nguồn và số mục TOC; container tạm không còn sau khi xong.

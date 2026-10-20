@@ -5,12 +5,10 @@ Creates Postgres nodes behind one Traefik port (routed by TLS SNI), backs them u
 ## Run it (docker compose)
 
 ```sh
-# 1. secrets (deploy/.env is gitignored)
-cat > deploy/.env <<EOF
-FRIDGE_SECRET_KEY=$(openssl rand -base64 32)
-FRIDGE_TOKEN=$(openssl rand -hex 16)
-FRIDGE_META_PASSWORD=$(openssl rand -hex 16)
-EOF
+# 1. secrets (deploy/.env is gitignored; every variable is explained in deploy/.env.example)
+cp deploy/.env.example deploy/.env
+# then fill FRIDGE_SECRET_KEY (openssl rand -base64 32), FRIDGE_TOKEN (openssl rand -hex 32),
+# FRIDGE_META_PASSWORD (openssl rand -hex 16); optional FRIDGE_ALERT_WEBHOOK, TZ
 
 # 2. start (add --profile dev for a local MinIO with bucket "fridge", minioadmin/minioadmin)
 docker compose -f deploy/docker-compose.yml --profile dev up -d --build
