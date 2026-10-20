@@ -134,6 +134,7 @@ type Database struct { ID int64; Name, Engine, Version, Domain, TLSMode, User, P
 type Destination struct { ID int64; Name, Provider, Endpoint, Region, Bucket, AccessKey, SecretKeyEnc string; PathStyle bool; CreatedAt time.Time }
 func Open(ctx context.Context, url string) (*Store, error) // pgxpool.New + Ping; chạy migrations
 func (s *Store) Close() error
+func (s *Store) Ping(ctx) error
 func (s *Store) CreateDatabase(ctx, d *Database) error            // set ID, CreatedAt; HostID mặc định "local"
 func (s *Store) GetDatabase(ctx, id int64) (Database, error)
 func (s *Store) GetDatabaseByName(ctx, name string) (Database, error) // bỏ qua row status error/deleted
@@ -297,6 +298,7 @@ func TestPostgresConnString(t *testing.T) // Password "p@ss/w" → chứa "p%40s
 type RunSpec struct { Name, Image string; Env []string; Volume, VolumePath string; Healthcheck []string; Labels map[string]string }
 func New(network string) (*Client, error)                  // client.FromEnv + WithAPIVersionNegotiation
 func (c *Client) EnsureNetwork(ctx) error                   // tạo bridge network nếu chưa có
+func (c *Client) Ping(ctx) error
 func (c *Client) Run(ctx, s RunSpec) (id string, err error) // pull image nếu thiếu (đọc hết stream pull), tạo volume, create+start; restart unless-stopped; gắn network với alias = Name; không publish port
 func (c *Client) WaitHealthy(ctx, id string, timeout time.Duration) error // poll inspect 1s; "unhealthy" hoặc hết giờ → lỗi
 func (c *Client) Exec(ctx, id string, cmd []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int, err error)
@@ -405,6 +407,7 @@ func TestWriteBase(t *testing.T)   // sourceRange tcp và http == 3 CIDR truyề
 ```go
 var ErrInvalid = errors.New("invalid") // bọc: fmt.Errorf("%w: domain must be a hostname", ErrInvalid)
 type Runtime interface {
+	Ping(ctx) error
 	Run(ctx, s container.RunSpec) (string, error)
 	WaitHealthy(ctx, id string, timeout time.Duration) error
 	Exec(ctx, id string, cmd []string, stdin io.Reader, stdout, stderr io.Writer) (int, error)
@@ -616,10 +619,13 @@ func TestRestoreOverwriteRejected(t *testing.T) // TargetDatabaseID 1 → ErrInv
 
 **Files:**
 - Create: `internal/api/api.go`, `internal/api/api_test.go`
+- Modify: `internal/app/app.go` (thêm `Ready`)
 
 **Interfaces:**
-- Consumes: mọi method public của `app.App` từ Task 8–10.
-- Produces: `api.New(a *app.App, token string) http.Handler`.
+- Consumes: mọi method public của `app.App` từ Task 8–10; `Store.Ping` (Task 2), `Runtime.Ping` (Task 8).
+- Produces: `api.New(a *app.App, token string) http.Handler`; `func (a *App) Ready(ctx) error` (lỗi nếu `Store.Ping` hoặc `RT.Ping` lỗi, timeout 3s).
+
+**Không cần token**: `GET /healthz` → 200 `ok`; `GET /readyz` → 200 `ok` hoặc 503 `not ready` (không lộ chi tiết lỗi).
 
 Route (Go 1.22 `http.ServeMux` pattern). `{db}` là id (số) hoặc name.
 ```
@@ -651,6 +657,7 @@ GET  /api/ca                           → CA PEM (text/plain)
 
 ```go
 func TestAuthRequired(t *testing.T)        // không header → 401; sai token → 401; đúng → 200 trên /api/engines
+func TestHealthEndpoints(t *testing.T)     // /healthz không token → 200; /readyz → 200 khi fake runtime Ping nil; fake Ping lỗi → 503, body không chứa text lỗi
 func TestErrorMapping(t *testing.T)        // POST /api/databases version "99" → 400; GET /api/databases/nope → 404; tạo trùng name → 409; body "{" → 400
 func TestNoSecretsInResponses(t *testing.T) // tạo destination secret "TOPSECRET" → body POST/GET list không chứa "TOPSECRET" và không có key "secret_key"; GET /api/databases không chứa "password_enc"
 func TestDatabaseByNameOrID(t *testing.T)  // GET /api/databases/abc và /api/databases/<id> trả cùng id
@@ -723,12 +730,14 @@ func TestRestoreResolvesDestinationName(t *testing.T) // GET /api/destinations t
 `fridge server` đọc env: `FRIDGE_DATABASE_URL` (bắt buộc), `FRIDGE_LISTEN` (`:8080`), `FRIDGE_DATA` (`/data`, chứa CA), `FRIDGE_TRAEFIK_DIR` (`/traefik`), `FRIDGE_NETWORK` (`fridge-net`), `FRIDGE_API_BACKEND` (`http://fridge:8080`), `FRIDGE_SECRET_KEY` (bắt buộc), `FRIDGE_TOKEN` (bắt buộc), `FRIDGE_ALERT_WEBHOOK` (tùy chọn). Thiếu biến bắt buộc → thoát kèm thông báo rõ.
 Thứ tự khởi động: `store.Open(ctx, FRIDGE_DATABASE_URL)` (retry tối đa 30s chờ `fridge-meta` sẵn sàng) → `FailRunning("interrupted by restart")` → `container.New` + `EnsureNetwork` → `pki.LoadOrCreate(<data>/ca)` → tạo thư mục `<traefik>/dynamic`, `<traefik>/certs` → `proxy.WriteBase(Allowlist())` → `NewScheduler` + `Reload` + `Start` → `http.Server` với `api.New`. SIGINT/SIGTERM → `Shutdown`, `Sched.Stop`, `a.Wait()` tối đa 30s. `HealthTimeout` = 120s.
 
-`deploy/traefik.yml`: entryPoints `pg: ":5432"`, `api: ":8080"`; `providers.file {directory: /traefik/dynamic, watch: true}`; `ping: {}`; log INFO.
+`deploy/traefik.yml`: entryPoints `pg: ":5432"`, `api: ":8080"`, `ping: ":8082"`; `ping: {entryPoint: ping}` (**bắt buộc** chỉ định — mặc định ping dùng entrypoint nội bộ `traefik` ở `:8080`, trùng `api`); `providers.file {directory: /traefik/dynamic, watch: true}`; log INFO.
+
+`fridge healthcheck` (lệnh con mới trong `main.go`): GET `http://127.0.0.1<FRIDGE_LISTEN>/readyz`, exit 0 nếu 200, ngược lại 1. Dùng cho healthcheck compose vì image distroless không có curl/wget.
 
 `deploy/docker-compose.yml`:
 - `traefik`: image `traefik:v3.5` (hoặc tag v3 ổn định mới nhất, pin cụ thể), ports `5432:5432`, `8080:8080`, mount `./traefik.yml:/etc/traefik/traefik.yml:ro` + volume `traefik:/traefik`, network `fridge-net`, `restart: always`, healthcheck `traefik healthcheck --ping`.
 - `fridge-meta`: `postgres:17`, env `POSTGRES_DB=fridge`, `POSTGRES_USER=fridge`, `POSTGRES_PASSWORD=${FRIDGE_META_PASSWORD}`, volume `fridge-meta:/var/lib/postgresql/data`, network `fridge-net`, healthcheck `pg_isready -U fridge -d fridge`, `restart: always`, không publish port.
-- `fridge`: build `..` với `deploy/Dockerfile`, `depends_on: fridge-meta (condition: service_healthy)`, env như trên (đọc từ `.env`; `FRIDGE_DATABASE_URL=postgres://fridge:${FRIDGE_META_PASSWORD}@fridge-meta:5432/fridge?sslmode=disable`), volume `fridge-data:/data`, `traefik:/traefik`, `/var/run/docker.sock:/var/run/docker.sock`, network `fridge-net`, `restart: unless-stopped`, không publish port (đi qua Traefik `api`).
+- `fridge`: build `..` với `deploy/Dockerfile`, `depends_on: fridge-meta (condition: service_healthy)`, env như trên (đọc từ `.env`; `FRIDGE_DATABASE_URL=postgres://fridge:${FRIDGE_META_PASSWORD}@fridge-meta:5432/fridge?sslmode=disable`), volume `fridge-data:/data`, `traefik:/traefik`, `/var/run/docker.sock:/var/run/docker.sock`, network `fridge-net`, `restart: unless-stopped`, healthcheck `["CMD","/fridge","healthcheck"]`, không publish port (đi qua Traefik `api`).
 - `minio` (profile `dev`): `minio/minio server /data --console-address :9001`, ports `9000`, `9001`, network `fridge-net`.
 - `networks.fridge-net.name: fridge-net`.
 
@@ -752,7 +761,7 @@ func TestE2EBackupRestoreAcrossVersions(t *testing.T) {
 - [ ] **Step 3: Implement** `server` + 3 file deploy + README.
 - [ ] **Step 4: `go build ./... && go vet ./... && go test ./...`** → tất cả PASS.
 - [ ] **Step 5: Smoke test thủ công qua compose, chạy trong WSL** (CLI build bằng `go build -o /tmp/fridge ./cmd/fridge`; `FRIDGE_URL=http://localhost:8080`; ghi kết quả vào mô tả commit):
-  1. Tạo `deploy/.env` có `FRIDGE_SECRET_KEY` (`openssl rand -base64 32`), `FRIDGE_TOKEN`, `FRIDGE_META_PASSWORD`; `docker compose -f deploy/docker-compose.yml --profile dev up -d --build`. Tạo bucket `fridge` trên MinIO console.
+  1. Tạo `deploy/.env` có `FRIDGE_SECRET_KEY` (`openssl rand -base64 32`), `FRIDGE_TOKEN`; `docker compose -f deploy/docker-compose.yml --profile dev up -d --build`. Tạo bucket `fridge` trên MinIO console.
   2. `fridge dest add local --endpoint http://minio:9000 --bucket fridge --access-key minioadmin --secret-key minioadmin --path-style` → `fridge dest test local` OK.
   3. `fridge create postgres abc --domain abc.com --version 16`, `fridge create postgres xyz --domain xyz.com`.
   4. Client chạy trong Docker để có SNI: `docker run --rm --add-host abc.com:host-gateway postgres:17 psql "<conn abc>" -c "create table only_abc(x int)"`; làm tương tự với xyz và `\dt` → mỗi bên chỉ thấy bảng của mình qua **cùng port 5432**.

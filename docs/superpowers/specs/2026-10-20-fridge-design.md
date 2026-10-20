@@ -207,6 +207,40 @@ CLI tương ứng: `fridge create postgres abc --domain abc.com --version 16`, `
 
 - Cột `host_id` + bảng `hosts` có `docker_endpoint` (tcp+TLS hoặc ssh).
 - Khi scale: container DB trên host khác publish port nội bộ (private network/WireGuard) và Traefik/ProxySQL trỏ `host:port` thay vì tên container. Không cần đổi model dữ liệu.
+- Nếu sau này có agent trên từng host: chạy dạng container (chỉ cần `docker.sock`, lên version cùng controller). Lý do chính để có agent là đẩy dump thẳng từ host lên S3 thay vì đi vòng qua controller. Agent báo health về controller như mọi component khác (mục 9).
+
+### 9. Health check
+
+- **Fridge**: `GET /healthz` → 200 khi tiến trình sống; `GET /readyz` → 200 khi ping được `fridge-meta` và Docker, ngược lại 503. Hai endpoint này không cần token, không trả chi tiết.
+- **Compose**: mọi service có healthcheck — `fridge` (`/readyz`), `fridge-meta` (`pg_isready`), `traefik` (`traefik healthcheck --ping`, ping trên entrypoint riêng `:8082`), `proxysql` (giai đoạn engine MySQL), container DB (healthcheck của engine).
+- **Health checker** trong `fridge server`, chạy mỗi 30s, giữ trạng thái hiện tại trong bộ nhớ:
+  - `fridge-meta`, `docker`, `traefik` (HTTP `/ping`), `proxysql` (khi có), từng container DB (health của Docker), từng S3 destination (`BucketExists`, mỗi 5 phút), agent (khi có).
+  - `GET /api/health` → danh sách `{component, status: healthy|unhealthy|unknown, detail, since}`.
+  - Khi một component chuyển healthy → unhealthy: gửi webhook. Khi phục hồi: gửi "resolved". Cùng component tối đa 1 cảnh báo / 15 phút.
+
+### 10. Monitor tài nguyên (người dùng chốt: cả host lẫn từng DB, xem trong Fridge + `/metrics`, có cảnh báo theo ngưỡng)
+
+- **Collector** trong `fridge server`, lấy mẫu mỗi 30s:
+  - **Host**: CPU %, RAM dùng/tổng (đọc `/proc/stat`, `/proc/meminfo` — stdlib, không thêm thư viện), disk dùng/tổng của phân vùng chứa dữ liệu DB (`statfs`). Khi Fridge chạy trong container: mount `/proc` host vào `/host/proc:ro` và thư mục dữ liệu DB của host (mục 11) vào cùng đường dẫn.
+  - **Từng DB**: CPU % và RAM (Docker stats API, `stream=false`); disk đã dùng / quota (`statfs` trên mount của volume — nhanh, không cần `du`); số kết nối (lệnh riêng của engine, vd Postgres `select count(*) from pg_stat_activity`); trạng thái up.
+- **Lưu lịch sử** trong Postgres metadata: bảng `metric_samples(ts, target, name, value)` (`target` = `host` hoặc id DB), giữ 24h, job dọn mỗi giờ.
+- **API/CLI**: `GET /api/metrics/current` (snapshot host + mọi DB), `GET /api/metrics/host?range=1h|6h|24h`, `GET /api/databases/{id}/metrics?range=…`; CLI `fridge top`. Web UI (giai đoạn UI) vẽ biểu đồ 24h.
+- **Prometheus**: `GET /metrics` dạng text exposition tự viết (không thêm thư viện), cần bearer token. Gauge: `fridge_host_cpu_percent`, `fridge_host_memory_bytes{state="used|total"}`, `fridge_host_disk_bytes{state="used|total"}`, `fridge_db_up{db,engine}`, `fridge_db_cpu_percent{db}`, `fridge_db_memory_bytes{db,state="used|limit"}`, `fridge_db_disk_bytes{db,state="used|quota"}`, `fridge_db_connections{db}`, `fridge_component_up{component}`, `fridge_backup_last_success_timestamp_seconds{db}`.
+- **Cảnh báo theo ngưỡng** (webhook; admin sửa được, lưu trong `settings`). Mặc định: disk > 85%, RAM > 90%, CPU > 90%, điều kiện kéo dài liên tục 10 phút. Áp cho host, và cho từng DB tính theo **giới hạn của DB đó** (mục 11). Mỗi lần vượt ngưỡng gửi 1 cảnh báo, phục hồi gửi "resolved".
+
+### 11. Giới hạn tài nguyên từng DB (người dùng chốt: bắt buộc nhập khi tạo, quota disk cứng)
+
+- **Tạo DB bắt buộc nhập** `cpu` (số core, có thể lẻ, ≥ 0.25), `memory` (≥ 256 MiB), `disk` (≥ 1 GiB). Không có giá trị mặc định. Thiếu → 400. Validate: `cpu` ≤ số core của host, `memory` ≤ RAM host. Tổng quota disk được phép vượt dung lượng thật (file ảnh thưa), nhưng khi vượt thì API trả kèm cảnh báo.
+- **CPU/RAM**: Docker `NanoCPUs`, `Memory`, `MemorySwap = Memory` (tắt swap). Sửa khi đang chạy bằng `ContainerUpdate`, không cần restart container.
+- **Tinh chỉnh engine theo RAM**: mỗi engine sinh tham số từ giới hạn RAM. Postgres: `shared_buffers` = 25%, `effective_cache_size` = 75% (truyền `-c …`). Redis: `maxmemory` = 80% (giai đoạn engine). Nếu đổi RAM mà tham số engine cần restart (vd `shared_buffers`) → API trả `restart_required: true`, kèm endpoint `POST /api/databases/{id}/restart`.
+- **Quota disk cứng bằng file ảnh + loop device** (chạy được trên mọi filesystem của host, kể cả ext4 của WSL):
+  - Mỗi DB có file ảnh thưa `<FRIDGE_VOLUMES_DIR>/<db>.img` (mặc định `/srv/fridge/volumes`), format ext4, mount loop vào `<FRIDGE_VOLUMES_DIR>/<db>/`. Container DB bind-mount thư mục con `<db>/data` (kiểu `--mount type=bind`, **không** tự tạo thư mục khi thiếu).
+  - Thao tác mount làm bằng container helper chạy privileged, ngắn hạn, mount `FRIDGE_VOLUMES_DIR` với propagation `rshared` để mount hiện ra trên host. Fridge mount cùng thư mục với `rslave` để đọc `statfs`.
+  - **An toàn sau khi host reboot**: mount loop mất sau reboot. Vì thư mục `data` chỉ tồn tại *bên trong* filesystem của ảnh, container DB không khởi động được khi chưa mount (thay vì tự `initdb` một cluster rỗng — trông như mất dữ liệu). Khi Fridge khởi động: mount lại mọi ảnh rồi start lại các container DB.
+  - **Tăng quota**: nới file ảnh + `resize2fs` online, không downtime. **Giảm quota**: không hỗ trợ (dùng backup → restore vào node nhỏ hơn).
+  - DB chạm trần → engine báo lỗi "disk full"/"no space". Cảnh báo ngưỡng 85% (mục 10) báo trước.
+- **Mô hình dữ liệu bổ sung**: `databases` thêm `cpu_limit NUMERIC(6,2)`, `memory_limit_bytes BIGINT`, `disk_quota_bytes BIGINT`, `storage TEXT` (`volume` cho DB tạo ở giai đoạn 1, `loop` từ giai đoạn 2). DB tạo trước giai đoạn 2 không có quota; muốn có thì backup → restore vào node mới.
+- **API/CLI**: `POST /api/databases` thêm `{cpu, memory, disk}` (vd `"memory":"1GiB"`, `"disk":"10GiB"`); `PATCH /api/databases/{id}/limits`; CLI `fridge create postgres abc --domain abc.com --cpu 1 --memory 1GiB --disk 10GiB`, `fridge limits abc --memory 2GiB --disk 20GiB`.
 
 ## Cấu trúc repo
 
@@ -220,16 +254,20 @@ internal/backup/     # scheduler, dump→S3, retention, verify
 internal/api/        # REST handlers, auth middleware
 internal/web/        # templates + htmx, embed
 internal/alert/      # webhook
+internal/health/     # health checker
+internal/metrics/    # collector, lưu mẫu, /metrics, cảnh báo ngưỡng
+internal/storage/    # file ảnh + loop mount (quota disk), qua container helper
 deploy/docker-compose.yml   # fridge, traefik, proxysql (+ minio cho dev)
 deploy/traefik.yml          # static config
 ```
 
 ## Giai đoạn triển khai
 
-1. **Xương sống với Postgres**: store, Docker, engine Postgres có catalog version, Traefik SNI route + IP allowlist, internal CA, API + CLI, S3 destinations + test, schedule + Backup now, restore từ file S3 vào node mới, alert backup fail. Chạy được end-to-end.
-2. **Thêm 4 engine**: Mongo, Redis (Traefik SNI), MySQL, MariaDB (ProxySQL).
-3. **An toàn**: ACME DNS-01, test-restore định kỳ, auth + role + audit, soft-delete, restore ghi đè, reconcile loop, alert proxy/no-backup-26h.
-4. **Web UI** (htmx) phủ các luồng trên, gồm: dropdown version, trang Destinations, tab Backups, trình duyệt file S3 + Restore 1 click có log trực tiếp.
+1. **Xương sống với Postgres**: store, Docker, engine Postgres có catalog version, Traefik SNI route + IP allowlist, internal CA, API + CLI, S3 destinations + test, schedule + Backup now, restore từ file S3 vào node mới, alert backup fail, `/healthz` + `/readyz` + healthcheck compose. Chạy được end-to-end.
+2. **Health, monitor & giới hạn tài nguyên** (mục 9–11): health checker + `/api/health` + cảnh báo chuyển trạng thái; collector host/DB + lịch sử 24h + `/metrics` + cảnh báo ngưỡng; giới hạn CPU/RAM bắt buộc, quota disk cứng bằng loop device, tinh chỉnh Postgres theo RAM, `fridge top`, `fridge limits`.
+3. **Thêm 4 engine**: Mongo, Redis (Traefik SNI), MySQL, MariaDB (ProxySQL) — mỗi engine kèm lệnh đếm kết nối, tinh chỉnh theo RAM, healthcheck.
+4. **An toàn**: ACME DNS-01, test-restore định kỳ, auth + role + audit, soft-delete, restore ghi đè, reconcile loop, alert no-backup-26h.
+5. **Web UI** (htmx) phủ các luồng trên, gồm: dropdown version, nhập giới hạn tài nguyên, trang Destinations, tab Backups, trình duyệt file S3 + Restore 1 click có log trực tiếp, trang Health, biểu đồ tài nguyên 24h.
 
 ## Để builder tự quyết
 
@@ -247,8 +285,11 @@ Thư viện CLI, router HTTP (stdlib `net/http` mux Go 1.22 là đủ), định 
 8. **Version**: tạo `postgres 14` và `postgres 17`, `SELECT version()` đúng từng node; `--version 99` → 400.
 9. **Restore 1 click**: thêm 2 destination (MinIO dev + MinIO thứ 2), Test connection pass/fail đúng. Backup now trên node pg14 → file hiện trong trình duyệt bucket → restore vào node mới pg17 → dữ liệu khớp. Thử restore file pg17 vào node pg14 → bị chặn với lý do rõ. Upload tay 1 file `.sql.gz` lên bucket → restore được sau khi chọn engine.
 10. Xóa dải của máy test khỏi allowlist → kết nối 5432/3306 và Web UI bị từ chối; thêm lại → vào được.
-11. Unit test: sinh file Traefik yaml (router + allowlist + cert), ký cert từ internal CA, đoán engine/version từ key S3, luật tương thích version khi restore, validate catalog, lệnh ProxySQL, quyền theo role; mỗi engine có 1 test tích hợp create→dump→restore (dùng Docker thật, chạy được bằng `go test -tags integration`).
+11. **Health**: `docker stop` một container DB → `/api/health` báo unhealthy trong ≤ 60s và có webhook; start lại → healthy + webhook "resolved". Dừng `fridge-meta` → `/readyz` trả 503.
+12. **Monitor**: `fridge top` hiện CPU/RAM/disk của host và từng DB; `/metrics` có đủ các gauge ở mục 10; chạy tải CPU trong 1 DB (vd `pgbench`) quá ngưỡng 10 phút → webhook (test dùng ngưỡng/thời gian nhỏ).
+13. **Giới hạn**: tạo DB thiếu `--memory` → 400. DB `--memory 512MiB` → `docker inspect` có Memory = 512MiB và Postgres `show shared_buffers` = 128MB. Ghi dữ liệu tới vượt `--disk 1GiB` → Postgres báo lỗi hết chỗ, host không bị ảnh hưởng. `fridge limits abc --disk 2GiB` → ghi tiếp được, không restart. Reboot WSL (`wsl --shutdown`) → container DB không tự `initdb` cluster rỗng; Fridge khởi động lại thì mount lại ảnh và dữ liệu còn nguyên.
+14. Unit test: sinh file Traefik yaml (router + allowlist + cert), ký cert từ internal CA, đoán engine/version từ key S3, luật tương thích version khi restore, validate catalog, lệnh ProxySQL, quyền theo role; mỗi engine có 1 test tích hợp create→dump→restore (dùng Docker thật, chạy được bằng `go test -tags integration`).
 
-## Sau khi duyệt
+## Plan triển khai
 
-Copy tài liệu này vào `docs/superpowers/specs/2026-10-20-fridge-design.md` (git init repo), rồi chạy `superpowers:writing-plans` để ra plan triển khai từng bước.
+Mỗi giai đoạn một plan trong `docs/superpowers/plans/`. Giai đoạn 1: `2026-10-20-fridge-phase1-postgres.md`.
