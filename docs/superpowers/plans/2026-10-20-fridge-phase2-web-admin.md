@@ -23,22 +23,22 @@
 - Khóa đăng nhập: **5** lần sai trong **1 phút** theo (username, IP) → khóa **5 phút**; re-auth dùng **chung** bộ đếm. Trạng thái SCRAM dở dang sống **60s**. Lời mời hết hạn **48h**, dùng một lần; token lời mời chỉ đi trong **body** (`POST /api/invites/lookup|accept`), không bao giờ trong đường dẫn URL. Reauth token sống **2 phút**, dùng một lần.
 - Tài nguyên không có quyền xem → **404**; thao tác cấm trên tài nguyên thấy được → **403**; trước khi setup → `/api/*` (trừ route công khai) trả **401 `{"error":"setup required"}`**.
 - Cổng: Traefik `websecure :8443` (TLS, web + API), `web :8080` (chỉ redirect sang HTTPS :8443), `pg :5432`, `ping :8082`. Fridge vẫn nghe HTTP nội bộ `:8080`, không publish.
-- **Cô lập mạng** (từ Task 8): `fridge-net` chỉ có `traefik`, `fridge`, `fridge-meta` (+ `minio` profile dev). Mỗi node DB có network riêng **`fridge-node-<node_key>`** (DB kiểu cũ: `fridge-node-legacy-<db id>`), tạo với `Internal: true`; chỉ gắn container DB đó (alias = tên container) + container Traefik (tên lấy từ env `FRIDGE_TRAEFIK_CONTAINER`, mặc định `fridge-traefik`). Backend route Traefik giữ `<tên container>:<port>`. Container tạm (kiểm tra kỹ dump) chạy `NoNetwork`.
+- **Cô lập mạng** (từ Task 9): `fridge-net` chỉ có `traefik`, `fridge`, `fridge-meta` (+ `minio` profile dev). Mỗi node DB có network riêng **`fridge-node-<node_key>`** (DB kiểu cũ: `fridge-node-legacy-<db id>`), tạo với `Internal: true`; chỉ gắn container DB đó (alias = tên container) + container Traefik (tên lấy từ env `FRIDGE_TRAEFIK_CONTAINER`, mặc định `fridge-traefik`). Backend route Traefik giữ `<tên container>:<port>`. Container tạm (kiểm tra kỹ dump) chạy `NoNetwork`.
 - **Chặn SSRF** (từ Task 12): endpoint destination do user **không phải admin** tạo/sửa/kết nối không được tới loopback, link-local (`169.254.0.0/16`, `fe80::/10`), unspecified, subnet của `fridge-net` và mọi `fridge-node-*`, hay tên `fridge`, `fridge-meta`, `traefik`, `fridge-traefik`; RFC1918 khác vẫn được. Kiểm lúc tạo/sửa **và** lúc dial (`net.Dialer.Control`). Setting `s3_endpoint_allowlist` (host) bỏ qua guard. Lỗi chung: `"endpoint không được phép"`.
 - **Proxy tin cậy**: chỉ tin `X-Forwarded-For` khi peer thuộc **subnet của `fridge-net`** (lấy qua Docker API lúc khởi động) hoặc loopback; env `FRIDGE_TRUSTED_PROXY` = danh sách CIDR (phẩy) ghi đè mặc định.
 - Env server: **bỏ `FRIDGE_TOKEN`** hoàn toàn; thêm `FRIDGE_SETUP_TOKEN` (cần khi chưa có user), `FRIDGE_PUBLIC_HOSTS` (tùy chọn, phẩy), `FRIDGE_TRUSTED_PROXY` (tùy chọn, CIDR), `FRIDGE_TRAEFIK_CONTAINER` (mặc định `fridge-traefik`). Env CLI: `FRIDGE_URL` (mặc định `https://localhost:8443`), `FRIDGE_CA_FILE`, `FRIDGE_SESSION`.
-- Scheduler: job cố định đăng ký bằng `Scheduler.AddFixed(spec, fn)` (Task 9); `Reload` chỉ gỡ các entry của lịch backup, **không bao giờ** gỡ job cố định.
+- Scheduler: job cố định đăng ký bằng `Scheduler.AddFixed(spec, fn)` (Task 5); `Reload` chỉ gỡ các entry của lịch backup, **không bao giờ** gỡ job cố định.
 - Audit (từ Task 11): mọi route/lệnh tạo sau Task 11 ghi audit qua `audit.Logger.Record` với đúng mã hành động liệt kê ở Task 11; detail không bao giờ chứa mật khẩu/secret/token.
 - Thao tác nền dùng **polling 2–3s** (không SSE). Store: chỉ thêm **migration 4** (không sửa migration 1–3).
 
 ## Review Focus
 
-1. **Quyền bị vượt qua đường gián tiếp** — restore theo key một bản backup của DB người khác trên destination dùng chung; tải backup của DB không có quyền; đặt/sửa/xóa lịch của DB người khác; đặt lịch dùng destination riêng của người khác; "Kiểm tra kỹ" file của người khác; người quản lý (không phải owner) thêm member; Backup now rơi vào destination không thuộc owner → đều phải bị chặn. Test ở Task 10 (`TestIndirectAccessBlocked`) và Task 5 (`TestBackupNowFallbackOwnerDestination`).
-2. **Session ID / token lộ ra ngoài** — không được xuất hiện trong body JSON trả cho web, trong URL (kể cả invite token), trong log; DB chỉ chứa hash. Test ở Task 4 (`TestSessionStoredHashed`) và Task 9 (`TestWebLoginNoTokenInBody`, `TestInviteTokenNotInPath`).
+1. **Quyền bị vượt qua đường gián tiếp** — restore theo key một bản backup của DB người khác trên destination dùng chung; tải backup của DB không có quyền; đặt/sửa/xóa lịch của DB người khác; đặt lịch dùng destination riêng của người khác; "Kiểm tra kỹ" file của người khác; người quản lý (không phải owner) thêm member; Backup now rơi vào destination không thuộc owner → đều phải bị chặn. Test ở Task 10 (`TestIndirectAccessBlocked`) và Task 6 (`TestBackupNowFallbackOwnerDestination`).
+2. **Session ID / token lộ ra ngoài** — không được xuất hiện trong body JSON trả cho web, trong URL (kể cả invite token), trong log; DB chỉ chứa hash. Test ở Task 4 (`TestSessionStoredHashed`) và Task 5 (`TestWebLoginNoTokenInBody`, `TestInviteTokenNotInPath`).
 3. **Setup chạy song song / chạy lại** — hai request setup đồng thời chỉ tạo đúng một admin; setup sau khi đã có user → 409. Test ở Task 1 (`TestCreateFirstAdminOnce`) và Task 4 (`TestSetup`).
 4. **Tự khóa admin** — khóa/hạ quyền admin hoạt động cuối cùng bị từ chối, kể cả khi hai admin hạ nhau đồng thời; user bị khóa mất mọi session ngay; `fridge recover promote` cứu được. Test ở Task 1 (`TestLastAdminConcurrent`), Task 4 (`TestLastAdminGuard`) và Task 17 (`TestRecoverResetAndPromote`).
-5. **Giả mạo IP qua `X-Forwarded-For`** — request không đến từ subnet proxy tin cậy mà gửi XFF thì XFF bị bỏ qua. Test ở Task 9 (`TestClientIPTrustsOnlyProxy`).
-6. **Thoát khỏi container DB** — shell trong node A không tới được node B, `fridge-meta`, API Fridge. Test ở Task 8 (`TestNodeNetworkIsolation`, integration).
+5. **Giả mạo IP qua `X-Forwarded-For`** — request không đến từ subnet proxy tin cậy mà gửi XFF thì XFF bị bỏ qua. Test ở Task 5 (`TestClientIPTrustsOnlyProxy`).
+6. **Thoát khỏi container DB** — shell trong node A không tới được node B, `fridge-meta`, API Fridge. Test ở Task 9 (`TestNodeNetworkIsolation`, integration).
 7. **SSRF qua destination** — user thường không trỏ endpoint vào hạ tầng nội bộ, kể cả bằng DNS rebinding. Test ở Task 12 (`TestGuardCheckIP`, `TestDialGuardBlocksAtConnect`, `TestDestinationSSRFAPI`).
 
 ---
@@ -356,7 +356,63 @@ func TestRevokeSession(t *testing.T)       // user không revoke được sessio
 
 ---
 
-### Task 5: App — helper quyền, members, duyệt file restore, destination đã xóa, Backup now
+### Task 5: API — xác thực, route auth/user/session, header bảo mật, job cố định
+
+**Files:**
+- Create: `internal/api/middleware.go`, `internal/api/auth_routes.go`, tests
+- Modify: `internal/api/api.go` (chữ ký `New`, bỏ token tĩnh, `/api/ca` công khai), `internal/app/scheduler.go` (`AddFixed`) + test, `cmd/fridge/main.go`
+
+**Interfaces:**
+- Consumes: `auth.Service` (Task 4), `container.Client.Subnets` (Task 9).
+- Produces:
+
+```go
+type Options struct {
+	Web          http.Handler       // nil → 404 cho đường dẫn ngoài /api, /healthz, /readyz
+	TrustedProxy func(ip net.IP) bool // nil → chỉ loopback
+}
+func New(a *app.App, au *auth.Service, o Options) http.Handler
+func principal(r *http.Request) (auth.Principal, bool) // lấy từ context
+func clientIP(r *http.Request, trusted func(net.IP) bool) string // RemoteAddr; nếu peer tin cậy → phần tử **cuối** của X-Forwarded-For
+func TrustCIDRs(prefixes []netip.Prefix) func(net.IP) bool // tin peer thuộc một prefix hoặc loopback
+func ParseCIDRs(s string) ([]netip.Prefix, error)          // "10.0.0.0/8, 172.20.0.0/16" → prefixes; rỗng → nil
+// app
+func (s *Scheduler) AddFixed(spec string, fn func()) error // job cố định, không bị Reload gỡ
+// Reload: chỉ gỡ các entry ID của lịch backup đã đăng ký lần trước (Scheduler giữ []cron.EntryID), không bao giờ gỡ job AddFixed.
+```
+- Route **công khai**: `GET /healthz`, `GET /readyz`, `GET /api/ca`, `GET /api/setup/status` → `{"needed":bool,"token_configured":bool}`, `POST /api/setup` `{setup_token, username, credentials}`, `POST /api/auth/scram/start` `{client_first}` → `{server_first, scram_id}`, `POST /api/auth/scram/finish` `{scram_id, client_final, want_token?}` → `{server_final, user:{id,username,role}, session_id?}` + Set-Cookie, `POST /api/invites/lookup` `{token}` → `{username, purpose}`, `POST /api/invites/accept` `{token, credentials}`. **Không** có route nào nhận invite token trong đường dẫn.
+- Route **cần đăng nhập**: `POST /api/auth/logout`, `GET /api/me`, `POST /api/me/reauth/start|finish` (finish → `{server_final, reauth_token}`), `POST /api/me/password` `{reauth_token, credentials}`, `GET /api/me/sessions`, `DELETE /api/sessions/{id}` (`id` = hex của id_hash). **Admin**: `GET /api/users`, `POST /api/invites` `{username, role}` → `{link}`, `POST /api/users/{id}/reset` → `{link}`, `PATCH /api/users/{id}` `{role?, disabled?}`, `GET /api/sessions`.
+- Session JSON (cả `/api/me/sessions` và `/api/sessions`): `{id, user_id, username, created_at, last_seen_at, ip, user_agent, current}` — `current: true` khi `id_hash` = `SessionHash` của principal đang gọi.
+- `credentials` JSON: `{salt, iterations, stored_key, server_key}` (base64 chuẩn).
+- `session_id` chỉ có trong body khi request gửi `"want_token": true` (CLI). Cookie luôn được set.
+- Link mời: `https://<r.Host>/#/invite/<token>` (token sau `#`, không gửi lên server khi mở trang).
+- Middleware: principal từ cookie `fridge_session` hoặc `Authorization: Bearer <session>`; request dùng **cookie** + method không phải GET/HEAD/OPTIONS phải có `Origin` khớp `https://`+`r.Host` (hoặc `Sec-Fetch-Site: same-origin`) → không thì 403. Chưa setup + không principal → 401 `setup required`. Header mọi response: `Content-Security-Policy: default-src 'self'; frame-ancestors 'none'`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`.
+- Map lỗi: `ErrBadCredentials/ErrUnauthenticated` 401, `ErrBadSetupToken/ErrForbidden` 403, `ErrSetupDone/ErrLastAdmin/ErrConflict` 409, `ErrLocked` 429, `ErrInvalid/ErrInviteInvalid` 400.
+- Route cũ giữ nguyên handler nhưng đặt sau middleware (áp quyền ở Task 10). Tạm thời: user đã đăng nhập dùng được mọi route cũ. (OwnerID/startedBy chưa tồn tại ở task này — Task 6 thêm và nối vào handler.)
+- `main.go`: `auth.New(store, secretKeyBytes, env FRIDGE_SETUP_TOKEN)`; chưa có user và `FRIDGE_SETUP_TOKEN` rỗng → `log.Printf("WARNING: no users yet and FRIDGE_SETUP_TOKEN is not set — setup is impossible until it is")`. Proxy tin cậy: `FRIDGE_TRUSTED_PROXY` khác rỗng → `ParseCIDRs` (lỗi → thoát với lỗi); ngược lại `rt.Subnets(ctx, network)` (subnet `fridge-net`); lỗi → log, chỉ tin loopback. Bỏ yêu cầu `FRIDGE_TOKEN`. `a.Sched.AddFixed("@hourly", func(){ au.PurgeExpired(ctx) })` (lỗi → log). Sửa test API cũ dùng đăng nhập thay token.
+
+- [ ] **Step 1: Viết test** (httptest + store thật + `scram.NewClient`; helper `loginAs(t, srv, user, pw) (cookie, sessionID)`; user `alice`, `bob`)
+
+```go
+func TestSetupRequired(t *testing.T)       // chưa setup: GET /api/databases → 401 {"error":"setup required"}; /api/setup/status → needed true, token_configured đúng theo SetupToken; /api/ca → 200 PEM
+func TestSetupAndLoginWeb(t *testing.T)    // setup → scram start/finish → Set-Cookie fridge_session có HttpOnly, Secure, SameSite=Strict; GET /api/me bằng cookie → username
+func TestWebLoginNoTokenInBody(t *testing.T) // finish không want_token → body không có "session_id"; có want_token → có và Bearer dùng được
+func TestInviteTokenNotInPath(t *testing.T) // admin POST /api/invites → link; POST /api/invites/lookup {token} → username/purpose; GET /api/invites/<token> → 404 (route không tồn tại); POST /api/invites/accept {token, credentials} → đăng nhập được
+func TestCSRF(t *testing.T)                // POST bằng cookie, Origin "https://evil" → 403; Origin đúng → qua; Bearer không Origin → qua
+func TestClientIPTrustsOnlyProxy(t *testing.T) // TrustCIDRs([172.30.0.0/16]): peer 10.9.9.9 + XFF "1.2.3.4" → "10.9.9.9"; peer 172.30.0.5 + XFF "1.1.1.1, 5.6.7.8" → "5.6.7.8"; peer 127.0.0.1 tin; ParseCIDRs("bad") → lỗi
+func TestAdminOnlyRoutes(t *testing.T)     // user thường GET /api/users → 403; admin POST /api/invites → link chứa "/#/invite/"
+func TestSessionListCurrent(t *testing.T)  // alice có 2 phiên; GET /api/me/sessions bằng phiên 1 → đúng 1 phần tử current:true và là phiên 1
+func TestSecurityHeaders(t *testing.T)     // mọi response có CSP "default-src 'self'"
+func TestLogoutInvalidatesBearer(t *testing.T)
+// internal/app (package app)
+func TestFixedJobsSurviveReload(t *testing.T) // AddFixed("@hourly", fn) + 1 lịch enabled → Reload 2 lần → len(s.c.Entries()) == 2 và entry của job cố định vẫn còn (cùng EntryID); xóa lịch → Reload → còn đúng 1 entry (job cố định)
+```
+- [ ] **Step 2:** FAIL. **Step 3:** implement. **Step 4:** `go test ./internal/api/ ./internal/app/ ./cmd/fridge/` PASS.
+- [ ] **Step 5: Commit** `feat(api): session auth, SCRAM routes, users and invites`.
+
+---
+
+### Task 6: App — helper quyền, members, duyệt file restore, destination đã xóa, Backup now
 
 **Files:**
 - Create: `internal/app/access.go`, `internal/app/members.go`, tests
@@ -392,7 +448,7 @@ func (a *App) CanRestoreKey(ctx, p auth.Principal, destID int64, key string) (bo
 - **Destination đã xóa mềm** (`DeletedAt != nil`): kiểm **một chỗ** trong `a.objects()` → `ErrInvalid` "destination deleted"; vì mọi đường (`TestDestination`, `ListRestorable`, `BackupDownloadURL`, `StartBackup`, `StartRestore`, và `StartDumpCheck` ở Task 14) đều đi qua `a.objects()`.
 - `defaultSchedule` chỉ chọn destination **owner của DB dùng được** (owner sở hữu hoặc shared, chưa xóa, id nhỏ nhất); không có → không tạo lịch.
 - Scheduler gọi `StartBackup(…, "schedule", nil)`.
-- `internal/api`: chỉ sửa call site cho `go build ./...` qua; test API tạo DB/restore sẽ fail cho tới Task 9 (chưa có user để làm owner) — **không** sửa test API ở task này.
+- `internal/api`: `createDB` và `startRestore` truyền `OwnerID = p.UserID`, `startBackup` truyền `startedBy = &p.UserID` (principal có từ Task 5); cập nhật test API hiện có (dùng helper đăng nhập của Task 5) để `go test ./...` vẫn PASS sau task này.
 
 - [ ] **Step 1: Viết test** (fake runtime/objects sẵn có; users `alice`, `bob`, admin `root1` tạo bằng store)
 
@@ -412,14 +468,14 @@ func TestDeletedDestinationBlocked(t *testing.T) // backup ok trên dest rồi x
 
 ---
 
-### Task 6: App — tiền tố tên DB/user, credentials tự đặt, domain đã đăng ký
+### Task 7: App — tiền tố tên DB/user, credentials tự đặt, domain đã đăng ký
 
 **Files:**
 - Create: `internal/app/names.go` + `names_test.go`
 - Modify: `internal/app/databases.go`, `internal/app/restore.go`, `internal/engine/postgres.go` (`ConnString`), `internal/app/fakes_test.go`
 
 **Interfaces:**
-- Consumes: Task 5 (`CreateRequest.OwnerID`), store domains (Task 2).
+- Consumes: Task 6 (`CreateRequest.OwnerID`), store domains (Task 2).
 - Produces:
 
 ```go
@@ -437,7 +493,7 @@ func dbUser(owner, suffix, dbSuffix string) (string, error)
 func validDBPassword(pw string) error
 // engine.postgres.ConnString: dùng url.UserPassword(user, password) thay QueryEscape.
 ```
-- Ở task này node vẫn một user (user ứng dụng = `POSTGRES_USER`); Task 7 đổi sang hai user.
+- Ở task này node vẫn một user (user ứng dụng = `POSTGRES_USER`); Task 8 đổi sang hai user.
 
 - [ ] **Step 1: Viết test** (owner `alice`, `bob`; domain `alice.lan` của alice, `bob.lan` của bob đăng ký sẵn)
 
@@ -452,14 +508,14 @@ func TestRestoreNamePrefix(t *testing.T)   // restore vào node mới với New.
 
 ---
 
-### Task 7: App/engine — hai user trên mỗi node (superuser riêng + user ứng dụng)
+### Task 8: App/engine — hai user trên mỗi node (superuser riêng + user ứng dụng)
 
 **Files:**
 - Create: `internal/app/superuser.go` + test
 - Modify: `internal/engine/engine.go`, `internal/engine/postgres.go` (+ test), `internal/app/databases.go` (`provision`, đặt tên theo node_key), `internal/app/backup.go`, `internal/app/restore.go`, `internal/app/fakes_test.go`
 
 **Interfaces:**
-- Consumes: Task 6 (tên thật, DBUser/DBPassword), store `AdminUser/AdminPasswordEnc/NodeKey` (Task 2).
+- Consumes: Task 7 (tên thật, DBUser/DBPassword), store `AdminUser/AdminPasswordEnc/NodeKey` (Task 2).
 - Produces:
 
 ```go
@@ -501,19 +557,19 @@ func TestRevealSuperuser(t *testing.T)     // trả "su_<key>" + mật khẩu gi
 func TestRestoreUsesAppRole(t *testing.T)  // restore .dump → cmd chứa "--role=<app user>"; restore .sql.gz → stdin bắt đầu bằng `SET ROLE "<app user>";`
 func TestLegacyDBUsesSingleUser(t *testing.T) // DB có AdminUser "" → DumpCmd -U <db_user>, tên container giữ nguyên
 ```
-- [ ] **Step 2:** FAIL. **Step 3:** implement; sửa test cũ của Task 6 (`TestCustomDBCredentials` giờ khẳng định qua stdin SQL — giữ assertion ConnString). **Step 4:** `go test ./internal/engine/ ./internal/app/ && go test -race ./internal/app/` PASS.
+- [ ] **Step 2:** FAIL. **Step 3:** implement; sửa test cũ của Task 7 (`TestCustomDBCredentials` giờ khẳng định qua stdin SQL — giữ assertion ConnString). **Step 4:** `go test ./internal/engine/ ./internal/app/ && go test -race ./internal/app/` PASS.
 - [ ] **Step 5: Commit** `feat(app): per-node superuser and non-superuser app user`.
 
 ---
 
-### Task 8: Cô lập mạng — network riêng cho từng node DB
+### Task 9: Cô lập mạng — network riêng cho từng node DB
 
 **Files:**
 - Create: `internal/container/network.go`, `internal/container/network_integration_test.go` (`//go:build integration`), `internal/app/network.go` + `network_test.go`
 - Modify: `internal/container/docker.go` (`RunSpec.Network`), `internal/app/app.go` (`Runtime` thêm method network; `App` thêm `ControlNetwork`, `TraefikContainer`), `internal/app/databases.go` (`provision`, `removeNode`), `internal/app/fakes_test.go`, `cmd/fridge/main.go`
 
 **Interfaces:**
-- Consumes: Task 7 (NodeKey, tên container `fridge-<engine>-<NodeKey>`).
+- Consumes: Task 8 (NodeKey, tên container `fridge-<engine>-<NodeKey>`).
 - Produces:
 
 ```go
@@ -524,7 +580,7 @@ func (c *Client) RemoveNetwork(ctx, name string) error                 // không
 func (c *Client) ConnectNetwork(ctx, netName, containerName string, aliases []string) error // đã nối → nil
 func (c *Client) DisconnectNetwork(ctx, netName, containerName string) error                // chưa nối/không có → nil
 func (c *Client) ContainerNetworks(ctx, containerName string) ([]string, error)
-func (c *Client) Subnets(ctx, names ...string) ([]netip.Prefix, error) // IPAM subnet của các network tên đúng bằng names (dùng cho proxy tin cậy, Task 9)
+func (c *Client) Subnets(ctx, names ...string) ([]netip.Prefix, error) // IPAM subnet của các network tên đúng bằng names (dùng cho proxy tin cậy, Task 5)
 func (c *Client) FridgeSubnets(ctx) ([]netip.Prefix, error)            // c.network + mọi network tên bắt đầu "fridge-node-" (dùng cho guard SSRF, Task 12)
 // app.Runtime thêm: CreateNetwork, RemoveNetwork, ConnectNetwork, DisconnectNetwork, ContainerNetworks, FridgeSubnets (chữ ký như trên)
 // App thêm: ControlNetwork string (= FRIDGE_NETWORK, mặc định "fridge-net"); TraefikContainer string (= FRIDGE_TRAEFIK_CONTAINER, mặc định "fridge-traefik")
@@ -562,68 +618,12 @@ func TestNodeNetworkIsolation(t *testing.T)
 
 ---
 
-### Task 9: API — xác thực, route auth/user/session, header bảo mật, job cố định
-
-**Files:**
-- Create: `internal/api/middleware.go`, `internal/api/auth_routes.go`, tests
-- Modify: `internal/api/api.go` (chữ ký `New`, bỏ token tĩnh, `/api/ca` công khai), `internal/app/scheduler.go` (`AddFixed`) + test, `cmd/fridge/main.go`
-
-**Interfaces:**
-- Consumes: `auth.Service` (Task 4), `container.Client.Subnets` (Task 8).
-- Produces:
-
-```go
-type Options struct {
-	Web          http.Handler       // nil → 404 cho đường dẫn ngoài /api, /healthz, /readyz
-	TrustedProxy func(ip net.IP) bool // nil → chỉ loopback
-}
-func New(a *app.App, au *auth.Service, o Options) http.Handler
-func principal(r *http.Request) (auth.Principal, bool) // lấy từ context
-func clientIP(r *http.Request, trusted func(net.IP) bool) string // RemoteAddr; nếu peer tin cậy → phần tử **cuối** của X-Forwarded-For
-func TrustCIDRs(prefixes []netip.Prefix) func(net.IP) bool // tin peer thuộc một prefix hoặc loopback
-func ParseCIDRs(s string) ([]netip.Prefix, error)          // "10.0.0.0/8, 172.20.0.0/16" → prefixes; rỗng → nil
-// app
-func (s *Scheduler) AddFixed(spec string, fn func()) error // job cố định, không bị Reload gỡ
-// Reload: chỉ gỡ các entry ID của lịch backup đã đăng ký lần trước (Scheduler giữ []cron.EntryID), không bao giờ gỡ job AddFixed.
-```
-- Route **công khai**: `GET /healthz`, `GET /readyz`, `GET /api/ca`, `GET /api/setup/status` → `{"needed":bool,"token_configured":bool}`, `POST /api/setup` `{setup_token, username, credentials}`, `POST /api/auth/scram/start` `{client_first}` → `{server_first, scram_id}`, `POST /api/auth/scram/finish` `{scram_id, client_final, want_token?}` → `{server_final, user:{id,username,role}, session_id?}` + Set-Cookie, `POST /api/invites/lookup` `{token}` → `{username, purpose}`, `POST /api/invites/accept` `{token, credentials}`. **Không** có route nào nhận invite token trong đường dẫn.
-- Route **cần đăng nhập**: `POST /api/auth/logout`, `GET /api/me`, `POST /api/me/reauth/start|finish` (finish → `{server_final, reauth_token}`), `POST /api/me/password` `{reauth_token, credentials}`, `GET /api/me/sessions`, `DELETE /api/sessions/{id}` (`id` = hex của id_hash). **Admin**: `GET /api/users`, `POST /api/invites` `{username, role}` → `{link}`, `POST /api/users/{id}/reset` → `{link}`, `PATCH /api/users/{id}` `{role?, disabled?}`, `GET /api/sessions`.
-- Session JSON (cả `/api/me/sessions` và `/api/sessions`): `{id, user_id, username, created_at, last_seen_at, ip, user_agent, current}` — `current: true` khi `id_hash` = `SessionHash` của principal đang gọi.
-- `credentials` JSON: `{salt, iterations, stored_key, server_key}` (base64 chuẩn).
-- `session_id` chỉ có trong body khi request gửi `"want_token": true` (CLI). Cookie luôn được set.
-- Link mời: `https://<r.Host>/#/invite/<token>` (token sau `#`, không gửi lên server khi mở trang).
-- Middleware: principal từ cookie `fridge_session` hoặc `Authorization: Bearer <session>`; request dùng **cookie** + method không phải GET/HEAD/OPTIONS phải có `Origin` khớp `https://`+`r.Host` (hoặc `Sec-Fetch-Site: same-origin`) → không thì 403. Chưa setup + không principal → 401 `setup required`. Header mọi response: `Content-Security-Policy: default-src 'self'; frame-ancestors 'none'`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`.
-- Map lỗi: `ErrBadCredentials/ErrUnauthenticated` 401, `ErrBadSetupToken/ErrForbidden` 403, `ErrSetupDone/ErrLastAdmin/ErrConflict` 409, `ErrLocked` 429, `ErrInvalid/ErrInviteInvalid` 400.
-- Route cũ giữ nguyên handler nhưng đặt sau middleware (áp quyền ở Task 10). Tạm thời: user đã đăng nhập dùng được mọi route cũ; `createDB` và `startRestore` gán `OwnerID = p.UserID` ngay (Task 5 bắt buộc OwnerID); Backup now truyền `startedBy = &p.UserID`.
-- `main.go`: `auth.New(store, secretKeyBytes, env FRIDGE_SETUP_TOKEN)`; chưa có user và `FRIDGE_SETUP_TOKEN` rỗng → `log.Printf("WARNING: no users yet and FRIDGE_SETUP_TOKEN is not set — setup is impossible until it is")`. Proxy tin cậy: `FRIDGE_TRUSTED_PROXY` khác rỗng → `ParseCIDRs` (lỗi → thoát với lỗi); ngược lại `rt.Subnets(ctx, network)` (subnet `fridge-net`); lỗi → log, chỉ tin loopback. Bỏ yêu cầu `FRIDGE_TOKEN`. `a.Sched.AddFixed("@hourly", func(){ au.PurgeExpired(ctx) })` (lỗi → log). Sửa test API cũ dùng đăng nhập thay token.
-
-- [ ] **Step 1: Viết test** (httptest + store thật + `scram.NewClient`; helper `loginAs(t, srv, user, pw) (cookie, sessionID)`; user `alice`, `bob`)
-
-```go
-func TestSetupRequired(t *testing.T)       // chưa setup: GET /api/databases → 401 {"error":"setup required"}; /api/setup/status → needed true, token_configured đúng theo SetupToken; /api/ca → 200 PEM
-func TestSetupAndLoginWeb(t *testing.T)    // setup → scram start/finish → Set-Cookie fridge_session có HttpOnly, Secure, SameSite=Strict; GET /api/me bằng cookie → username
-func TestWebLoginNoTokenInBody(t *testing.T) // finish không want_token → body không có "session_id"; có want_token → có và Bearer dùng được
-func TestInviteTokenNotInPath(t *testing.T) // admin POST /api/invites → link; POST /api/invites/lookup {token} → username/purpose; GET /api/invites/<token> → 404 (route không tồn tại); POST /api/invites/accept {token, credentials} → đăng nhập được
-func TestCSRF(t *testing.T)                // POST bằng cookie, Origin "https://evil" → 403; Origin đúng → qua; Bearer không Origin → qua
-func TestClientIPTrustsOnlyProxy(t *testing.T) // TrustCIDRs([172.30.0.0/16]): peer 10.9.9.9 + XFF "1.2.3.4" → "10.9.9.9"; peer 172.30.0.5 + XFF "1.1.1.1, 5.6.7.8" → "5.6.7.8"; peer 127.0.0.1 tin; ParseCIDRs("bad") → lỗi
-func TestAdminOnlyRoutes(t *testing.T)     // user thường GET /api/users → 403; admin POST /api/invites → link chứa "/#/invite/"
-func TestSessionListCurrent(t *testing.T)  // alice có 2 phiên; GET /api/me/sessions bằng phiên 1 → đúng 1 phần tử current:true và là phiên 1
-func TestSecurityHeaders(t *testing.T)     // mọi response có CSP "default-src 'self'"
-func TestLogoutInvalidatesBearer(t *testing.T)
-// internal/app (package app)
-func TestFixedJobsSurviveReload(t *testing.T) // AddFixed("@hourly", fn) + 1 lịch enabled → Reload 2 lần → len(s.c.Entries()) == 2 và entry của job cố định vẫn còn (cùng EntryID); xóa lịch → Reload → còn đúng 1 entry (job cố định)
-```
-- [ ] **Step 2:** FAIL. **Step 3:** implement. **Step 4:** `go test ./internal/api/ ./internal/app/ ./cmd/fridge/` PASS.
-- [ ] **Step 5: Commit** `feat(api): session auth, SCRAM routes, users and invites`.
-
----
-
 ### Task 10: API — áp quyền trên mọi route tài nguyên
 
 **Files:** Modify `internal/api/api.go`, `internal/store/jobs.go` (`LastBackups`); Create `internal/api/admin_routes.go` (members, share, domains, superuser), `internal/api/authz_test.go`
 
 **Interfaces:**
-- Consumes: helper Task 5, tên/credentials Task 6, superuser Task 7, principal Task 9.
+- Consumes: helper Task 6, tên/credentials Task 7, superuser Task 8, principal Task 5.
 - Produces:
   - `listDBs` → `VisibleDatabases`; `dbOf` → 404 nếu `!CanAccessDB`; `createDB` → `OwnerID = p.UserID`, body thêm `db_user`, `db_password` (tùy chọn); `POST /api/restores` `new` thêm `db_user`, `db_password`.
   - `dbJSON` thêm `owner`; `connection_string` trong `GET /api/databases` và `GET /api/databases/{db}` **luôn che mật khẩu** (`postgresql://alice_shop:****@…`). `db_password` không bao giờ xuất hiện trong response.
@@ -635,7 +635,7 @@ func TestFixedJobsSurviveReload(t *testing.T) // AddFixed("@hourly", fn) + 1 l�
   - Destinations: list → `VisibleDestinations`; update/delete/test → 404 nếu không thấy, 403 nếu thấy (shared) nhưng `!CanManage`; create → `OwnerID = p.UserID`, `shared=false`; `PATCH /api/destinations/{id}` `{shared}` chỉ admin. `destJSON` thêm `owner`, `shared`; với destination shared mà người xem không manage: ẩn `endpoint`, `access_key`, `bucket`.
   - `GET /api/destinations/{id}/objects` → `ListRestorable` (trả `{objects:[{key,size,last_modified,database}], truncated}`).
   - Schedules: create/update cần DB access + `CanUseDestination(dest)` (không → 400 "destination not usable"). `PUT /api/schedules/{id}` và `DELETE /api/schedules/{id}`: tải lịch → DB của lịch → `CanAccessDB` (không → **404**, không lộ lịch tồn tại).
-  - Backup now: `startedBy = &p.UserID`; có `destination_id` → `CanUse` (không → 400 "destination not usable"); không có → quy tắc fallback của `StartBackup` (Task 5).
+  - Backup now: `startedBy = &p.UserID`; có `destination_id` → `CanUse` (không → 400 "destination not usable"); không có → quy tắc fallback của `StartBackup` (Task 6).
   - `getBackup`/`download`: backup thuộc DB có quyền (không → 404).
   - `startRestore`: `CanRestoreKey` (false → 404); `OwnerID = p.UserID`. `getRestore`: admin hoặc `started_by_id == p.UserID` (không → 404).
   - `/api/settings/allowlist` GET/PUT: chỉ admin (403).
@@ -673,7 +673,7 @@ func TestSuperuserAccess(t *testing.T)     // alice reveal superuser của alice
 - Modify: `internal/api/{api.go,auth_routes.go,admin_routes.go}` (gọi ghi audit), `internal/app/{backup.go,scheduler.go}` (sự kiện `system`), `cmd/fridge/main.go` (job dọn audit)
 
 **Interfaces:**
-- Consumes: Task 9 (route auth, `auth.Attempt`, `AddFixed`), Task 10 (route tài nguyên, `/connection`, domains, superuser).
+- Consumes: Task 5 (route auth, `auth.Attempt`, `AddFixed`), Task 10 (route tài nguyên, `/connection`, domains, superuser).
 
 ```go
 // store
@@ -692,7 +692,7 @@ func (l *Logger) Record(ctx context.Context, e store.AuditEntry) // không bao g
 func Actor(p auth.Principal) (id *int64, name string)
 ```
 - Các mã hành động (cố định, dùng đúng chuỗi; regex `^[a-z_]+\.[a-z_]+$`, không chữ số): `auth.setup`, `auth.login`, `auth.login_failed`, `auth.logout`, `auth.password_change`, `invite.create`, `invite.accept`, `user.role`, `user.disable`, `user.enable`, `user.reset_password`, `session.revoke`, `db.create`, `db.member_add`, `db.member_remove`, `db.reveal_password`, `superuser.reveal`, `superuser.rotate`, `backup.start`, `backup.download`, `restore.start`, `dumpcheck.start`, `dest.create`, `dest.update`, `dest.delete`, `dest.share`, `dest.test`, `domain.register`, `domain.remove`, `schedule.create`, `schedule.update`, `schedule.delete`, `settings.allowlist`, `settings.endpoint_allowlist`, `image.pull`, `image.prune`, `recover.allowlist`, `recover.reset_password`, `recover.promote`, `system.backup`, `system.retention_delete`.
-- Ở task này ghi audit cho mọi route đã có (Task 9, 10), gồm cả `domain.register`/`domain.remove`, `superuser.reveal`/`superuser.rotate`, `db.reveal_password` (trên `GET /api/databases/{db}/connection` đã có từ Task 10). Route của task sau (`dumpcheck.start`, `image.*`, `settings.endpoint_allowlist`, `recover.*`) do chính task đó ghi.
+- Ở task này ghi audit cho mọi route đã có (Task 5, 10), gồm cả `domain.register`/`domain.remove`, `superuser.reveal`/`superuser.rotate`, `db.reveal_password` (trên `GET /api/databases/{db}/connection` đã có từ Task 10). Route của task sau (`dumpcheck.start`, `image.*`, `settings.endpoint_allowlist`, `recover.*`) do chính task đó ghi.
 - Ghi ở tầng API sau khi biết kết quả (thành công **và** thất bại vì quyền/validate); `auth.login_failed` dùng `auth.Attempt` từ `LoginStart`/`LoginFinish` (kể cả `ErrLocked`): `att.UserID != nil` → actor = username đó, actor_id = id; ngược lại actor `anonymous` + `detail.username`. Scheduler ghi `system.backup` (kết quả backup) và `system.retention_delete`. **Detail không chứa** mật khẩu, credentials, secret, token.
 - API: `GET /api/audit?actor_id=&actor=<username>&action=&db=<name|id>&from=&to=&before=&limit=` → `{entries, next_before}` (`db` tra như `dbOf`: số → id, ngược lại tên đầy đủ; DB không thấy → kết quả rỗng, không 404 lộ tồn tại); `GET /api/audit.csv` (cùng tham số, `Content-Disposition: attachment`, cột: at, actor, ip, action, target_type, target_id, db, success, detail); `GET /api/activity` (admin) → `{jobs, online}` với jobs = `RunningJobs` (Task 15 nối thêm job pull image), online = `OnlineSessions(now − 5 phút)` gồm `username`.
 - `main.go`: `a.Sched.AddFixed("23 3 * * *", …PurgeAudit(now − 365 ngày)…)`.
@@ -721,7 +721,7 @@ func TestActivityAdminOnly(t *testing.T)   // user → 403; admin thấy job run
 - Modify: `internal/objstore/objstore.go` (`New` nhận guard), `internal/app/app.go` (`OpenObjects` nhận guard), `internal/app/destinations.go` (`objects()`), `internal/app/fakes_test.go`, `internal/api/api.go` (create/update destination), `internal/api/admin_routes.go` (setting allowlist endpoint)
 
 **Interfaces:**
-- Consumes: `Runtime.FridgeSubnets` (Task 8), principal/quyền (Task 9–10), audit logger (Task 11).
+- Consumes: `Runtime.FridgeSubnets` (Task 9), principal/quyền (Task 5–10), audit logger (Task 11).
 
 ```go
 // objstore
@@ -805,7 +805,7 @@ func TestRestoreHeaderChecks(t *testing.T) // fakeObjects chứa các file testd
 - Modify: `internal/container/docker.go` (RunSpec thêm `Cmd []string`, `NoNetwork bool`), `internal/api/admin_routes.go`, fakes
 
 **Interfaces:**
-- Consumes: `dumpcheck` (Task 13), store `DumpCheck` (Task 2), `RunSpec.Network` (Task 8), `CanRestoreKey` (Task 5), audit logger (Task 11).
+- Consumes: `dumpcheck` (Task 13), store `DumpCheck` (Task 2), `RunSpec.Network` (Task 9), `CanRestoreKey` (Task 6), audit logger (Task 11).
 
 ```go
 // container
@@ -842,7 +842,7 @@ func TestDumpCheckAPI(t *testing.T)        // bob POST với key backup của al
 - Modify: `internal/app/app.go` (interface `Images` riêng), `internal/api/admin_routes.go`, `internal/api/audit_routes.go` (`/api/activity` nối job pull), `cmd/fridge/main.go`
 
 **Interfaces:**
-- Consumes: audit logger + `/api/activity` (Task 11), `AddFixed` (Task 9), `store.Job` (Task 11).
+- Consumes: audit logger + `/api/activity` (Task 11), `AddFixed` (Task 5), `store.Job` (Task 11).
 
 ```go
 // container (Client thỏa app.Images)
@@ -894,7 +894,7 @@ func TestActivityIncludesPulls(t *testing.T) // pull đang chạy → GET /api/a
 - Create: `deploy/.env.example` (**file mới** — hiện chưa có trong git; không chứa secret thật), `cmd/fridge/webcert.go` (+ test)
 
 **Interfaces:**
-- Consumes: `AddFixed` (Task 9), `ReconcileNetworks`/`FRIDGE_TRAEFIK_CONTAINER` (Task 8).
+- Consumes: `AddFixed` (Task 5), `ReconcileNetworks`/`FRIDGE_TRAEFIK_CONTAINER` (Task 9).
 
 ```go
 func (c *CA) IssueNames(names []string, validFor time.Duration) (certPEM, keyPEM []byte, err error) // tên là IP → IPAddresses, còn lại → DNSNames; Issue(domain) gọi IssueNames([]string{domain})
@@ -921,7 +921,7 @@ func TestEnsureWebCert(t *testing.T)       // lần 1 tạo; lần 2 cùng hosts
 func TestWriteBaseHTTPS(t *testing.T)      // yaml: fridge-web entryPoints [websecure] có tls; fridge-redirect dùng to-https; redirectScheme port "8443"; tls.stores.default.defaultCertificate.certFile == webCert; webCert rỗng → lỗi
 func TestSetAllowlistKeepsWebCert(t *testing.T) // app.SetAllowlist với WebCert/WebKey đặt → _base.yml vẫn có defaultCertificate
 ```
-- [ ] **Step 2:** FAIL. **Step 3:** implement + file deploy + README. **Step 4:** `go test ./...` PASS; `docker compose -f deploy/docker-compose.yml --env-file deploy/.env.example config -q` OK (điền giá trị giả cho biến bắt buộc qua file tạm nếu cần); `grep -c FRIDGE_TOKEN deploy/docker-compose.yml deploy/.env.example` = 0.
+- [ ] **Step 2:** FAIL. **Step 3:** implement + file deploy + README. **Step 4:** `go test ./...` PASS; tạo file tạm `/tmp/fridge-env-check` = nội dung `deploy/.env.example` với giá trị giả cho mọi biến bắt buộc (`FRIDGE_META_PASSWORD=x`, `FRIDGE_SECRET_KEY=$(openssl rand -base64 32)`, `FRIDGE_SETUP_TOKEN=x`) → `docker compose -f deploy/docker-compose.yml --env-file /tmp/fridge-env-check config -q` OK; đồng thời `--env-file deploy/.env.example` (để trống) phải **báo lỗi thiếu biến** (chứng minh guard `:?` còn); `grep -c FRIDGE_TOKEN deploy/docker-compose.yml deploy/.env.example` = 0.
 - [ ] **Step 5: Commit** `feat(deploy): HTTPS on :8443, Postgres 18 metadata, fixed Traefik container`.
 
 ---
@@ -931,7 +931,7 @@ func TestSetAllowlistKeepsWebCert(t *testing.T) // app.SetAllowlist với WebCer
 **Files:** Modify `cmd/fridge/cli.go`, `cmd/fridge/main.go`; Create `cmd/fridge/login.go`, `cmd/fridge/recover.go` + tests
 
 **Interfaces:**
-- Consumes: API Task 9 (auth routes), `scram` Task 3, `auth` Task 4, `app`/`proxy`/`store` (recover), audit logger Task 11, cert web Task 16.
+- Consumes: API Task 5 (auth routes), `scram` Task 3, `auth` Task 4, `app`/`proxy`/`store` (recover), audit logger Task 11, cert web Task 16.
 - Produces lệnh:
   - `fridge login [--user U] [--password-stdin] [--yes] [--ca-file F]`: lần đầu chưa có CA → GET `/api/ca` (chỉ request này bỏ qua kiểm TLS), in `SHA256 fingerprint: AA:BB:…`, hỏi `Trust this CA? [y/N]` (`--yes` bỏ qua hỏi), lưu `~/.config/fridge/ca.pem`; SCRAM qua `/api/auth/scram/*` với `want_token:true`, `Verify` server signature; lưu `~/.config/fridge/session` (JSON `{url, session}`, 0600). Nhập mật khẩu không echo bằng `stty -echo` (lỗi → cảnh báo, đọc có echo).
   - `fridge logout`, `fridge whoami`.
@@ -998,7 +998,7 @@ func TestCredentialFlags(t *testing.T)   // --random-credentials cùng --db-user
 - Modify: `cmd/fridge/main.go` (truyền `Options.Web = web.Handler()`)
 
 **Interfaces:**
-- Consumes: API Task 9.
+- Consumes: API Task 5.
 
 ```go
 func Handler() http.Handler // phục vụ embed static/; "/" → index.html; file không có → 404; Cache-Control: no-cache cho index.html, max-age=86400 cho /vendor/
@@ -1037,7 +1037,7 @@ func TestNoInlineScripts(t *testing.T)  // quét mọi .html trong embed: không
 
 **Files:** Create `internal/web/static/js/pages/{databases.js,database.js,restore.js,destinations.js,domains.js}`; Modify `static/js/router.js` (route `#/databases`, `#/databases/:name`, `#/restore`, `#/destinations`, `#/domains`), `static/js/layout.js` (mục Domains), `static/css/app.css`, `scripts/ui-smoke/smoke.mjs`
 
-**Interfaces:** chỉ dùng API Task 9–14 qua `api.js`.
+**Interfaces:** chỉ dùng API Task 5–14 qua `api.js`.
 - **Databases**: bảng (tên, engine/version, domain, trạng thái màu, backup gần nhất từ `last_backup {status, finished_at}`, cột owner nếu admin), nút "+ Tạo DB" (modal: engine, version dropdown từ `/api/engines`, **tên** (input-group: tiền tố cố định `<username>_` + ô hậu tố `^[a-z0-9][a-z0-9-]{0,29}$`), **domain = dropdown các domain đã đăng ký của mình** (rỗng → link sang trang Domains), **User** (input-group: tiền tố cố định `<username>_` + ô hậu tố `^[a-z0-9_]{1,15}$`) + **Mật khẩu** tùy chọn — mỗi ô có nút 🎲 **Ngẫu nhiên** (`crypto.getRandomValues`: hậu tố 8 `[a-z0-9]`, mật khẩu 24 `[A-Za-z0-9-_.~]`), ô mật khẩu có Hiện/Ẩn + Copy, kiểm tra cùng quy tắc với server trước khi gửi; để trống = server tự sinh) → sau tạo chuyển sang chi tiết. Form restore vào node mới có cùng các ô.
 - **Chi tiết DB** (mockup đã duyệt): header + nút **Backup now** (poll trạng thái backup 2–3s); tab **Kết nối** (khối **User ứng dụng** và — chỉ owner/admin — khối **Superuser** `su_<node_key>` với Hiện/Copy (`POST …/superuser/reveal`) và nút **Rotate** (có xác nhận); nhãn "kiểu cũ" nếu `legacy`; connection string che mật khẩu; nút Hiện/Copy gọi `GET /api/databases/{db}/connection` — mỗi lần là một dòng audit; host/user/db, link tải CA `/api/ca`); tab **Backups** (bảng: thời gian, nguồn lịch/tay, destination, dung lượng, trạng thái, Tải · Restore… · Log trong modal); tab **Lịch backup** (CRUD, destination dropdown = destination có thể dùng); tab **Người quản lý** (chỉ owner/admin sửa; người khác chỉ xem; lỗi thêm hiện "không thêm được").
 - **Restore**: chọn destination → bảng file (`/objects`, ô tìm kiếm, cột DB) → chọn file → nút **Kiểm tra kỹ** (job, hiện kết quả) và form node mới (tên, domain, version — gợi ý version nguồn) → **Restore** → trang trạng thái polling; lỗi mức 1 hiện ngay dưới form. "Restore…" từ tab Backups mở trang này với file chọn sẵn.
@@ -1057,7 +1057,7 @@ func TestNoInlineScripts(t *testing.T)  // quét mọi .html trong embed: không
 
 **Files:** Create `internal/web/static/js/pages/{settings.js,users.js,sessions.js,images.js,audit.js,activity.js}`; Modify `static/js/router.js` (route `#/settings`, `#/users`, `#/sessions`, `#/images`, `#/audit`, `#/activity`), `static/js/layout.js` (mục Audit log, Hoạt động; chấm báo Images khi có bản mới), `scripts/ui-smoke/smoke.mjs`
 
-**Interfaces:** chỉ dùng API Task 9–16 qua `api.js`.
+**Interfaces:** chỉ dùng API Task 5–16 qua `api.js`.
 - **Settings**: allowlist (admin; textarea CIDR, lưu), **allowlist endpoint S3** (admin; textarea host, `PUT /api/settings/endpoint-allowlist`), tải CA cert, phiên của tôi (bảng: tạo lúc, hoạt động cuối, IP, UA, nút thu hồi; đánh dấu phiên có `current: true` là "phiên hiện tại", không cho thu hồi từ đây).
 - **Users** (admin): bảng user (username, role, trạng thái, tạo lúc), nút **Mời** (username — kiểm `^[a-z][a-z0-9]{2,15}$`, role → hiện link để copy), Khóa/Mở, Nâng/Hạ admin (lỗi admin cuối hiện rõ), **Reset mật khẩu** (hiện link).
 - **Sessions** (admin): mọi phiên (kèm username), thu hồi.

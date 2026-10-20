@@ -46,7 +46,7 @@ Team nội bộ (dev/ops) hiện tạo DB bằng tay/docker-compose cho từng d
 ```
 
 - **Control plane** = Fridge. **Data plane** = Traefik + ProxySQL + container DB. Data plane không phụ thuộc Fridge đang chạy.
-- Container DB **không publish port ra host**; chỉ reachable qua `fridge-net` sau proxy.
+- Container DB **không publish port ra host**; mỗi node nằm trong network riêng `fridge-node-<node_key>` (internal) chỉ có Traefik kết nối — xem `2026-10-20-fridge-web-admin-design.md` (cô lập mạng).
 
 ### Stack (lựa chọn của Claude, người dùng giao quyền)
 
