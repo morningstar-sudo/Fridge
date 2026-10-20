@@ -158,6 +158,9 @@ func (a *App) ConnString(d store.Database) (string, error) {
 
 // removeNode tears down container, volume, route and cert, then marks the row "error". Failures are only logged.
 func (a *App) removeNode(ctx context.Context, d store.Database) {
+	// Rollback must survive a cancelled request context.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+	defer cancel()
 	id := d.ContainerID
 	if id == "" {
 		id = d.Volume // container name == volume name

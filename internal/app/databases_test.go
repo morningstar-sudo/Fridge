@@ -158,3 +158,52 @@ func TestSetAllowlist(t *testing.T) {
 		t.Fatalf("got = %v", got)
 	}
 }
+
+func TestRemoveNodeCleansProvisionedDatabase(t *testing.T) {
+	a, rt := newTestApp(t)
+	ctx := context.Background()
+	d, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "abc", Domain: "abc.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := []string{
+		filepath.Join(a.TraefikDir, "dynamic", fmt.Sprintf("db-%d.yml", d.ID)),
+		filepath.Join(a.TraefikDir, "certs", fmt.Sprintf("db-%d.crt", d.ID)),
+		filepath.Join(a.TraefikDir, "certs", fmt.Sprintf("db-%d.key", d.ID)),
+	}
+	for _, p := range files {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("precondition: %v", err)
+		}
+	}
+	d, _ = a.Store.GetDatabase(ctx, d.ID)
+	a.removeNode(ctx, d)
+	for _, p := range files {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s still exists (%v)", p, err)
+		}
+	}
+	if len(rt.removes) != 1 || rt.removes[0] != (removeCall{"ctr-fridge-postgres-abc", "fridge-postgres-abc"}) {
+		t.Fatalf("removes = %+v", rt.removes)
+	}
+	if got, _ := a.Store.GetDatabase(ctx, d.ID); got.Status != "error" {
+		t.Fatalf("status = %s", got.Status)
+	}
+}
+
+func TestCreateDatabaseRollbackSurvivesCancelledContext(t *testing.T) {
+	a, rt := newTestApp(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	rt.onWait = cancel
+	rt.healthErr = context.Canceled
+	if _, err := a.CreateDatabase(ctx, CreateRequest{Engine: "postgres", Name: "abc", Domain: "abc.com"}); err == nil {
+		t.Fatal("want error")
+	}
+	if len(rt.removes) != 1 {
+		t.Fatalf("removes = %+v", rt.removes)
+	}
+	dbs, _ := a.Store.ListDatabases(context.Background())
+	if len(dbs) != 1 || dbs[0].Status != "error" {
+		t.Fatalf("dbs = %+v", dbs)
+	}
+}

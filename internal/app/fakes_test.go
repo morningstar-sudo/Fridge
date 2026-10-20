@@ -24,6 +24,7 @@ type fakeRuntime struct {
 	healthErr error
 	pingErr   error
 	alerts    []string
+	onWait    func()
 	execFn    func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int
 }
 
@@ -37,6 +38,9 @@ func (f *fakeRuntime) Run(ctx context.Context, s container.RunSpec) (string, err
 }
 
 func (f *fakeRuntime) WaitHealthy(ctx context.Context, id string, d time.Duration) error {
+	if f.onWait != nil {
+		f.onWait()
+	}
 	return f.healthErr
 }
 
@@ -50,6 +54,9 @@ func (f *fakeRuntime) Exec(ctx context.Context, id string, cmd []string, stdin i
 func (f *fakeRuntime) Remove(ctx context.Context, id, volume string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err // like the real client: a dead ctx removes nothing
+	}
 	f.removes = append(f.removes, removeCall{id, volume})
 	return nil
 }
