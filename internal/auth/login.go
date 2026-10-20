@@ -8,6 +8,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"time"
 
 	"fridge/internal/scram"
 	"fridge/internal/store"
@@ -98,10 +99,27 @@ func (s *Service) start(ctx context.Context, clientFirst, ip string, reauthFor *
 		return "", "", att, ErrLocked
 	}
 	s.sweep()
-	if len(s.scram) >= maxPending {
-		return "", "", att, ErrLocked
+	// ponytail: O(n) scan, n <= maxPending; keep a per-IP counter map if this gets hot.
+	perIP := 0
+	for _, p := range s.scram {
+		if p.ip == ip {
+			perIP++
+		}
 	}
-	s.scram[id] = &pending{srv: srv, user: u, username: username, ip: ip, reauth: reauthFor != nil, expires: s.now().Add(ScramStateTTL)}
+	if perIP >= maxPendingPerIP {
+		return "", "", att, ErrBusy
+	}
+	if len(s.scram) >= maxPending { // evict the oldest rather than refuse everyone
+		var oldK string
+		var oldT time.Time
+		for k, p := range s.scram {
+			if oldK == "" || p.expires.Before(oldT) {
+				oldK, oldT = k, p.expires
+			}
+		}
+		delete(s.scram, oldK)
+	}
+	s.scram[id] = &pending{srv: srv, user: u, att: att, username: username, ip: ip, reauth: reauthFor != nil, expires: s.now().Add(ScramStateTTL)}
 	return srv.ServerFirst, id, att, nil
 }
 
@@ -124,35 +142,36 @@ func (s *Service) finish(ctx context.Context, scramID, clientFinal, ip string, r
 	if p == nil || p.reauth != reauth || p.ip != ip || s.now().After(p.expires) {
 		return "", store.User{}, att, ErrBadCredentials
 	}
-	att.Username = clip(p.username)
+	att = p.att
 	key := limiterKey(p.username, ip)
+	// Check the lock and spend one attempt atomically, so parallel finishes of
+	// pre-started states cannot exceed the budget. Success refunds below.
 	s.mu.Lock()
-	lk := s.locked(key) // state created before the lock must not bypass it
-	s.mu.Unlock()
-	if lk {
+	if s.locked(key) {
+		s.mu.Unlock()
 		return "", store.User{}, att, ErrLocked
+	}
+	s.recordFail(key)
+	s.mu.Unlock()
+	// Same DB lookup on every path (id 0 -> ErrNotFound) so timing does not reveal existence.
+	var id int64
+	if p.user.ID != 0 {
+		id = p.user.ID
 	}
 	var u store.User
 	stored, server := make([]byte, keyLen), make([]byte, keyLen)
-	if p.user.ID != 0 {
-		// re-read: the account may have been disabled or changed since start
-		cur, err := s.Store.GetUser(ctx, p.user.ID)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return "", store.User{}, att, err
-		}
-		if err == nil && !cur.Disabled {
-			u, att.UserID = cur, &cur.ID
-			stored, server = cur.StoredKey, cur.ServerKey
-		}
-	} else {
-		rand.Read(stored)
-		rand.Read(server)
+	rand.Read(stored)
+	rand.Read(server)
+	cur, err := s.Store.GetUser(ctx, id)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return "", store.User{}, att, err
+	}
+	if err == nil && !cur.Disabled {
+		u = cur
+		stored, server = cur.StoredKey, cur.ServerKey
 	}
 	sf, err := p.srv.Finish(clientFinal, stored, server)
 	if err != nil || u.ID == 0 {
-		s.mu.Lock()
-		s.recordFail(key)
-		s.mu.Unlock()
 		return "", store.User{}, att, ErrBadCredentials
 	}
 	s.mu.Lock()
@@ -190,7 +209,7 @@ func (s *Service) ReauthFinish(ctx context.Context, p Principal, scramID, client
 	}
 	tok, hash := newToken()
 	s.mu.Lock()
-	s.reauths[string(hash)] = reauthTok{userID: p.UserID, expires: s.now().Add(ReauthTTL)}
+	s.reauths[string(hash)] = reauthTok{userID: p.UserID, session: string(p.SessionHash), expires: s.now().Add(ReauthTTL)}
 	s.mu.Unlock()
 	return sf, tok, nil
 }
@@ -202,5 +221,5 @@ func (s *Service) consumeReauth(p Principal, token string) bool {
 	defer s.mu.Unlock()
 	r, ok := s.reauths[k]
 	delete(s.reauths, k)
-	return ok && r.userID == p.UserID && !s.now().After(r.expires)
+	return ok && r.userID == p.UserID && r.session == string(p.SessionHash) && !s.now().After(r.expires)
 }

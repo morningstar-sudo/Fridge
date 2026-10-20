@@ -59,7 +59,7 @@ type env struct {
 
 func newEnv(t *testing.T) *env {
 	e := &env{t: t, now: time.Now(), ctx: context.Background()}
-	e.s = New(storetest.New(t), []byte("secret"), setupTok)
+	e.s = mustNew(t, storetest.New(t), setupTok)
 	e.s.Now = func() time.Time { return e.now }
 	return e
 }
@@ -133,7 +133,7 @@ func TestSetup(t *testing.T) {
 	if need, _ := e.s.SetupNeeded(e.ctx); !need {
 		t.Fatal("setup should be needed")
 	}
-	noTok := New(e.s.Store, nil, "")
+	noTok := mustNew(t, e.s.Store, "")
 	if noTok.TokenConfigured() || !e.s.TokenConfigured() {
 		t.Fatal("TokenConfigured wrong")
 	}
@@ -578,5 +578,130 @@ func TestRevokeSession(t *testing.T) {
 	is(t, err, ErrUnauthenticated)
 	if n, err := e.s.PurgeExpired(e.ctx); err != nil || n != 0 {
 		t.Fatalf("%d %v", n, err)
+	}
+}
+
+func mustNew(t *testing.T, st *store.Store, tok string) *Service {
+	t.Helper()
+	s, err := New(st, bytes.Repeat([]byte{9}, MinSecretLen), tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestNewRejectsShortSecret(t *testing.T) {
+	if _, err := New(nil, make([]byte, MinSecretLen-1), ""); err == nil {
+		t.Fatal("short secret accepted")
+	}
+}
+
+func TestConcurrentFinishBudget(t *testing.T) {
+	e := newEnv(t)
+	e.admin()
+	type st struct{ id, final string }
+	var sts []st
+	for i := range 10 {
+		c := scram.NewClient("alice", "", "n"+string(rune('a'+i)))
+		first, id, _, err := e.s.LoginStart(e.ctx, c.First(), ip1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		final, _ := c.FinalWithSalted(first, wrong)
+		sts = append(sts, st{id, final})
+	}
+	errs := make(chan error, len(sts))
+	for _, x := range sts {
+		go func() {
+			_, _, _, _, err := e.s.LoginFinish(e.ctx, x.id, x.final, ip1, "ua")
+			errs <- err
+		}()
+	}
+	bad, locked := 0, 0
+	for range sts {
+		switch err := <-errs; {
+		case errors.Is(err, ErrBadCredentials):
+			bad++
+		case errors.Is(err, ErrLocked):
+			locked++
+		default:
+			t.Fatal(err)
+		}
+	}
+	if bad != LoginMaxFails || locked != 10-LoginMaxFails {
+		t.Fatalf("bad=%d locked=%d", bad, locked)
+	}
+	_, _, _, err := e.s.LoginStart(e.ctx, "n,,n=alice,r=abc", ip1)
+	is(t, err, ErrLocked)
+}
+
+func TestPendingCaps(t *testing.T) {
+	e := newEnv(t)
+	for range maxPendingPerIP {
+		if _, _, _, err := e.s.LoginStart(e.ctx, "n,,n=nobody,r=abc", ip1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, _, _, err := e.s.LoginStart(e.ctx, "n,,n=nobody,r=abc", ip1)
+	is(t, err, ErrBusy)
+	if _, _, _, err := e.s.LoginStart(e.ctx, "n,,n=nobody,r=abc", ip2); err != nil {
+		t.Fatalf("other ip: %v", err)
+	}
+	// expired states free the per-IP budget
+	e.now = e.now.Add(ScramStateTTL + time.Second)
+	if _, _, _, err := e.s.LoginStart(e.ctx, "n,,n=nobody,r=abc", ip1); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGlobalCapEvictsOldest(t *testing.T) {
+	e := newEnv(t)
+	e.admin()
+	c := scram.NewClient("alice", "", "abc")
+	first, oldest, _, _ := e.s.LoginStart(e.ctx, c.First(), "9.9.9.9")
+	// fill with other-IP states directly (cheaper than 10000 starts)
+	e.s.mu.Lock()
+	for i := 0; len(e.s.scram) < maxPending; i++ {
+		e.s.scram[string(rune(i+1000))+"x"] = &pending{ip: "bulk", expires: e.now.Add(time.Hour)}
+	}
+	e.s.mu.Unlock()
+	if _, _, _, err := e.s.LoginStart(e.ctx, "n,,n=nobody,r=abc", ip2); err != nil {
+		t.Fatalf("full map must evict, got %v", err)
+	}
+	final, _ := c.FinalWithSalted(first, creds(goodPass).salted)
+	_, _, _, _, err := e.s.LoginFinish(e.ctx, oldest, final, "9.9.9.9", "ua")
+	is(t, err, ErrBadCredentials) // oldest was evicted
+}
+
+func TestReauthTokenBoundToSession(t *testing.T) {
+	e := newEnv(t)
+	e.admin()
+	r1, r2 := e.ok("alice", goodPass), e.ok("alice", goodPass)
+	p1, p2 := e.principal(r1.sessionID), e.principal(r2.sessionID)
+	tok := e.reauth(p1, goodPass)
+	is(t, e.s.ChangePassword(e.ctx, p2, tok, creds(otherPass).Credentials), ErrForbidden)
+}
+
+func TestAttemptUserIDForDisabled(t *testing.T) {
+	e := newEnv(t)
+	a := e.admin()
+	ap := Principal{UserID: a.ID, Username: "alice", Role: "admin"}
+	e.invite(ap, "bob", "user")
+	bob, _ := e.s.Store.GetUserByName(e.ctx, "bob")
+	if err := e.s.SetDisabled(e.ctx, ap, bob.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	r := e.login("bob", creds(goodPass).salted, ip1)
+	is(t, r.err, ErrBadCredentials)
+	if r.att.UserID == nil || *r.att.UserID != bob.ID {
+		t.Fatalf("att = %+v", r.att)
+	}
+	for range 4 {
+		e.login("bob", wrong, ip1)
+	}
+	r = e.login("bob", wrong, ip1)
+	is(t, r.err, ErrLocked)
+	if r.att.UserID == nil {
+		t.Fatalf("locked att = %+v", r.att)
 	}
 }

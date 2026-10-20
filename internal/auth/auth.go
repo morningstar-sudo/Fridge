@@ -30,6 +30,8 @@ const (
 
 	saltLen, keyLen = 16, 32
 	maxPending      = 10000
+	maxPendingPerIP = 20
+	MinSecretLen    = 32
 	sweepThreshold  = 1024
 	maxAttemptName  = 64
 )
@@ -44,6 +46,7 @@ var (
 	ErrForbidden       = errors.New("forbidden")
 	ErrLastAdmin       = store.ErrLastAdmin
 	ErrInviteInvalid   = errors.New("invite invalid or expired")
+	ErrBusy            = errors.New("too many pending logins")
 )
 
 var usernameRe = regexp.MustCompile(`^[a-z][a-z0-9]{2,15}$`)
@@ -82,6 +85,7 @@ type Attempt struct {
 type pending struct {
 	srv      *scram.Server
 	user     store.User // zero ID = fake (unknown or disabled user)
+	att      Attempt    // UserID set whenever the account exists, even if disabled
 	username string
 	ip       string
 	reauth   bool
@@ -95,6 +99,7 @@ type failState struct {
 
 type reauthTok struct {
 	userID  int64
+	session string
 	expires time.Time
 }
 
@@ -111,9 +116,12 @@ type Service struct {
 	reauths map[string]reauthTok
 }
 
-func New(st *store.Store, secret []byte, setupToken string) *Service {
+func New(st *store.Store, secret []byte, setupToken string) (*Service, error) {
+	if len(secret) < MinSecretLen {
+		return nil, errors.New("auth: secret must be at least 32 bytes")
+	}
 	return &Service{Store: st, Secret: secret, SetupToken: setupToken,
-		scram: map[string]*pending{}, fails: map[string]*failState{}, reauths: map[string]reauthTok{}}
+		scram: map[string]*pending{}, fails: map[string]*failState{}, reauths: map[string]reauthTok{}}, nil
 }
 
 func (s *Service) now() time.Time {
