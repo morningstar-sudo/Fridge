@@ -5,8 +5,11 @@ package container
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -68,6 +71,12 @@ func TestRunExecRemove(t *testing.T) {
 	}
 	if code, _ := run("", "sh", "-c", "exit 3"); code != 3 {
 		t.Fatalf("exit code %d", code)
+	}
+
+	// stdin that fails mid-stream must surface as an error, not a clean exit
+	bad := io.MultiReader(strings.NewReader("select 1;"), iotest.ErrReader(errors.New("boom")))
+	if code, err := c.Exec(ctx, id, []string{"psql", "-U", "postgres", "-tA"}, bad, io.Discard, io.Discard); err == nil {
+		t.Fatalf("expected stdin error, got code %d", code)
 	}
 
 	if err := c.Remove(ctx, id, spec.Volume); err != nil {

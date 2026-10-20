@@ -144,20 +144,44 @@ func (c *Client) Exec(ctx context.Context, id string, cmd []string, stdin io.Rea
 		return -1, err
 	}
 	defer hj.Close()
+	inErr := make(chan error, 1)
 	if stdin != nil {
 		go func() {
-			io.Copy(hj.Conn, stdin)
+			if _, err := io.Copy(hj.Conn, stdin); err != nil {
+				inErr <- err
+				hj.Close() // abort: never signal a clean EOF for truncated input
+				return
+			}
 			hj.CloseWrite()
 		}()
 	}
-	if _, err := stdcopy.StdCopy(stdout, stderr, hj.Reader); err != nil {
-		return -1, err
+	_, outErr := stdcopy.StdCopy(stdout, stderr, hj.Reader)
+	select {
+	case err := <-inErr:
+		return -1, fmt.Errorf("exec stdin: %w", err)
+	default:
 	}
-	in, err := c.cli.ContainerExecInspect(ctx, ex.ID)
-	if err != nil {
-		return -1, err
+	if outErr != nil {
+		return -1, outErr
 	}
-	return in.ExitCode, nil
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		in, err := c.cli.ContainerExecInspect(ctx, ex.ID)
+		if err != nil {
+			return -1, err
+		}
+		if !in.Running {
+			return in.ExitCode, nil
+		}
+		if time.Now().After(deadline) {
+			return -1, fmt.Errorf("exec %s still running after output closed", ex.ID)
+		}
+		select {
+		case <-ctx.Done():
+			return -1, ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 func (c *Client) Remove(ctx context.Context, id, vol string) error {
