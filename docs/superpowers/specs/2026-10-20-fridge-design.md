@@ -261,6 +261,17 @@ deploy/docker-compose.yml   # fridge, traefik, proxysql (+ minio cho dev)
 deploy/traefik.yml          # static config
 ```
 
+## Hai user trên mỗi node — ánh xạ theo engine (áp dụng khi thêm engine ở giai đoạn 4)
+
+Mỗi node có **superuser riêng** `su_<tên DB>` (Fridge giữ; owner/admin xem và rotate) và **user ứng dụng** (người dùng tự đặt hoặc ngẫu nhiên; không phải superuser; toàn quyền trên database của nó). Chi tiết ở `2026-10-20-fridge-web-admin-design.md` mục 13b-2.
+
+| Engine | Superuser | User ứng dụng | Ghi chú |
+|---|---|---|---|
+| PostgreSQL | `POSTGRES_USER` | owner database + schema `public`, `NOSUPERUSER NOCREATEDB NOCREATEROLE` | giai đoạn 2 |
+| MongoDB | root trong `admin` (`MONGO_INITDB_ROOT_*`) | user role `dbOwner` trên database của nó | |
+| MySQL / MariaDB | `su_<tên>` `ALL PRIVILEGES ON *.* WITH GRANT OPTION`; `root` nội bộ có mật khẩu ngẫu nhiên riêng, không cấp cho ai | `ALL PRIVILEGES ON <db>.*` | ProxySQL route theo username → **user ứng dụng phải duy nhất trên mọi node MySQL/MariaDB** (kiểm khi tạo); `su_<tên>` vốn đã duy nhất nên cũng đi qua ProxySQL được |
+| Redis (≥ 6) | user ACL `su_<tên>` `on +@all ~* &*`; user `default` tắt | user ACL `on ~* &* +@all -@admin -@dangerous` | Redis không có "database có owner" → gần tương đương: đọc ghi mọi key, không lệnh quản trị/nguy hiểm |
+
 ## Giai đoạn triển khai
 
 1. **Xương sống với Postgres**: store, Docker, engine Postgres có catalog version, Traefik SNI route + IP allowlist, internal CA, API + CLI, S3 destinations + test, schedule + Backup now, restore từ file S3 vào node mới, alert backup fail, `/healthz` + `/readyz` + healthcheck compose. Chạy được end-to-end.

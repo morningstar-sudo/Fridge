@@ -97,7 +97,7 @@ deploy/{docker-compose.yml,traefik.yml,.env.example}, README.md
        - `users`: `octet_length(scram_salt) = 16`, `octet_length(stored_key) = 32`, `octet_length(server_key) = 32`, `scram_iterations BETWEEN 600000 AND 10000000`.
        - `invites`: `role IN ('admin','user')`, `expires_at > created_at`, `(purpose = 'reset_password') = (user_id IS NOT NULL)`.
        - `sessions`: `expires_at > created_at`.
-    6a. `owner_superusers(user_id BIGINT PRIMARY KEY REFERENCES users(id), su_name TEXT NOT NULL UNIQUE CHECK (su_name ~ '^su_[a-z0-9_]{1,59}$'), password_enc TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), rotated_at TIMESTAMPTZ NULL)`; `ALTER TABLE databases ADD admin_user TEXT NOT NULL DEFAULT ''` (rỗng = DB kiểu cũ giai đoạn 1).
+    6a. `ALTER TABLE databases ADD admin_user TEXT NOT NULL DEFAULT '', ADD admin_password_enc TEXT NOT NULL DEFAULT ''` (rỗng = DB kiểu cũ giai đoạn 1) + `CHECK (admin_user = '' OR admin_user ~ '^su_[a-z0-9_-]{1,60}$')` + `CREATE UNIQUE INDEX db_admin_user ON databases(admin_user) WHERE admin_user <> '' AND status NOT IN ('error','deleted')`.
     6b. `audit_log(id BIGINT identity PK, at TIMESTAMPTZ NOT NULL DEFAULT now(), actor_id BIGINT NULL REFERENCES users(id), actor TEXT NOT NULL, ip TEXT NOT NULL DEFAULT '', action TEXT NOT NULL CHECK (action ~ '^[a-z_]+\.[a-z_]+$'), target_type TEXT NOT NULL DEFAULT '', target_id TEXT NOT NULL DEFAULT '', db_id BIGINT NULL REFERENCES databases(id), success BOOLEAN NOT NULL, detail JSONB NOT NULL DEFAULT '{}')` + index `(at DESC)`, `(actor_id, at DESC)`, `(db_id, at DESC)`; trigger `BEFORE UPDATE OR DELETE ON audit_log`: UPDATE luôn `RAISE` (P0001); DELETE chỉ cho phép khi `OLD.at < now() - interval '365 days'`.
     7. Trigger `BEFORE INSERT OR UPDATE ON database_members`: `RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'owner cannot be a member'` khi `user_id` = `databases.owner_id`.
   - `CreateFirstAdmin` (cùng transaction, sau khi gán owner): `ALTER TABLE databases ALTER owner_id SET NOT NULL; ALTER TABLE destinations ALTER owner_id SET NOT NULL`.
@@ -182,10 +182,7 @@ func (s *Store) StartDumpCheck(ctx, c *DumpCheck) error
 func (s *Store) FinishDumpCheck(ctx, id int64, status string, result map[string]any, log, errText string) error
 func (s *Store) GetDumpCheck(ctx, id int64) (DumpCheck, error)
 // Database thêm AdminUser string (cột admin_user; CreateDatabase ghi).
-type OwnerSuperuser struct { UserID int64; SUName, PasswordEnc string; CreatedAt time.Time; RotatedAt *time.Time }
-func (s *Store) GetOwnerSuperuser(ctx, userID int64) (OwnerSuperuser, error)       // không có → ErrNotFound
-func (s *Store) CreateOwnerSuperuser(ctx, x *OwnerSuperuser) error                 // đã có cho user → ErrConflict
-func (s *Store) SetOwnerSuperuserPassword(ctx, userID int64, passwordEnc string) error // cập nhật rotated_at
+func (s *Store) SetDatabaseAdminPassword(ctx, id int64, passwordEnc string) error // Database thêm AdminUser, AdminPasswordEnc (CreateDatabase ghi cả hai)
 func (s *Store) ListDatabasesByOwner(ctx, userID int64) ([]Database, error)        // status running|stopped
 type ImageCheck struct { ImageRef, LocalDigest, LocalVersion, RemoteDigest, RemoteVersion, Error string; CheckedAt time.Time }
 func (s *Store) UpsertImageCheck(ctx, c ImageCheck) error
@@ -201,7 +198,7 @@ func TestVisibleDestinations(t *testing.T) // A dA (riêng), admin dS (shared=tr
 func TestDestinationSoftDelete(t *testing.T) // còn schedule → ErrInUse; xóa lịch rồi xóa → không còn trong List/Visible, GetDestination vẫn có (DeletedAt != nil, secret rỗng); backups cũ vẫn JOIN được; tạo lại cùng owner + cùng tên → OK; owner khác cùng tên → OK, cùng owner trùng tên khi chưa xóa → ErrConflict
 func TestBackupsOnDestination(t *testing.T)// backup ok của db1(A) và db2(B) trên dS → visibleTo=&A chỉ trả db1; nil trả 2; GetBackupByKey tìm đúng, key lạ → ErrNotFound
 func TestDumpAndImageChecks(t *testing.T)  // Start/Finish/Get dump check (result JSON round-trip); Upsert image check 2 lần → 1 row, giá trị mới
-func TestOwnerSuperusers(t *testing.T)     // Create 2 lần cùng user → ErrConflict; su_name "su-bad" → ErrInvalid; SetPassword cập nhật rotated_at; ListDatabasesByOwner chỉ trả DB của owner
+func TestDatabaseAdminUser(t *testing.T)   // admin_user "su-bad!" → ErrInvalid; hai DB đang chạy trùng admin_user → ErrConflict; SetDatabaseAdminPassword cập nhật; ListDatabasesByOwner chỉ trả DB của owner
 ```
 - [ ] **Step 2:** chạy → FAIL. **Step 3:** implement. **Step 4:** PASS.
 - [ ] **Step 5: Commit** `feat(store): ownership, members, shared destinations, checks`.
@@ -332,10 +329,9 @@ func TestRevokeSession(t *testing.T)       // user không revoke được sessio
 //   DumpCmd dùng -U AdminUser. RestoreCmd(p, key): pg_restore thêm `--role=<User>`; SQL thuần → trả thêm cờ prependSetRole để app ghép "SET ROLE \"<User>\";\n" vào đầu stdin.
 //   func (Postgres) AppUserSQL(user, password, db string) string // CREATE ROLE "<user>" LOGIN PASSWORD '<escaped>' NOSUPERUSER NOCREATEDB NOCREATEROLE; ALTER DATABASE "<db>" OWNER TO "<user>"; ALTER SCHEMA public OWNER TO "<user>"; (định danh qua quote ident, mật khẩu escape ' → '')
 //   DB kiểu cũ (AdminUser rỗng trong store): app truyền AdminUser = User để mọi lệnh như trước.
-func (a *App) EnsureOwnerSuperuser(ctx, ownerID int64) (suName, password string, err error) // tạo nếu chưa có: su_<username đã thay . và - bằng _>, rand.Text()
-func (a *App) RevealOwnerSuperuser(ctx, ownerID int64) (suName, password string, err error)
-func (a *App) RotateOwnerSuperuser(ctx, ownerID int64) (failed map[string]error, err error) // lưu mật khẩu mới trước, rồi ALTER ROLE (SQL qua stdin) trên từng node running của owner
-func (a *App) ReapplyOwnerSuperuser(ctx, ownerID int64) (failed map[string]error, err error)
+//   provision(): superuser riêng của node = `su_<tên DB>` (tên DB đã hợp lệ `^[a-z][a-z0-9-]{1,30}$`), mật khẩu rand.Text(), lưu AdminUser + AdminPasswordEnc.
+func (a *App) RevealSuperuser(ctx, d store.Database) (user, password string, err error) // DB kiểu cũ → user/mật khẩu của db_user
+func (a *App) RotateSuperuser(ctx, d store.Database) error // sinh mật khẩu mới → ALTER ROLE trên node (SQL qua stdin) → thành công mới lưu; node không running → ErrInvalid; DB kiểu cũ → ErrInvalid
 //   provision(): Run container → WaitHealthy → Exec `psql -U <AdminUser> -d <Name> -v ON_ERROR_STOP=1` với stdin = AppUserSQL → lỗi thì rollback như cũ.
 func (a *App) VisibleDatabases(ctx, p auth.Principal) ([]store.Database, error) // admin: ListDatabases; user: ListDatabasesVisible
 func (a *App) CanAccessDB(ctx, p auth.Principal, d store.Database) (bool, error) // admin || owner || member
@@ -360,8 +356,8 @@ func (a *App) CanRestoreKey(ctx, p auth.Principal, destID int64, key string) (bo
 
 ```go
 func TestOwnershipOnCreate(t *testing.T)   // CreateDatabase OwnerID=A → d.OwnerID==A; restore OwnerID=B → node mới owner B, restores.started_by_id==B
-func TestTwoUsersPerNode(t *testing.T)     // owner A tạo 2 DB → cả hai RunSpec có POSTGRES_USER "su_a" cùng mật khẩu; Exec sau healthy là psql -U su_a với stdin chứa `CREATE ROLE "shop_rw" LOGIN` và `NOSUPERUSER` và `OWNER TO "shop_rw"`, không chứa mật khẩu trong argv; DumpCmd dùng -U su_a
-func TestRotateOwnerSuperuser(t *testing.T) // rotate → mật khẩu lưu mới; Exec ALTER ROLE trên 2 node (stdin); 1 node execFn lỗi → failed có tên node đó; Reapply → gọi lại đúng node lỗi
+func TestTwoUsersPerNode(t *testing.T)     // tạo "shop" và "blog" → RunSpec POSTGRES_USER lần lượt "su_shop", "su_blog", mật khẩu khác nhau; Exec sau healthy là psql -U su_shop với stdin chứa `CREATE ROLE "shop_rw" LOGIN`, `NOSUPERUSER`, `OWNER TO "shop_rw"`, mật khẩu không nằm trong argv; DumpCmd dùng -U su_shop
+func TestRotateSuperuser(t *testing.T)     // rotate → Exec ALTER ROLE "su_shop" (stdin) rồi mật khẩu lưu đổi; execFn lỗi → mật khẩu lưu giữ nguyên, trả lỗi
 func TestRestoreUsesAppRole(t *testing.T)  // restore .dump → cmd chứa "--role=<app user>"; restore .sql.gz → stdin bắt đầu bằng `SET ROLE "<app user>";`
 func TestLegacyDBUsesSingleUser(t *testing.T) // DB có AdminUser "" → DumpCmd -U <db_user>
 func TestCustomDBCredentials(t *testing.T) // DBUser "shop_rw", DBPassword "S3cure-pass.~x" → RunSpec Env có POSTGRES_USER=shop_rw, POSTGRES_PASSWORD=…; ConnString giải mã đúng qua url.Parse (User.Password() == mật khẩu); bảng lỗi: "Postgres", "pg_x", "postgres", mật khẩu 11 ký tự, có dấu cách, có ký tự non-ASCII → ErrInvalid; để trống → "<tên>_app" + mật khẩu 26 ký tự
@@ -440,7 +436,7 @@ func TestLogoutInvalidatesBearer(t *testing.T)
   - `getBackup`/`download`: backup thuộc DB có quyền (không → 404).
   - `startRestore`: `CanRestoreKey` (false → 404); `OwnerID = p.UserID`. `getRestore`: admin hoặc `started_by_id == p.UserID` (không → 404).
   - `/api/settings/allowlist` GET/PUT: chỉ admin (403).
-  - Superuser: `GET /api/me/superuser` → `{su_name, databases:[…]}` (không có mật khẩu); `POST /api/me/superuser/reveal` → `{su_name, password}`; `POST /api/me/superuser/rotate` → `{failed:{db: error}}`; `POST /api/me/superuser/reapply`; admin `POST /api/users/{id}/superuser/reveal`. `GET /api/databases/{db}/connection?role=superuser` chỉ owner/admin (người quản lý → 403; mặc định `role=app`). `dbJSON` thêm `admin_user` (tên superuser, không mật khẩu) chỉ khi người xem là owner/admin, và `legacy: true` khi `admin_user` rỗng.
+  - Superuser (theo từng DB): `POST /api/databases/{db}/superuser/reveal` → `{user, password}`; `POST /api/databases/{db}/superuser/rotate` → 204 — cả hai chỉ owner/admin (người quản lý → 403). `GET /api/databases/{db}/connection?role=superuser` chỉ owner/admin (mặc định `role=app`). `dbJSON` thêm `admin_user` (tên superuser, không mật khẩu) chỉ khi người xem là owner/admin, và `legacy: true` khi `admin_user` rỗng.
 
 - [ ] **Step 1: Viết test** (3 user: admin, A, B; fake runtime/objects)
 
@@ -455,7 +451,7 @@ func TestIndirectAccessBlocked(t *testing.T) {
 }
 func TestRestoreOwnership(t *testing.T)    // A restore key a1 → 202; node mới owner A; B GET /api/restores/<id> → 404
 func TestAllowlistAdminOnly(t *testing.T)  // A GET/PUT → 403; admin OK
-func TestSuperuserAccess(t *testing.T)     // A reveal của mình → su_a + mật khẩu; B (member của a1) GET /api/databases/a1/connection?role=superuser → 403, dbJSON của a1 không có admin_user; admin reveal superuser của A → OK
+func TestSuperuserAccess(t *testing.T)     // A reveal superuser của a1 → su_a1 + mật khẩu; B (member của a1) reveal/rotate/connection?role=superuser → 403, dbJSON của a1 không có admin_user; admin reveal → OK
 ```
 - [ ] **Step 2:** FAIL. **Step 3:** implement. **Step 4:** `go test ./internal/api/` PASS.
 - [ ] **Step 5: Commit** `feat(api): enforce per-resource permissions`.
@@ -643,7 +639,7 @@ func TestWriteBaseHTTPS(t *testing.T)      // yaml: fridge-web entryPoints [webs
   - `fridge logout`, `fridge whoami`.
   - `fridge setup --setup-token T --user U [--password-stdin]` (cho server không có trình duyệt; đăng ký Credentials tính bằng `scram`). *(Lựa chọn của plan)*
   - `fridge check --from <dest>:<key> [--wait]`, `fridge members ls|add|rm <db> [user]`, `fridge dest share <name|id> on|off`.
-  - `fridge superuser show [--reveal]`, `fridge superuser rotate`, `fridge superuser reapply`; `fridge show <db> [--reveal] [--superuser]`
+  - `fridge superuser show <db> [--reveal]`, `fridge superuser rotate <db>`; `fridge show <db> [--reveal] [--superuser]`
   - `fridge show <db> [--reveal]` (`--reveal` gọi `/connection`, có ghi audit), `fridge audit [--user U] [--action A] [--db D] [--since 24h] [--csv]`.
   - `fridge recover …` ghi audit với actor `recover` (`recover.allowlist`, `recover.reset_password`, `recover.promote`).
   - `fridge create` và `fridge restore` thêm `--db-user U`, `--db-password-stdin`, `--random-credentials` (sinh user `u_`+8 `[a-z0-9]`, mật khẩu 24 ký tự `[A-Za-z0-9-_.~]` bằng `crypto/rand`, in ra một lần); `--random-credentials` loại trừ hai cờ kia.
@@ -711,7 +707,7 @@ func TestNoInlineScripts(t *testing.T)  // quét mọi .html trong embed: không
 
 **Interfaces:** chỉ dùng API Task 6–10 qua `api.js`.
 - **Databases**: bảng (tên, engine/version, domain, trạng thái màu, backup gần nhất, cột owner nếu admin), nút "+ Tạo DB" (modal: engine, version dropdown từ `/api/engines`, tên, domain, **User** + **Mật khẩu** tùy chọn — mỗi ô có nút 🎲 **Ngẫu nhiên** (`crypto.getRandomValues`: user `u_`+8 `[a-z0-9]`, mật khẩu 24 `[A-Za-z0-9-_.~]`), ô mật khẩu có Hiện/Ẩn + Copy, kiểm tra cùng quy tắc với server trước khi gửi; để trống = server tự sinh) → sau tạo chuyển sang chi tiết. Form restore vào node mới có cùng 2 ô.
-- **Chi tiết DB** (mockup đã duyệt): header + nút **Backup now** (poll trạng thái backup 2–3s); tab **Kết nối** (khối **User ứng dụng** và — chỉ owner/admin — khối **Superuser** `su_…` với Hiện/Copy riêng; nhãn "kiểu cũ" nếu `legacy`; connection string che mật khẩu; nút Hiện/Copy gọi `GET /api/databases/{db}/connection` — mỗi lần là một dòng audit; host/user/db, link tải CA `/api/ca`); tab **Backups** (bảng: thời gian, nguồn lịch/tay, destination, dung lượng, trạng thái, Tải · Restore… · Log trong modal); tab **Lịch backup** (CRUD, destination dropdown = destination có thể dùng); tab **Người quản lý** (chỉ owner/admin sửa; người khác chỉ xem).
+- **Chi tiết DB** (mockup đã duyệt): header + nút **Backup now** (poll trạng thái backup 2–3s); tab **Kết nối** (khối **User ứng dụng** và — chỉ owner/admin — khối **Superuser** `su_<tên DB>` với Hiện/Copy và nút **Rotate** (có xác nhận); nhãn "kiểu cũ" nếu `legacy`; connection string che mật khẩu; nút Hiện/Copy gọi `GET /api/databases/{db}/connection` — mỗi lần là một dòng audit; host/user/db, link tải CA `/api/ca`); tab **Backups** (bảng: thời gian, nguồn lịch/tay, destination, dung lượng, trạng thái, Tải · Restore… · Log trong modal); tab **Lịch backup** (CRUD, destination dropdown = destination có thể dùng); tab **Người quản lý** (chỉ owner/admin sửa; người khác chỉ xem).
 - **Restore**: chọn destination → bảng file (`/objects`, ô tìm kiếm, cột DB) → chọn file → nút **Kiểm tra kỹ** (job, hiện kết quả) và form node mới (tên, domain, version — gợi ý version nguồn) → **Restore** → trang trạng thái polling; lỗi mức 1 hiện ngay dưới form. "Restore…" từ tab Backups mở trang này với file chọn sẵn.
 - **Destinations**: bảng của mình (admin: tất cả + owner + công tắc dùng chung); thêm/sửa (secret để trống = giữ)/xóa (xác nhận)/Test.
 
@@ -728,7 +724,7 @@ func TestNoInlineScripts(t *testing.T)  // quét mọi .html trong embed: không
 
 **Files:** Create `internal/web/static/js/pages/{settings.js,users.js,sessions.js,images.js}`, cập nhật `router.js`, `layout.js` (chấm báo Images khi có bản mới)
 
-- **Settings**: **Superuser của tôi** (tên, Hiện mật khẩu, Copy, **Rotate** có xác nhận, danh sách node + node lỗi và nút Áp lại), allowlist (admin; textarea CIDR, lưu), tải CA cert, phiên của tôi (bảng: tạo lúc, hoạt động cuối, IP, UA, nút thu hồi; đánh dấu phiên hiện tại).
+- **Settings**: allowlist (admin; textarea CIDR, lưu), tải CA cert, phiên của tôi (bảng: tạo lúc, hoạt động cuối, IP, UA, nút thu hồi; đánh dấu phiên hiện tại).
 - **Users** (admin): bảng user (username, role, trạng thái, tạo lúc), nút **Mời** (username, role → hiện link để copy), Khóa/Mở, Nâng/Hạ admin (lỗi admin cuối hiện rõ), **Reset mật khẩu** (hiện link).
 - **Sessions** (admin): mọi phiên, thu hồi.
 - **Audit log** (mọi user, dữ liệu theo quyền): bảng (thời gian, người, IP, hành động, đối tượng, DB, kết quả, chi tiết rút gọn), bộ lọc người/hành động/DB/khoảng thời gian, "Tải thêm" (phân trang `before`), nút **Xuất CSV** theo bộ lọc. Mục sidebar "Audit log".
@@ -758,7 +754,7 @@ func TestE2EOwnershipFlow(t *testing.T) {
 	// A restore bản backup vào node mới v17 → owner A; B không xem restore của A (404)
 	// file rác trên dest của A → POST /api/restores 400 trước khi tạo container (đếm container fridge-postgres-* không đổi)
 	// hai user: psql bằng user ứng dụng: `SELECT rolsuper FROM pg_roles WHERE rolname = current_user` → f; CREATE TABLE OK; `COPY (SELECT 1) TO PROGRAM 'id'` → lỗi permission
-	// A tạo DB thứ hai → cùng su_a; A rotate superuser → mật khẩu cũ đăng nhập su_a thất bại trên cả hai node, mật khẩu mới OK
+	// hai DB của A có superuser khác nhau (su_<tên>); rotate superuser của một DB → mật khẩu cũ hỏng trên DB đó, DB kia không bị ảnh hưởng
 	// node restore: bảng đã restore thuộc owner = user ứng dụng (pg_tables.tableowner)
 	// dọn: removeNode các node, xóa object
 }
