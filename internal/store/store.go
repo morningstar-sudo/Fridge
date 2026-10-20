@@ -15,6 +15,10 @@ var (
 	ErrNotFound = errors.New("not found")
 	ErrConflict = errors.New("conflict")
 	ErrInUse    = errors.New("in use")
+	// ErrInvalid: CHECK constraint or integrity trigger rejected the row.
+	ErrInvalid = errors.New("invalid")
+	// ErrLastAdmin: the change would leave no active admin.
+	ErrLastAdmin = errors.New("last admin")
 )
 
 type Store struct{ pool *pgxpool.Pool }
@@ -126,14 +130,18 @@ var migrations = []string{
 	ALTER TABLE restores ADD COLUMN source_engine TEXT NOT NULL DEFAULT '', ADD COLUMN error TEXT NOT NULL DEFAULT '';`,
 	// one object key per backup row: a same-second rerun must conflict, not overwrite (Task 9).
 	`CREATE UNIQUE INDEX backups_s3_key ON backups(s3_key);`,
+	migration4,
 }
 
-func (s *Store) migrate(ctx context.Context) error {
+func (s *Store) migrate(ctx context.Context) error { return s.migrateTo(ctx, len(migrations)) }
+
+// migrateTo applies migrations 1..n that are not yet recorded.
+func (s *Store) migrateTo(ctx context.Context, n int) error {
 	if _, err := s.pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
 		return err
 	}
-	for i, m := range migrations {
+	for i, m := range migrations[:n] {
 		v := i + 1
 		err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('fridge-migrate'))`); err != nil {
@@ -166,7 +174,9 @@ func mapErr(err error) error {
 		switch pe.Code {
 		case "23505":
 			return fmt.Errorf("%w: %s", ErrConflict, pe.Message)
-		case "23503":
+		case "23514", "P0001":
+			return fmt.Errorf("%w: %s", ErrInvalid, pe.Message)
+		case "23503", "23001": // 23001: ON DELETE RESTRICT (reported instead of 23503 by PG 18)
 			return fmt.Errorf("%w: %s", ErrInUse, pe.Message)
 		}
 	}

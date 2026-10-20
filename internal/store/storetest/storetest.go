@@ -33,6 +33,21 @@ func adminURL() string {
 // New creates a fresh database fridge_t_<hex>, opens a Store on it and drops it on cleanup.
 func New(t *testing.T) *store.Store {
 	t.Helper()
+	dbURL := NewEmpty(t)
+	s, err := store.Open(context.Background(), dbURL)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { s.Close() }) // runs before the drop registered by NewEmpty
+	mu.Lock()
+	lastURL[t] = dbURL
+	mu.Unlock()
+	return s
+}
+
+// NewEmpty creates an empty database fridge_t_<hex> (no migrations), drops it on cleanup and returns its URL.
+func NewEmpty(t *testing.T) string {
+	t.Helper()
 	ctx := context.Background()
 	admin := adminURL()
 	conn, err := pgx.Connect(ctx, admin)
@@ -55,17 +70,7 @@ func New(t *testing.T) *store.Store {
 		t.Fatal(err)
 	}
 	u.Path = "/" + name
-	dbURL := u.String()
-	mu.Lock()
-	lastURL[t] = dbURL
-	mu.Unlock()
-
-	s, err := store.Open(ctx, dbURL)
-	if err != nil {
-		t.Fatalf("store.Open: %v", err)
-	}
 	t.Cleanup(func() {
-		s.Close()
 		mu.Lock()
 		delete(lastURL, t)
 		mu.Unlock()
@@ -79,7 +84,7 @@ func New(t *testing.T) *store.Store {
 			t.Logf("drop %s: %v", name, err)
 		}
 	})
-	return s
+	return u.String()
 }
 
 // URL returns the URL of the temp database created by New in this test.

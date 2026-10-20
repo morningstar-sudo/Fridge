@@ -184,7 +184,7 @@ func (s *Store) OrphanedRestoreTargets(ctx context.Context) ([]Database, error) 
 // FailRunning marks every running backup and restore failed; returns the row count.
 func (s *Store) FailRunning(ctx context.Context, reason string) (int, error) {
 	n := 0
-	for _, t := range []string{"backups", "restores"} {
+	for _, t := range []string{"backups", "restores", "dump_checks"} {
 		tag, err := s.pool.Exec(ctx, `UPDATE `+t+` SET status='failed', error=$1, finished_at=now() WHERE status='running'`, reason)
 		if err != nil {
 			return n, err
