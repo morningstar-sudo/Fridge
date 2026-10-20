@@ -1,0 +1,20 @@
+# Static Traefik config. Routes come from the files Fridge writes into /traefik/dynamic.
+entryPoints:
+  pg:
+    address: ":5432"
+  api:
+    address: ":8080"
+  ping:
+    address: ":8082"
+
+# Must name the entrypoint: the default internal "traefik" entrypoint is :8080, which clashes with "api".
+ping:
+  entryPoint: ping
+
+providers:
+  file:
+    directory: /traefik/dynamic
+    watch: true
+
+log:
+  level: INFO

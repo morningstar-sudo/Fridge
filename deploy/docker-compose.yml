@@ -1,0 +1,103 @@
+# Run from the repo root: docker compose -f deploy/docker-compose.yml [--profile dev] up -d --build
+# Secrets come from deploy/.env (see README.md).
+name: fridge
+
+services:
+  traefik:
+    image: traefik:v3.5
+    ports:
+      - "5432:5432"
+      - "8080:8080"
+    volumes:
+      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+      - traefik:/traefik
+    networks: [fridge-net]
+    restart: always
+    # Fridge creates /traefik/dynamic on first start; a file provider that starts before the
+    # directory exists fails for good. Only orders `compose up`; on reboot the dir already exists.
+    depends_on:
+      fridge:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  fridge-meta:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: fridge
+      POSTGRES_USER: fridge
+      POSTGRES_PASSWORD: ${FRIDGE_META_PASSWORD:?set FRIDGE_META_PASSWORD in deploy/.env}
+    volumes:
+      - fridge-meta:/var/lib/postgresql/data
+    networks: [fridge-net]
+    restart: always
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "fridge", "-d", "fridge"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  fridge:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    depends_on:
+      fridge-meta:
+        condition: service_healthy
+    environment:
+      FRIDGE_DATABASE_URL: postgres://fridge:${FRIDGE_META_PASSWORD}@fridge-meta:5432/fridge?sslmode=disable
+      FRIDGE_SECRET_KEY: ${FRIDGE_SECRET_KEY:?set FRIDGE_SECRET_KEY in deploy/.env}
+      FRIDGE_TOKEN: ${FRIDGE_TOKEN:?set FRIDGE_TOKEN in deploy/.env}
+      FRIDGE_ALERT_WEBHOOK: ${FRIDGE_ALERT_WEBHOOK:-}
+      FRIDGE_LISTEN: ":8080"
+      FRIDGE_DATA: /data
+      FRIDGE_TRAEFIK_DIR: /traefik
+      FRIDGE_NETWORK: fridge-net
+      FRIDGE_API_BACKEND: http://fridge:8080
+    volumes:
+      - fridge-data:/data
+      - traefik:/traefik
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [fridge-net]
+    restart: unless-stopped
+    stop_grace_period: 40s # server waits up to 30s for running jobs
+    healthcheck:
+      test: ["CMD", "/fridge", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  minio:
+    profiles: [dev]
+    image: cgr.dev/chainguard/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks: [fridge-net]
+
+  # Creates bucket "fridge" once MinIO is up (retries until it is).
+  minio-init:
+    profiles: [dev]
+    image: cgr.dev/chainguard/minio-client:latest
+    command: ["mb", "-p", "local/fridge"]
+    environment:
+      MC_HOST_local: http://minioadmin:minioadmin@minio:9000
+    depends_on: [minio]
+    networks: [fridge-net]
+    restart: on-failure
+
+volumes:
+  traefik:
+  fridge-meta:
+  fridge-data:
+
+networks:
+  fridge-net:
+    name: fridge-net
