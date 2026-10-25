@@ -38,6 +38,8 @@ func main() {
 				log.Fatal(err)
 			}
 			return
+		case "forward":
+			os.Exit(runForward(os.Args[2:], os.Stderr))
 		case "healthcheck":
 			os.Exit(healthcheck())
 		}
