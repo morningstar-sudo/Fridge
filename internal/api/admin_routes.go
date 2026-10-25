@@ -20,6 +20,8 @@ func (s *server) adminRoutes(m *http.ServeMux) {
 	m.HandleFunc("DELETE /api/domains/{id}", s.removeDomain)
 	m.HandleFunc("POST /api/databases/{db}/superuser/reveal", s.revealSuperuser)
 	m.HandleFunc("POST /api/databases/{db}/superuser/rotate", s.rotateSuperuser)
+	m.HandleFunc("POST /api/dump-checks", s.startDumpCheck)
+	m.HandleFunc("GET /api/dump-checks/{id}", s.getDumpCheck)
 }
 
 func (s *server) listMembers(w http.ResponseWriter, r *http.Request) {
@@ -166,4 +168,68 @@ func (s *server) rotateSuperuser(w http.ResponseWriter, r *http.Request) {
 	if d, ok := s.ownerOf(w, r); ok {
 		noContent(w, s.a.RotateSuperuser(r.Context(), d))
 	}
+}
+
+type dumpCheckJSON struct {
+	ID            int64          `json:"id"`
+	DestinationID int64          `json:"destination_id"`
+	S3Key         string         `json:"s3_key"`
+	Status        string         `json:"status"`
+	Result        map[string]any `json:"result"`
+	Log           string         `json:"log"`
+	Error         string         `json:"error"`
+	StartedAt     time.Time      `json:"started_at"`
+	FinishedAt    *time.Time     `json:"finished_at"`
+}
+
+func dumpCheckOut(c store.DumpCheck) dumpCheckJSON {
+	if c.Result == nil {
+		c.Result = map[string]any{}
+	}
+	return dumpCheckJSON{c.ID, c.DestinationID, c.S3Key, c.Status, c.Result, c.Log, c.Error, c.StartedAt, c.FinishedAt}
+}
+
+// startDumpCheck: the same files a user may restore are the ones they may check; others are 404.
+func (s *server) startDumpCheck(w http.ResponseWriter, r *http.Request) {
+	p := me(r)
+	wantNow(r, "dumpcheck.start", "dump_check", "")
+	var in struct {
+		DestinationID int64  `json:"destination_id"`
+		Key           string `json:"key"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	note(r, "destination_id", in.DestinationID)
+	ok, err := s.a.CanRestoreKey(r.Context(), p, in.DestinationID, in.Key)
+	if err == nil && !ok {
+		err = store.ErrNotFound
+	}
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	c, err := s.a.StartDumpCheck(r.Context(), in.DestinationID, in.Key, p.UserID)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	target(r, "dump_check", itoa(c.ID), nil)
+	writeJSON(w, 202, dumpCheckOut(c))
+}
+
+func (s *server) getDumpCheck(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	c, err := s.a.GetDumpCheck(r.Context(), id)
+	if p := me(r); err == nil && !p.IsAdmin() && (c.StartedByID == nil || *c.StartedByID != p.UserID) {
+		err = store.ErrNotFound
+	}
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, 200, dumpCheckOut(c))
 }

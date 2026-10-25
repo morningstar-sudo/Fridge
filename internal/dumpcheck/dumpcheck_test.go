@@ -109,3 +109,31 @@ func TestInspectSQL(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestTextChecker(t *testing.T) {
+	text := []byte("-- caf\xc3\xa9 \xe2\x82\xac end\n") // 2- and 3-byte runes
+	for split := 0; split <= len(text); split++ {       // every possible chunk boundary
+		var c TextChecker
+		if _, err := c.Write(text[:split]); err != nil {
+			t.Fatalf("split %d: %v", split, err)
+		}
+		if _, err := c.Write(text[split:]); err != nil {
+			t.Fatalf("split %d: %v", split, err)
+		}
+		if err := c.Close(); err != nil || c.N != int64(len(text)) {
+			t.Fatalf("split %d: close=%v n=%d", split, err, c.N)
+		}
+	}
+	var c TextChecker
+	c.Write(text[:len(text)-3]) // ends inside the euro sign...
+	c.Write([]byte("\xe2\x82"))
+	if err := c.Close(); err == nil {
+		t.Error("a rune cut off at the end was accepted")
+	}
+	if _, err := (&TextChecker{}).Write([]byte("a\x00b")); err == nil {
+		t.Error("NUL accepted")
+	}
+	if _, err := (&TextChecker{}).Write([]byte("ok \xff\xfe more")); err == nil {
+		t.Error("invalid UTF-8 accepted")
+	}
+}

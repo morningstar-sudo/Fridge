@@ -201,3 +201,44 @@ func looksLikeSQL(text []byte) bool {
 	}
 	return false
 }
+
+// TextChecker is an io.Writer that fails on NUL bytes and invalid UTF-8, however the text is chunked.
+// Call Close at the end of the input: a rune cut off there is an error too.
+type TextChecker struct {
+	N     int64 // bytes seen
+	carry []byte
+}
+
+var (
+	errNUL  = errors.New("not a SQL text file (contains NUL bytes)")
+	errUTF8 = errors.New("not a SQL text file (invalid UTF-8)")
+)
+
+func (c *TextChecker) Write(p []byte) (int, error) {
+	c.N += int64(len(p))
+	if bytes.IndexByte(p, 0) >= 0 {
+		return 0, errNUL
+	}
+	buf := append(c.carry, p...)
+	cut := len(buf)
+	for i := len(buf) - 1; i >= 0 && i >= len(buf)-utf8.UTFMax; i-- {
+		if utf8.RuneStart(buf[i]) {
+			if !utf8.FullRune(buf[i:]) {
+				cut = i
+			}
+			break
+		}
+	}
+	if !utf8.Valid(buf[:cut]) {
+		return 0, errUTF8
+	}
+	c.carry = append(c.carry[:0], buf[cut:]...)
+	return len(p), nil
+}
+
+func (c *TextChecker) Close() error {
+	if len(c.carry) > 0 {
+		return errUTF8
+	}
+	return nil
+}

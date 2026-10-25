@@ -25,7 +25,9 @@ type RunSpec struct {
 	VolumePath  string
 	Healthcheck []string
 	Labels      map[string]string
-	Network     string // "" = the client's network; NoNetwork = isolated. Alias = Name on user-defined networks.
+	Network     string   // "" = the client's network; NoNetwork = isolated. Alias = Name on user-defined networks.
+	Cmd         []string // overrides the image's command
+	Ephemeral   bool     // throwaway: no restart policy, Docker removes it when it exits
 }
 
 // NoNetwork runs a container with no network at all (Docker's "none").
@@ -81,7 +83,7 @@ func (c *Client) Run(ctx context.Context, s RunSpec) (string, error) {
 			return "", fmt.Errorf("pull %s: %w", s.Image, err)
 		}
 	}
-	cfg := &container.Config{Image: s.Image, Env: s.Env, Labels: s.Labels}
+	cfg := &container.Config{Image: s.Image, Env: s.Env, Labels: s.Labels, Cmd: s.Cmd}
 	if len(s.Healthcheck) > 0 {
 		cfg.Healthcheck = &container.HealthConfig{
 			Test: s.Healthcheck, Interval: 2 * time.Second, Timeout: 5 * time.Second,
@@ -95,6 +97,10 @@ func (c *Client) Run(ctx context.Context, s RunSpec) (string, error) {
 	host := &container.HostConfig{
 		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
 		NetworkMode:   container.NetworkMode(netName),
+	}
+	if s.Ephemeral {
+		host.RestartPolicy = container.RestartPolicy{}
+		host.AutoRemove = true
 	}
 	if s.Volume != "" {
 		if _, err := c.cli.VolumeCreate(ctx, volume.CreateOptions{Name: s.Volume, Labels: s.Labels}); err != nil {
