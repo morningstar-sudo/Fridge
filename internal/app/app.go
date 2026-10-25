@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"strconv"
 	"sync"
 	"time"
 
+	"fridge/internal/audit"
 	"fridge/internal/container"
 	"fridge/internal/objstore"
 	"fridge/internal/pki"
@@ -47,6 +49,7 @@ type App struct {
 	APIBackend    string
 	HealthTimeout time.Duration
 	Alert         func(ctx context.Context, text string)
+	Audit         *audit.Logger                                                    // nil = no audit trail
 	Sched         *Scheduler                                                       // may be nil in tests
 	OpenObjects   func(d store.Destination, secretKey string) (ObjectStore, error) // nil = real S3
 	now           func() time.Time                                                 // test clock; nil = time.Now
@@ -60,6 +63,12 @@ type App struct {
 	netMu      sync.Mutex     // serializes node-network repair (Reconcile/Heal) with removeNode's teardown
 	healFailed map[int64]bool // under netMu: DBs whose last heal failed (alert once per OK→failed)
 	suLocks    sync.Map       // db id -> *sync.Mutex: one superuser rotation per node at a time
+}
+
+// auditSystem records an action taken by Fridge itself (scheduler, retention).
+func (a *App) auditSystem(ctx context.Context, action string, dbID int64, targetType string, targetID int64, ok bool, detail map[string]any) {
+	a.Audit.Record(ctx, store.AuditEntry{Actor: "system", Action: action, TargetType: targetType,
+		TargetID: strconv.FormatInt(targetID, 10), DBID: &dbID, Success: ok, Detail: detail})
 }
 
 // Wait blocks until all background jobs finish.

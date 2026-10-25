@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"fridge/internal/audit"
 	"fridge/internal/store"
 )
 
@@ -282,5 +283,52 @@ func TestBackupSameSecondKeyConflict(t *testing.T) {
 	got, _ := a.Store.GetBackup(ctx, b.ID)
 	if got.Status != "ok" || !objs.has(b.S3Key) {
 		t.Fatalf("first backup damaged: %+v", got)
+	}
+}
+
+func TestSystemAudit(t *testing.T) {
+	a, rt, _ := newTestApp(t)
+	a.Audit = &audit.Logger{Store: a.Store}
+	d, dest := fixture(t, a)
+	ctx := context.Background()
+	sc, err := a.CreateSchedule(ctx, store.Schedule{DatabaseID: d.ID, DestinationID: dest.ID, Cron: "0 2 * * *", Prefix: "fridge", KeepLatest: 1, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int { stdout.Write([]byte("X")); return 0 }
+	run := func(sched *int64, trigger string) {
+		t.Helper()
+		if _, err := a.StartBackup(ctx, d.ID, dest.ID, sched, trigger, nil); err != nil {
+			t.Fatal(err)
+		}
+		a.Wait()
+	}
+	run(nil, "manual") // not a system action
+	run(&sc.ID, "schedule")
+	a.now = func() time.Time { return time.Now().Add(time.Hour) } // another key: the first one is the same second
+	run(&sc.ID, "schedule")                                       // keeps 1: the first is deleted
+	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int { return 1 }
+	a.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	run(&sc.ID, "schedule") // fails
+
+	es, err := a.Store.ListAudit(ctx, store.AuditFilter{Action: "system."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := map[string]int{}
+	for _, e := range es {
+		if e.Actor != "system" || e.ActorID != nil || e.DBID == nil || *e.DBID != d.ID {
+			t.Fatalf("%+v", e)
+		}
+		count[e.Action+map[bool]string{true: "/ok", false: "/failed"}[e.Success]]++
+	}
+	want := map[string]int{"system.backup/ok": 2, "system.backup/failed": 1, "system.retention_delete/ok": 1}
+	for k, v := range want {
+		if count[k] != v {
+			t.Fatalf("counts %v, want %v", count, want)
+		}
+	}
+	if len(count) != len(want) {
+		t.Fatalf("counts %v", count)
 	}
 }

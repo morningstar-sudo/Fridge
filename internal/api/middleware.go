@@ -70,7 +70,7 @@ func (s *server) requireLogin(next *http.ServeMux) http.Handler {
 			writeJSON(w, 403, map[string]string{"error": "cross-origin request refused"})
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, p)))
+		s.audited(next).ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, p)))
 	})
 }
 

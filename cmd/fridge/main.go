@@ -20,6 +20,7 @@ import (
 	"fridge/internal/alert"
 	"fridge/internal/api"
 	"fridge/internal/app"
+	"fridge/internal/audit"
 	"fridge/internal/auth"
 	"fridge/internal/container"
 	"fridge/internal/pki"
@@ -101,6 +102,7 @@ func runServer() error {
 		Store: st, Box: box, RT: rt, CA: ca, TraefikDir: traefikDir, APIBackend: apiBackend,
 		HealthTimeout: 120 * time.Second, Alert: alert.Webhook(os.Getenv("FRIDGE_ALERT_WEBHOOK")),
 		ControlNetwork: network, TraefikContainer: env("FRIDGE_TRAEFIK_CONTAINER", "fridge-traefik"),
+		Audit: &audit.Logger{Store: st},
 	}
 	if err := a.RecoverInterrupted(ctx); err != nil { // after FailRunning, before the scheduler loads
 		return fmt.Errorf("recover interrupted nodes: %w", err)
@@ -139,6 +141,15 @@ func runServer() error {
 		}
 	}); err != nil {
 		log.Printf("purge job: %v", err)
+	}
+	if err := a.Sched.AddFixed("23 3 * * *", func() { // the audit table refuses deleting anything younger than a year
+		if n, err := st.PurgeAudit(ctx, time.Now().AddDate(0, 0, -365)); err != nil {
+			log.Printf("purge audit log: %v", err)
+		} else if n > 0 {
+			log.Printf("purged %d audit entries older than a year", n)
+		}
+	}); err != nil {
+		log.Printf("audit purge job: %v", err)
 	}
 	// A recreated Traefik container comes back on the control network only; re-attach it.
 	if err := a.Sched.AddFixed("@every 1m", func() {

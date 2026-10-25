@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"fridge/internal/app"
+	"fridge/internal/audit"
 	"fridge/internal/auth"
 	"fridge/internal/container"
 	"fridge/internal/objstore"
@@ -28,7 +29,8 @@ import (
 
 type fakeRT struct {
 	pingErr error
-	dump    string // written to every exec's stdout (a backup's dump)
+	dump    string        // written to every exec's stdout (a backup's dump)
+	gate    chan struct{} // non-nil: every exec waits until it is closed
 }
 
 func (f *fakeRT) Ping(context.Context) error { return f.pingErr }
@@ -37,6 +39,9 @@ func (f *fakeRT) Run(_ context.Context, s container.RunSpec) (string, error) {
 }
 func (f *fakeRT) WaitHealthy(context.Context, string, time.Duration) error { return nil }
 func (f *fakeRT) Exec(_ context.Context, _ string, _ []string, _ io.Reader, stdout, _ io.Writer) (int, error) {
+	if f.gate != nil {
+		<-f.gate
+	}
 	if f.dump != "" {
 		io.WriteString(stdout, f.dump)
 	}
@@ -101,7 +106,8 @@ func newRawSrv(t *testing.T, setupToken string, o Options) (http.Handler, *fakeR
 		t.Fatal(err)
 	}
 	rt := &fakeRT{}
-	a := &app.App{Store: storetest.New(t), Box: box, RT: rt, CA: ca, TraefikDir: t.TempDir(), HealthTimeout: time.Second}
+	st := storetest.New(t)
+	a := &app.App{Store: st, Box: box, RT: rt, CA: ca, TraefikDir: t.TempDir(), HealthTimeout: time.Second, Audit: &audit.Logger{Store: st}}
 	a.OpenObjects = func(store.Destination, string) (app.ObjectStore, error) { return &fakeObjs{}, nil }
 	au, err := auth.New(a.Store, key, setupToken)
 	if err != nil {

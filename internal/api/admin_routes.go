@@ -41,6 +41,7 @@ func (s *server) listMembers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) addMember(w http.ResponseWriter, r *http.Request) {
+	want(r, "db.member_add")
 	d, ok := s.ownerOf(w, r)
 	if !ok {
 		return
@@ -51,6 +52,7 @@ func (s *server) addMember(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
+	note(r, "username", in.Username)
 	switch err := s.a.AddMember(r.Context(), d, in.Username, me(r).UserID); {
 	case errors.Is(err, app.ErrInvalid): // one message for every bad input: usernames cannot be probed
 		writeJSON(w, 400, map[string]string{"error": "không thêm được"})
@@ -62,10 +64,12 @@ func (s *server) addMember(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) removeMember(w http.ResponseWriter, r *http.Request) {
+	want(r, "db.member_remove")
 	d, ok := s.ownerOf(w, r)
 	if !ok {
 		return
 	}
+	note(r, "user_id", r.PathValue("user_id"))
 	uid, err := strconv.ParseInt(r.PathValue("user_id"), 10, 64)
 	if err != nil {
 		fail(w, store.ErrNotFound)
@@ -106,9 +110,11 @@ func (s *server) addDomain(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Name string `json:"name"`
 	}
+	wantNow(r, "domain.register", "domain", "")
 	if !decode(w, r, &in) {
 		return
 	}
+	note(r, "name", in.Name)
 	d, err := s.a.RegisterDomain(r.Context(), p.UserID, in.Name)
 	switch {
 	case errors.Is(err, store.ErrConflict): // never say who holds it
@@ -116,6 +122,7 @@ func (s *server) addDomain(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		fail(w, err)
 	default:
+		target(r, "domain", itoa(d.ID), nil)
 		d.OwnerName = p.Username
 		writeJSON(w, 201, domainOut(d))
 	}
@@ -127,17 +134,21 @@ func (s *server) removeDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := me(r)
+	want(r, "domain.remove")
 	d, err := s.a.Store.GetDomain(r.Context(), id)
 	if err == nil && !p.IsAdmin() && d.OwnerID != p.UserID {
 		err = store.ErrNotFound
 	}
-	if err == nil {
+	if err == nil { // visible to the caller from here on
+		target(r, "domain", itoa(id), nil)
+		note(r, "name", d.Name)
 		err = s.a.Store.DeleteDomain(r.Context(), id)
 	}
 	noContent(w, err)
 }
 
 func (s *server) revealSuperuser(w http.ResponseWriter, r *http.Request) {
+	want(r, "superuser.reveal")
 	d, ok := s.ownerOf(w, r)
 	if !ok {
 		return
@@ -151,6 +162,7 @@ func (s *server) revealSuperuser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) rotateSuperuser(w http.ResponseWriter, r *http.Request) {
+	want(r, "superuser.rotate")
 	if d, ok := s.ownerOf(w, r); ok {
 		noContent(w, s.a.RotateSuperuser(r.Context(), d))
 	}

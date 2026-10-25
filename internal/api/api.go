@@ -23,6 +23,7 @@ type server struct {
 	a       *app.App
 	au      *auth.Service
 	trusted func(net.IP) bool
+	locked  lockedSeen
 }
 
 // Options configures New.
@@ -70,6 +71,7 @@ func New(a *app.App, au *auth.Service, o Options) http.Handler {
 	api.HandleFunc("GET /api/settings/allowlist", s.getAllow)
 	api.HandleFunc("PUT /api/settings/allowlist", s.putAllow)
 	s.adminRoutes(api)
+	s.auditRoutes(api)
 	m.HandleFunc("GET /api/ca", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.Write(a.CA.CertPEM())
@@ -155,6 +157,7 @@ func (s *server) dbOf(w http.ResponseWriter, r *http.Request) (store.Database, b
 		fail(w, err)
 		return d, false
 	}
+	target(r, "database", d.Name, &d.ID)
 	return d, true
 }
 
@@ -196,6 +199,7 @@ func (s *server) destOf(w http.ResponseWriter, r *http.Request, manage bool) (st
 		fail(w, err)
 		return d, false
 	}
+	target(r, "destination", itoa(d.ID), nil)
 	return d, true
 }
 
@@ -388,15 +392,19 @@ func (s *server) createDB(w http.ResponseWriter, r *http.Request) {
 		DBUser     string `json:"db_user"`
 		DBPassword string `json:"db_password"`
 	}
+	wantNow(r, "db.create", "database", "")
 	if !decode(w, r, &in) {
 		return
 	}
+	note(r, "engine", in.Engine)
+	note(r, "name", in.Name)
 	d, err := s.a.CreateDatabase(r.Context(), app.CreateRequest{Engine: in.Engine, Name: in.Name, Domain: in.Domain, Version: in.Version,
 		TLSMode: in.TLSMode, OwnerID: p.UserID, DBUser: in.DBUser, DBPassword: in.DBPassword})
 	if err != nil {
 		fail(w, err)
 		return
 	}
+	target(r, "database", d.Name, &d.ID)
 	d.OwnerName = p.Username
 	writeJSON(w, 201, dbOut(p, d, nil))
 }
@@ -439,8 +447,10 @@ func (s *server) connection(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch r.URL.Query().Get("role") {
 	case "":
+		want(r, "db.reveal_password")
 		cs, err = s.a.ConnString(d)
 	case "superuser":
+		want(r, "superuser.reveal")
 		if !app.IsDBOwner(me(r), d) {
 			fail(w, auth.ErrForbidden)
 			return
@@ -469,9 +479,11 @@ func (s *server) listDests(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) createDest(w http.ResponseWriter, r *http.Request) {
 	var in destIn
+	wantNow(r, "dest.create", "destination", "")
 	if !decode(w, r, &in) {
 		return
 	}
+	note(r, "name", in.Name)
 	p := me(r)
 	nd := in.dest(0)
 	nd.OwnerID = &p.UserID // private until an admin shares it
@@ -480,11 +492,13 @@ func (s *server) createDest(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
+	target(r, "destination", itoa(d.ID), nil)
 	d.OwnerName = p.Username
 	writeJSON(w, 201, destOut(p, d))
 }
 
 func (s *server) updateDest(w http.ResponseWriter, r *http.Request) {
+	want(r, "dest.update")
 	old, ok := s.destOf(w, r, true)
 	if !ok {
 		return
@@ -507,6 +521,7 @@ func (s *server) updateDest(w http.ResponseWriter, r *http.Request) {
 
 // shareDest (admin only) makes a destination usable by every user.
 func (s *server) shareDest(w http.ResponseWriter, r *http.Request) {
+	wantNow(r, "dest.share", "destination", r.PathValue("id"))
 	if !me(r).IsAdmin() {
 		fail(w, auth.ErrForbidden)
 		return
@@ -525,16 +540,19 @@ func (s *server) shareDest(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "shared is required"})
 		return
 	}
+	note(r, "shared", *in.Shared)
 	noContent(w, s.a.SetDestinationShared(r.Context(), id, *in.Shared))
 }
 
 func (s *server) deleteDest(w http.ResponseWriter, r *http.Request) {
+	want(r, "dest.delete")
 	if d, ok := s.destOf(w, r, true); ok {
 		noContent(w, s.a.DeleteDestination(r.Context(), d.ID))
 	}
 }
 
 func (s *server) testDest(w http.ResponseWriter, r *http.Request) {
+	want(r, "dest.test")
 	d, ok := s.destOf(w, r, true)
 	if !ok {
 		return
@@ -594,6 +612,7 @@ func (s *server) schedOf(w http.ResponseWriter, r *http.Request) (store.Schedule
 		fail(w, err)
 		return sc, d, false
 	}
+	target(r, "schedule", itoa(sc.ID), &d.ID)
 	return sc, d, true
 }
 
@@ -611,6 +630,7 @@ func (s *server) listScheds(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) createSched(w http.ResponseWriter, r *http.Request) {
+	want(r, "schedule.create")
 	d, ok := s.dbOf(w, r)
 	if !ok {
 		return
@@ -625,10 +645,12 @@ func (s *server) createSched(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
+	target(r, "schedule", itoa(sc.ID), &d.ID)
 	writeJSON(w, 201, schedOut(sc))
 }
 
 func (s *server) updateSched(w http.ResponseWriter, r *http.Request) {
+	want(r, "schedule.update")
 	old, d, ok := s.schedOf(w, r)
 	if !ok {
 		return
@@ -651,6 +673,7 @@ func (s *server) updateSched(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) deleteSched(w http.ResponseWriter, r *http.Request) {
+	want(r, "schedule.delete")
 	if sc, _, ok := s.schedOf(w, r); ok {
 		noContent(w, s.a.DeleteSchedule(r.Context(), sc.ID))
 	}
@@ -672,6 +695,7 @@ func (s *server) listBackups(w http.ResponseWriter, r *http.Request) {
 // startBackup: an explicit destination must be usable by the caller; none = the app's owner-destination fallback.
 func (s *server) startBackup(w http.ResponseWriter, r *http.Request) {
 	p := me(r)
+	want(r, "backup.start")
 	d, ok := s.dbOf(w, r)
 	if !ok {
 		return
@@ -690,6 +714,7 @@ func (s *server) startBackup(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
+	target(r, "backup", itoa(b.ID), &d.ID)
 	writeJSON(w, 202, backupOut(b))
 }
 
@@ -710,6 +735,7 @@ func (s *server) backupOf(w http.ResponseWriter, r *http.Request) (store.Backup,
 		fail(w, err)
 		return b, false
 	}
+	target(r, "backup", itoa(b.ID), &b.DatabaseID)
 	return b, true
 }
 
@@ -720,6 +746,7 @@ func (s *server) getBackup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) download(w http.ResponseWriter, r *http.Request) {
+	want(r, "backup.download")
 	b, ok := s.backupOf(w, r)
 	if !ok {
 		return
@@ -755,9 +782,11 @@ func (s *server) startRestore(w http.ResponseWriter, r *http.Request) {
 			DBPassword string `json:"db_password"`
 		} `json:"new"`
 	}
+	wantNow(r, "restore.start", "restore", "")
 	if !decode(w, r, &in) {
 		return
 	}
+	note(r, "destination_id", in.DestinationID)
 	ok, err := s.a.CanRestoreKey(r.Context(), p, in.DestinationID, in.Key)
 	if err == nil && !ok {
 		err = store.ErrNotFound
@@ -775,6 +804,7 @@ func (s *server) startRestore(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
+	target(r, "restore", itoa(x.ID), x.TargetDatabaseID)
 	writeJSON(w, 202, restoreOut(x))
 }
 
@@ -808,6 +838,7 @@ func (s *server) getAllow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) putAllow(w http.ResponseWriter, r *http.Request) {
+	wantNow(r, "settings.allowlist", "setting", "allowlist")
 	if !me(r).IsAdmin() {
 		fail(w, auth.ErrForbidden)
 		return
@@ -818,6 +849,7 @@ func (s *server) putAllow(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
+	note(r, "cidrs", in.CIDRs)
 	if err := s.a.SetAllowlist(r.Context(), in.CIDRs); err != nil {
 		fail(w, err)
 		return

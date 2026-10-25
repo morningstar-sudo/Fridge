@@ -152,6 +152,9 @@ func (a *App) runBackup(objs ObjectStore, db store.Database, b store.Backup) {
 		a.alertf(ctx, "backup %s: recording result failed: %v", db.Name, err)
 		return
 	}
+	if b.Trigger == "schedule" {
+		a.auditSystem(ctx, "system.backup", db.ID, "backup", b.ID, true, map[string]any{"schedule_id": b.ScheduleID})
+	}
 	if b.ScheduleID != nil {
 		a.retain(ctx, objs, *b.ScheduleID)
 	}
@@ -163,6 +166,9 @@ func (a *App) failBackup(ctx context.Context, objs ObjectStore, db store.Databas
 	}
 	if derr := objs.Delete(ctx, b.S3Key); derr != nil {
 		log.Printf("backup %d: cleanup %s: %v", b.ID, b.S3Key, derr)
+	}
+	if b.Trigger == "schedule" {
+		a.auditSystem(ctx, "system.backup", db.ID, "backup", b.ID, false, map[string]any{"schedule_id": b.ScheduleID})
 	}
 	if a.Alert != nil {
 		a.Alert(ctx, fmt.Sprintf("backup failed: %s: %v", db.Name, err))
@@ -188,7 +194,9 @@ func (a *App) retain(ctx context.Context, objs ObjectStore, scheduleID int64) {
 		}
 		if err := a.Store.DeleteBackup(ctx, oks[i].ID); err != nil {
 			log.Printf("retention: delete backup %d: %v", oks[i].ID, err)
+			continue
 		}
+		a.auditSystem(ctx, "system.retention_delete", sc.DatabaseID, "backup", oks[i].ID, true, map[string]any{"schedule_id": scheduleID})
 	}
 }
 

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"time"
 
@@ -60,9 +61,13 @@ func (s *server) publicRoutes(m *http.ServeMux) {
 		}
 		u, err := s.au.Setup(r.Context(), in.SetupToken, in.Username, in.Credentials.creds())
 		if err != nil {
+			if errors.Is(err, auth.ErrBadSetupToken) { // later calls (ErrSetupDone) are not recorded: the route stays public
+				s.record(r, nil, "anonymous", "auth.setup", "", "", nil, false, map[string]any{"username": in.Username})
+			}
 			fail(w, err)
 			return
 		}
+		s.record(r, &u.ID, u.Username, "auth.setup", "user", itoa(u.ID), nil, true, nil)
 		writeJSON(w, 201, userJSON{u.ID, u.Username, u.Role})
 	})
 	m.HandleFunc("POST /api/auth/scram/start", func(w http.ResponseWriter, r *http.Request) {
@@ -72,8 +77,11 @@ func (s *server) publicRoutes(m *http.ServeMux) {
 		if !decode(w, r, &in) {
 			return
 		}
-		sf, id, _, err := s.au.LoginStart(r.Context(), in.ClientFirst, s.ip(r))
+		sf, id, att, err := s.au.LoginStart(r.Context(), in.ClientFirst, s.ip(r))
 		if err != nil {
+			if errors.Is(err, auth.ErrLocked) && s.locked.allow(att.Username+"\x00"+s.ip(r)) {
+				s.loginFailed(r, att.Username, att.UserID, "locked")
+			}
 			fail(w, err)
 			return
 		}
@@ -92,11 +100,20 @@ func (s *server) publicRoutes(m *http.ServeMux) {
 		if len(ua) > 256 {
 			ua = ua[:256]
 		}
-		sf, sid, u, _, err := s.au.LoginFinish(r.Context(), in.ScramID, in.ClientFinal, s.ip(r), ua)
+		sf, sid, u, att, err := s.au.LoginFinish(r.Context(), in.ScramID, in.ClientFinal, s.ip(r), ua)
 		if err != nil {
+			switch {
+			case errors.Is(err, auth.ErrBadCredentials):
+				s.loginFailed(r, att.Username, att.UserID, "bad_credentials")
+			case errors.Is(err, auth.ErrLocked):
+				if s.locked.allow(att.Username + "\x00" + s.ip(r)) {
+					s.loginFailed(r, att.Username, att.UserID, "locked")
+				}
+			}
 			fail(w, err)
 			return
 		}
+		s.record(r, &u.ID, u.Username, "auth.login", "user", itoa(u.ID), nil, true, nil)
 		http.SetCookie(w, &http.Cookie{Name: cookieName, Value: sid, Path: "/", HttpOnly: true, Secure: true,
 			SameSite: http.SameSiteStrictMode, MaxAge: int(auth.SessionAbsTTL / time.Second)})
 		out := map[string]any{"server_final": sf, "user": userJSON{u.ID, u.Username, u.Role}}
@@ -132,6 +149,7 @@ func (s *server) publicRoutes(m *http.ServeMux) {
 			fail(w, err)
 			return
 		}
+		s.record(r, &u.ID, u.Username, "invite.accept", "user", itoa(u.ID), nil, true, nil)
 		writeJSON(w, 200, userJSON{u.ID, u.Username, u.Role})
 	})
 }
@@ -176,6 +194,7 @@ func (s *server) sessions(all bool) http.HandlerFunc {
 func (s *server) loginRoutes(m *http.ServeMux) {
 	m.HandleFunc("POST /api/auth/logout", func(w http.ResponseWriter, r *http.Request) {
 		p, _ := principal(r)
+		wantNow(r, "auth.logout", "user", itoa(p.UserID))
 		http.SetCookie(w, &http.Cookie{Name: cookieName, Path: "/", HttpOnly: true, Secure: true,
 			SameSite: http.SameSiteStrictMode, MaxAge: -1})
 		noContent(w, s.au.Logout(r.Context(), p))
@@ -217,6 +236,7 @@ func (s *server) loginRoutes(m *http.ServeMux) {
 	})
 	m.HandleFunc("POST /api/me/password", func(w http.ResponseWriter, r *http.Request) {
 		p, _ := principal(r)
+		wantNow(r, "auth.password_change", "user", itoa(p.UserID))
 		var in struct {
 			ReauthToken string   `json:"reauth_token"`
 			Credentials credJSON `json:"credentials"`
@@ -235,6 +255,7 @@ func (s *server) loginRoutes(m *http.ServeMux) {
 			fail(w, store.ErrNotFound)
 			return
 		}
+		wantNow(r, "session.revoke", "session", shortHash(h))
 		noContent(w, s.au.RevokeSession(r.Context(), p, h))
 	})
 	m.HandleFunc("GET /api/users", func(w http.ResponseWriter, r *http.Request) {
@@ -259,14 +280,18 @@ func (s *server) loginRoutes(m *http.ServeMux) {
 			Username string `json:"username"`
 			Role     string `json:"role"`
 		}
+		wantNow(r, "invite.create", "user", "")
 		if !decode(w, r, &in) {
 			return
 		}
+		note(r, "username", in.Username)
+		note(r, "role", in.Role)
 		tok, err := s.au.CreateInvite(r.Context(), p, in.Username, in.Role)
 		if err != nil {
 			fail(w, err)
 			return
 		}
+		target(r, "user", in.Username, nil)
 		writeJSON(w, 201, link(r, tok))
 	})
 	m.HandleFunc("POST /api/users/{id}/reset", func(w http.ResponseWriter, r *http.Request) {
@@ -275,6 +300,7 @@ func (s *server) loginRoutes(m *http.ServeMux) {
 		if !ok {
 			return
 		}
+		wantNow(r, "user.reset_password", "user", itoa(id))
 		if !p.IsAdmin() { // CreateResetInvite itself has no principal check
 			fail(w, auth.ErrForbidden)
 			return
@@ -306,9 +332,15 @@ func (s *server) loginRoutes(m *http.ServeMux) {
 		var err error
 		if in.Role != nil {
 			err = s.au.SetRole(r.Context(), p, id, *in.Role)
+			s.record(r, nil, "", "user.role", "user", itoa(id), nil, err == nil, map[string]any{"role": *in.Role})
 		}
 		if err == nil && in.Disabled != nil {
 			err = s.au.SetDisabled(r.Context(), p, id, *in.Disabled)
+			act := "user.enable"
+			if *in.Disabled {
+				act = "user.disable"
+			}
+			s.record(r, nil, "", act, "user", itoa(id), nil, err == nil, nil)
 		}
 		noContent(w, err)
 	})

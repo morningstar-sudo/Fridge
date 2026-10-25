@@ -63,6 +63,7 @@ func (s *Scheduler) run(sc store.Schedule) {
 		log.Printf("schedule %d: skipped, backup running", sc.ID)
 	case err != nil:
 		log.Printf("schedule %d: %v", sc.ID, err)
+		s.a.auditSystem(context.Background(), "system.backup", sc.DatabaseID, "schedule", sc.ID, false, map[string]any{"schedule_id": sc.ID, "started": false})
 		if s.a.Alert != nil {
 			s.a.Alert(context.Background(), fmt.Sprintf("backup failed to start: schedule %d: %v", sc.ID, err))
 		}
