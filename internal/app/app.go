@@ -49,11 +49,11 @@ type App struct {
 	APIBackend    string
 	HealthTimeout time.Duration
 	Alert         func(ctx context.Context, text string)
-	Audit         *audit.Logger                                                    // nil = no audit trail
-	Sched         *Scheduler                                                       // may be nil in tests
-	OpenObjects   func(d store.Destination, secretKey string) (ObjectStore, error) // nil = real S3
-	now           func() time.Time                                                 // test clock; nil = time.Now
-	backupTimeout time.Duration                                                    // test override; 0 = backupTimeout
+	Audit         *audit.Logger                                                                       // nil = no audit trail
+	Sched         *Scheduler                                                                          // may be nil in tests
+	OpenObjects   func(d store.Destination, secretKey string, g *objstore.Guard) (ObjectStore, error) // nil = real S3
+	now           func() time.Time                                                                    // test clock; nil = time.Now
+	backupTimeout time.Duration                                                                       // test override; 0 = backupTimeout
 	wg            sync.WaitGroup
 
 	// ControlNetwork (FRIDGE_NETWORK) holds only traefik/fridge/fridge-meta; each DB node gets its own

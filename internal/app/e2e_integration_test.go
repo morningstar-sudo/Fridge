@@ -135,7 +135,7 @@ func TestE2EBackupRestoreAcrossVersions(t *testing.T) {
 	if !strings.HasPrefix(b.S3Key, "fridge/postgres-14/root1_it14/root1_it14-") || !strings.HasSuffix(b.S3Key, ".dump") {
 		t.Fatalf("key %q", b.S3Key)
 	}
-	objs, err := objstore.New(dest, sk)
+	objs, err := objstore.New(dest, sk, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

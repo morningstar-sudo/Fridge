@@ -108,7 +108,7 @@ func newRawSrv(t *testing.T, setupToken string, o Options) (http.Handler, *fakeR
 	rt := &fakeRT{}
 	st := storetest.New(t)
 	a := &app.App{Store: st, Box: box, RT: rt, CA: ca, TraefikDir: t.TempDir(), HealthTimeout: time.Second, Audit: &audit.Logger{Store: st}}
-	a.OpenObjects = func(store.Destination, string) (app.ObjectStore, error) { return &fakeObjs{}, nil }
+	a.OpenObjects = func(store.Destination, string, *objstore.Guard) (app.ObjectStore, error) { return &fakeObjs{}, nil }
 	au, err := auth.New(a.Store, key, setupToken)
 	if err != nil {
 		t.Fatal(err)

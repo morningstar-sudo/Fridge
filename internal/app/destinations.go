@@ -83,15 +83,34 @@ func (a *App) objects(ctx context.Context, id int64) (ObjectStore, store.Destina
 	if err != nil {
 		return nil, d, err
 	}
+	g, err := a.guardFor(ctx, d)
+	if err != nil {
+		return nil, d, err
+	}
 	if a.OpenObjects != nil {
-		o, err := a.OpenObjects(d, sk)
+		o, err := a.OpenObjects(d, sk, g)
 		return o, d, err
 	}
-	o, err := objstore.New(d, sk)
+	o, err := objstore.New(d, sk, g)
 	if err != nil {
 		return nil, d, err
 	}
 	return o, d, nil
+}
+
+// guardFor is the SSRF guard for d: none when an admin owns it. An admin who is demoted
+// has their destinations guarded from then on.
+func (a *App) guardFor(ctx context.Context, d store.Destination) (*objstore.Guard, error) {
+	if d.OwnerID != nil {
+		owner, err := a.Store.GetUser(ctx, *d.OwnerID)
+		if err != nil {
+			return nil, err
+		}
+		if owner.Role == "admin" {
+			return nil, nil
+		}
+	}
+	return a.endpointGuard(ctx)
 }
 
 func (a *App) TestDestination(ctx context.Context, id int64) error {

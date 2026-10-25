@@ -27,7 +27,7 @@ func TestTLSModeAcme(t *testing.T) {
 func TestInternalErrorHidden(t *testing.T) {
 	h, _, a := newSrv(t)
 	do(h, "POST", "/api/destinations", destBody, true)
-	a.OpenObjects = func(store.Destination, string) (app.ObjectStore, error) {
+	a.OpenObjects = func(store.Destination, string, *objstore.Guard) (app.ObjectStore, error) {
 		return nil, errors.New("dial tcp 10.1.2.3: secret-host")
 	}
 	w := do(h, "GET", "/api/destinations/1/objects", "", true)
@@ -39,7 +39,7 @@ func TestInternalErrorHidden(t *testing.T) {
 func TestDestinationLifecycle(t *testing.T) {
 	h, _, a := newSrv(t)
 	fo := &fakeObjs{list: []objstore.Object{{Key: "fridge/a.dump", Size: 3}}}
-	a.OpenObjects = func(store.Destination, string) (app.ObjectStore, error) { return fo, nil }
+	a.OpenObjects = func(store.Destination, string, *objstore.Guard) (app.ObjectStore, error) { return fo, nil }
 	do(h, "POST", "/api/destinations", destBody, true)
 	before, _ := a.Store.GetDestination(context.Background(), 1)
 	w := do(h, "PUT", "/api/destinations/1", `{"name":"d2","endpoint":"https://s3.example.com","bucket":"b","access_key":"AK"}`, true)
@@ -131,7 +131,7 @@ func TestBackupGetAndDownload(t *testing.T) {
 	h, rt, a := newSrv(t)
 	rt.dump = "PGDMP-bytes"
 	fo := &fakeObjs{body: rt.dump}
-	a.OpenObjects = func(store.Destination, string) (app.ObjectStore, error) { return fo, nil }
+	a.OpenObjects = func(store.Destination, string, *objstore.Guard) (app.ObjectStore, error) { return fo, nil }
 	do(h, "POST", "/api/databases", dbBody, true)
 	do(h, "POST", "/api/destinations", destBody, true)
 	do(h, "POST", "/api/databases/alice_abc/backups", `{}`, true)
@@ -159,7 +159,7 @@ func TestBackupGetAndDownload(t *testing.T) {
 func TestRestores(t *testing.T) {
 	h, _, a := newSrv(t)
 	fo := &fakeObjs{meta: map[string]string{"fridge-engine": "postgres", "fridge-version": "17"}}
-	a.OpenObjects = func(store.Destination, string) (app.ObjectStore, error) { return fo, nil }
+	a.OpenObjects = func(store.Destination, string, *objstore.Guard) (app.ObjectStore, error) { return fo, nil }
 	do(h, "POST", "/api/destinations", destBody, true)
 	if w := do(h, "POST", "/api/restores", `{"destination_id":1,"key":"k.dump"}`, true); w.Code != 400 {
 		t.Fatal(w.Code, w.Body.String())

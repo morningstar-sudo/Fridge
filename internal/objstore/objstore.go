@@ -6,6 +6,8 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"net/url"
 	"sort"
 	"strings"
@@ -29,7 +31,8 @@ type Store struct {
 }
 
 // New builds a client for d. d.Endpoint is a full http(s) URL.
-func New(d store.Destination, secretKey string) (*Store, error) {
+// A non-nil g vets every connection's real address (not just the name), unless the endpoint host is in g.Allow.
+func New(d store.Destination, secretKey string, g *Guard) (*Store, error) {
 	u, err := url.Parse(d.Endpoint)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return nil, fmt.Errorf("bad endpoint %q", d.Endpoint)
@@ -38,12 +41,19 @@ func New(d store.Destination, secretKey string) (*Store, error) {
 	if d.PathStyle {
 		lookup = minio.BucketLookupPath
 	}
-	c, err := minio.New(u.Host, &minio.Options{
+	opts := &minio.Options{
 		Creds:        credentials.NewStaticV4(d.AccessKey, secretKey, ""),
 		Secure:       u.Scheme == "https",
 		Region:       d.Region,
 		BucketLookup: lookup,
-	})
+	}
+	if g != nil && !g.allowed(u.Hostname()) {
+		t := http.DefaultTransport.(*http.Transport).Clone()
+		t.Proxy = nil // a proxy would make the request for us, past the guard
+		t.DialContext = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second, Control: g.DialControl}).DialContext
+		opts.Transport = t
+	}
+	c, err := minio.New(u.Host, opts)
 	if err != nil {
 		return nil, err
 	}

@@ -32,6 +32,7 @@ type execCall struct {
 
 type fakeRuntime struct {
 	mu        sync.Mutex
+	subnets   []netip.Prefix // what FridgeSubnets reports
 	runs      []container.RunSpec
 	removes   []removeCall
 	execs     []execCall
@@ -125,7 +126,9 @@ func (f *fakeRuntime) ContainerNetworks(ctx context.Context, ctr string) ([]stri
 	return out, nil
 }
 
-func (f *fakeRuntime) FridgeSubnets(ctx context.Context) ([]netip.Prefix, error) { return nil, nil }
+func (f *fakeRuntime) FridgeSubnets(ctx context.Context) ([]netip.Prefix, error) {
+	return f.subnets, nil
+}
 
 func (f *fakeRuntime) WaitHealthy(ctx context.Context, id string, d time.Duration) error {
 	if f.onWait != nil {
@@ -268,7 +271,7 @@ func newTestApp(t *testing.T) (*App, *fakeRuntime, *fakeObjects) {
 		rt.mu.Unlock()
 	}
 	objs := &fakeObjects{objs: map[string]fakeObj{}}
-	a.OpenObjects = func(d store.Destination, sk string) (ObjectStore, error) { return objs, nil }
+	a.OpenObjects = func(d store.Destination, sk string, _ *objstore.Guard) (ObjectStore, error) { return objs, nil }
 	return a, rt, objs
 }
 

@@ -70,6 +70,8 @@ func New(a *app.App, au *auth.Service, o Options) http.Handler {
 	api.HandleFunc("GET /api/restores/{id}", s.getRestore)
 	api.HandleFunc("GET /api/settings/allowlist", s.getAllow)
 	api.HandleFunc("PUT /api/settings/allowlist", s.putAllow)
+	api.HandleFunc("GET /api/settings/endpoint-allowlist", s.getEndpointAllow)
+	api.HandleFunc("PUT /api/settings/endpoint-allowlist", s.putEndpointAllow)
 	s.adminRoutes(api)
 	s.auditRoutes(api)
 	m.HandleFunc("GET /api/ca", func(w http.ResponseWriter, r *http.Request) {
@@ -485,6 +487,10 @@ func (s *server) createDest(w http.ResponseWriter, r *http.Request) {
 	}
 	note(r, "name", in.Name)
 	p := me(r)
+	if err := s.a.CheckEndpoint(r.Context(), p, in.Endpoint); err != nil {
+		fail(w, err)
+		return
+	}
 	nd := in.dest(0)
 	nd.OwnerID = &p.UserID // private until an admin shares it
 	d, err := s.a.CreateDestination(r.Context(), nd, in.SecretKey)
@@ -505,6 +511,10 @@ func (s *server) updateDest(w http.ResponseWriter, r *http.Request) {
 	}
 	var in destIn
 	if !decode(w, r, &in) {
+		return
+	}
+	if err := s.a.CheckEndpoint(r.Context(), me(r), in.Endpoint); err != nil {
+		fail(w, err)
 		return
 	}
 	if err := s.a.UpdateDestination(r.Context(), in.dest(old.ID), in.SecretKey); err != nil {
@@ -855,4 +865,43 @@ func (s *server) putAllow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string][]string{"cidrs": in.CIDRs})
+}
+
+// getEndpointAllow / putEndpointAllow: hosts an admin exempts from the destination SSRF guard.
+func (s *server) getEndpointAllow(w http.ResponseWriter, r *http.Request) {
+	if !me(r).IsAdmin() {
+		fail(w, auth.ErrForbidden)
+		return
+	}
+	h, err := s.a.EndpointAllowlist(r.Context())
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string][]string{"hosts": h})
+}
+
+func (s *server) putEndpointAllow(w http.ResponseWriter, r *http.Request) {
+	wantNow(r, "settings.endpoint_allowlist", "setting", "s3_endpoint_allowlist")
+	if !me(r).IsAdmin() {
+		fail(w, auth.ErrForbidden)
+		return
+	}
+	var in struct {
+		Hosts []string `json:"hosts"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	note(r, "hosts", in.Hosts)
+	if err := s.a.SetEndpointAllowlist(r.Context(), in.Hosts); err != nil {
+		fail(w, err)
+		return
+	}
+	h, err := s.a.EndpointAllowlist(r.Context())
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string][]string{"hosts": h})
 }
