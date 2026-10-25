@@ -13,8 +13,6 @@ func (s *server) imageRoutes(m *http.ServeMux) {
 	m.HandleFunc("GET /api/images", s.listImages)
 	m.HandleFunc("POST /api/images/pull", s.pullImages)
 	m.HandleFunc("GET /api/images/pull/{job}", s.pullStatus)
-	m.HandleFunc("GET /api/images/prune", s.prunePreview)
-	m.HandleFunc("POST /api/images/prune", s.pruneImages)
 	m.HandleFunc("POST /api/images/check-updates", s.checkUpdates)
 }
 
@@ -105,45 +103,6 @@ func (s *server) pullStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"status": st})
-}
-
-func (s *server) prunePreview(w http.ResponseWriter, r *http.Request) {
-	if !adminOnly(w, r) {
-		return
-	}
-	rows, total, err := s.a.PrunePreview(r.Context())
-	if err != nil {
-		fail(w, err)
-		return
-	}
-	writeJSON(w, 200, map[string]any{"images": mapList(rows, imageOut), "bytes": total})
-}
-
-func (s *server) pruneImages(w http.ResponseWriter, r *http.Request) {
-	wantNow(r, "image.prune", "image", "")
-	if !adminOnly(w, r) {
-		return
-	}
-	var in struct {
-		Refs []string `json:"refs"`
-	}
-	if !decode(w, r, &in) {
-		return
-	}
-	removed, err := s.a.Prune(r.Context(), in.Refs)
-	if removed == nil {
-		removed = []string{}
-	}
-	note(r, "removed", removed)
-	if err != nil && len(removed) == 0 {
-		fail(w, err)
-		return
-	}
-	out := map[string]any{"removed": removed}
-	if err != nil { // some went, some did not
-		out["errors"] = err.Error()
-	}
-	writeJSON(w, 200, out)
 }
 
 func (s *server) checkUpdates(w http.ResponseWriter, r *http.Request) {

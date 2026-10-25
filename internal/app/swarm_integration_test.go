@@ -275,3 +275,23 @@ func nodeState(t *testing.T, rt *swarm.Client, key string) swarm.NodeState {
 	t.Fatalf("no swarm state for node %s", key)
 	return swarm.NodeState{}
 }
+
+// A pull reaches every node through a job pinned to each (no agent runs there).
+func TestSwarmPullEverywhere(t *testing.T) {
+	serverImg := os.Getenv("FRIDGE_SERVER_IMAGE")
+	if serverImg == "" {
+		t.Skip("FRIDGE_SERVER_IMAGE is not set")
+	}
+	rt, err := swarm.New(swarm.Config{EdgeNetwork: "fridge_edge", EgressNetwork: "fridge_egress", ServerImage: serverImg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+	ctx := context.Background()
+	if err := rt.ImagePull(ctx, "busybox:1.37"); err != nil {
+		t.Fatalf("pull on every node: %v", err)
+	}
+	if err := rt.ImagePull(ctx, "fridge-no-such-image:0"); err == nil {
+		t.Fatal("pulling an image that does not exist succeeded")
+	}
+}

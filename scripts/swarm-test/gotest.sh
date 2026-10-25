@@ -1,24 +1,26 @@
 #!/usr/bin/env bash
-# Runs the swarm integration test (internal/app, -tags integration) inside the test swarm made by up.sh.
-# The test needs the Docker socket of a manager, the shared overlays, a metadata Postgres and an S3, so it is
-# built into an image and run as a one-shot service on the manager, like any other Fridge job.
-# Needs on the host daemon: go, docker, and the images fridge:dev, fridge-job:dev, postgres:17, postgres:18 and
-# cgr.dev/chainguard/minio (up.sh fridge:dev fridge-job:dev postgres:17 postgres:18 cgr.dev/chainguard/minio:latest).
-# Usage: gotest.sh [go test -run pattern]
+# Runs the swarm integration tests (-tags integration) inside the test swarm made by up.sh:
+#   internal/app TestSwarm*  - node lifecycle, jobs, isolation, rotation
+#   internal/api TestE2E*    - users, ownership and permissions through the HTTP API
+# The tests need the Docker socket of a manager, the shared overlays, a metadata Postgres and an S3, so they are
+# built into an image and run as one-shot services on the manager, like any other Fridge job.
+# Needs on the host daemon: go, docker, and the images fridge:dev, fridge-job:dev, postgres:17/18 and
+# cgr.dev/chainguard/minio (scripts/swarm-test/load.sh puts them into the nodes).
+# Usage: gotest.sh [app|api]     (default: both)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-RUN=${1:-TestSwarm}
+WHICH=${1:-all}
 M="docker exec fsw1 docker"
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"; $M service rm fridge-test-meta fridge-test-minio fridge-gotest >/dev/null 2>&1 || true' EXIT
 
 CGO_ENABLED=0 GOOS=linux go test -c -tags integration -o "$OUT/app.test" ./internal/app/
+CGO_ENABLED=0 GOOS=linux go test -c -tags integration -o "$OUT/api.test" ./internal/api/
 cat >"$OUT/Dockerfile" <<'EOF'
 FROM fridge-job:dev
 USER root
-COPY app.test /app.test
-ENTRYPOINT ["/app.test"]
+COPY app.test api.test /
 EOF
 docker build -q -t fridge-gotest:dev "$OUT" >/dev/null
 for n in fsw1 fsw2; do docker save fridge-gotest:dev | docker exec -i $n docker load >/dev/null; done
@@ -43,19 +45,29 @@ for _ in $(seq 1 60); do
 done
 sleep 3
 
-$M service create -d --name fridge-gotest --mode replicated-job --restart-condition none \
-	--constraint node.role==manager --network fridge_edge --network fridge_egress \
-	--mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
-	-e FRIDGE_SERVER_IMAGE=fridge:dev -e FRIDGE_JOB_IMAGE=fridge-job:dev \
-	-e FRIDGE_TEST_DATABASE_URL='postgres://postgres:postgres@fridge-test-meta:5432/postgres?sslmode=disable' \
-	-e FRIDGE_IT_S3_ENDPOINT=http://fridge-test-minio:9000 -e FRIDGE_IT_S3_ACCESS=minioadmin -e FRIDGE_IT_S3_SECRET=minioadmin -e FRIDGE_IT_S3_BUCKET=fridge \
-	fridge-gotest:dev -test.v -test.run "$RUN" -test.timeout 20m >/dev/null
+# run <binary> <-test.run pattern>
+run() {
+	$M service rm fridge-gotest >/dev/null 2>&1 || true
+	$M service create -d --name fridge-gotest --mode replicated-job --restart-condition none \
+		--constraint node.role==manager --network fridge_edge --network fridge_egress \
+		--mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
+		--entrypoint "$1" \
+		-e FRIDGE_SERVER_IMAGE=fridge:dev -e FRIDGE_JOB_IMAGE=fridge-job:dev \
+		-e FRIDGE_TEST_DATABASE_URL='postgres://postgres:postgres@fridge-test-meta:5432/postgres?sslmode=disable' \
+		-e FRIDGE_IT_S3_ENDPOINT=http://fridge-test-minio:9000 -e FRIDGE_IT_S3_ACCESS=minioadmin -e FRIDGE_IT_S3_SECRET=minioadmin -e FRIDGE_IT_S3_BUCKET=fridge \
+		fridge-gotest:dev -test.v -test.run "$2" -test.timeout 25m >/dev/null
+	echo "running $1 $2 ..."
+	local st=""
+	for _ in $(seq 1 1400); do
+		st=$($M service ps fridge-gotest --format '{{.CurrentState}}' 2>/dev/null | head -1)
+		case "$st" in Complete*|Failed*|Rejected*) break ;; esac
+		sleep 2
+	done
+	$M service logs --no-task-ids --raw fridge-gotest 2>&1 | tail -80
+	case "$st" in Complete*) echo "PASS $1" ;; *) echo "FAIL $1 ($st)"; return 1 ;; esac
+}
 
-echo "running ..."
-for _ in $(seq 1 1300); do
-	st=$($M service ps fridge-gotest --format '{{.CurrentState}}' 2>/dev/null | head -1)
-	case "$st" in Complete*|Failed*|Rejected*) break ;; esac
-	sleep 2
-done
-$M service logs --no-task-ids --raw fridge-gotest 2>&1 | tail -80
-case "$st" in Complete*) echo "PASS" ;; *) echo "FAIL ($st)"; exit 1 ;; esac
+rc=0
+case "$WHICH" in all|app) run /app.test TestSwarm || rc=1 ;; esac
+case "$WHICH" in all|api) run /api.test TestE2E || rc=1 ;; esac
+exit $rc

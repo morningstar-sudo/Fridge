@@ -106,7 +106,7 @@ func runServer() error {
 	a := &app.App{
 		Store: st, Box: box, RT: rt, CA: ca, APIBackend: apiBackend,
 		HealthTimeout: 120 * time.Second, Alert: alert.Webhook(os.Getenv("FRIDGE_ALERT_WEBHOOK")),
-		JobImage: os.Getenv("FRIDGE_JOB_IMAGE"), EgressNetwork: egressNet,
+		JobImage: os.Getenv("FRIDGE_JOB_IMAGE"), EgressNetwork: egressNet, Img: rt,
 		Audit: &audit.Logger{Store: st}, Registry: &registry.Client{},
 	}
 	if err := a.RecoverInterrupted(ctx); err != nil { // after FailRunning, before the scheduler loads
@@ -134,6 +134,18 @@ func runServer() error {
 	prefixes, err := trustedProxies(ctx, rt, edgeNet)
 	if err != nil {
 		return err
+	}
+	// Swarm drift: a sidecar that vanished, leftovers of failed nodes, a database service that is gone.
+	reconcile := func() {
+		cctx, cancel := context.WithTimeout(ctx, 4*time.Minute)
+		defer cancel()
+		if err := a.Reconcile(cctx); err != nil {
+			log.Printf("reconcile: %v", err)
+		}
+	}
+	go reconcile()
+	if err := a.Sched.AddFixed("*/5 * * * *", reconcile); err != nil {
+		log.Printf("reconcile job: %v", err)
 	}
 	if err := a.Sched.AddFixed("@hourly", func() {
 		if _, err := au.PurgeExpired(ctx); err != nil {

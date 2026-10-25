@@ -11,7 +11,7 @@ export default async function images(ctx) {
   ctx.onCleanup(() => timers.forEach(clearTimeout));
   const checkBtn = btn("Kiểm tra cập nhật", "btn-outline-secondary", checkUpdates, "arrow-repeat");
   ctx.root.append(
-    pageHead("Images", "Docker image dùng để tạo node database", btn("Pull…", "btn-outline-primary", pullDialog, "cloud-download"), btn("Pull tất cả", "btn-outline-primary", () => pull(null), "cloud-download"), checkBtn, btn("Prune…", "btn-outline-danger", pruneDialog, "trash3")),
+    pageHead("Images", "Docker image dùng để tạo node database; Pull tải về mọi máy trong swarm", btn("Pull…", "btn-outline-primary", pullDialog, "cloud-download"), btn("Pull tất cả", "btn-outline-primary", () => pull(null), "cloud-download"), checkBtn),
     progress,
     body,
   );
@@ -102,34 +102,6 @@ export default async function images(ctx) {
       m.hide();
       pull(boxes.filter((b) => b.el.checked).map((b) => b.ref));
     });
-  }
-
-  async function pruneDialog() {
-    try {
-      const pv = await api("GET", "/api/images/prune");
-      const go = h("button", { type: "button", class: "btn btn-danger" }, `Xóa ${pv.images.length} image`);
-      const m = modal({
-        title: "Dọn image không dùng",
-        body: pv.images.length
-          ? h("div", {}, h("p", {}, `Các image dưới đây không có database nào dùng. Xóa chúng giải phóng khoảng ${fmtBytes(pv.bytes)}; pull lại được khi cần.`), h("ul", {}, pv.images.map((i) => h("li", {}, h("span", { class: "mono" }, i.ref), " — " + fmtBytes(i.size)))))
-          : h("p", { class: "mb-0" }, "Không có image nào để dọn: image nào đang có cũng có database dùng."),
-        footer: pv.images.length ? [h("button", { type: "button", class: "btn btn-outline-secondary", "data-bs-dismiss": "modal" }, "Hủy"), go] : [],
-      });
-      go.addEventListener("click", () =>
-        withBusy(go, async () => {
-          try {
-            const r = await api("POST", "/api/images/prune", { refs: pv.images.map((i) => i.ref) });
-            m.hide();
-            toast(`Đã xóa ${r.removed.length} image` + (r.errors ? ` (có lỗi: ${r.errors})` : ""), !!r.errors);
-            await load();
-          } catch (e) {
-            errToast(e);
-          }
-        }),
-      );
-    } catch (e) {
-      errToast(e);
-    }
   }
 
   const engines = await api("GET", "/api/engines");

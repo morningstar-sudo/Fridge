@@ -61,6 +61,7 @@ type App struct {
 	Img      Images   // nil: the Images page is unavailable (tests)
 	Registry Registry // nil: remote versions are not looked up
 	pulls    pulls
+	rec      reconciler
 }
 
 // auditSystem records an action taken by Fridge itself (scheduler, retention).

@@ -3,54 +3,52 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"net/url"
 	"os"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"fridge/internal/app"
 	"fridge/internal/audit"
 	"fridge/internal/auth"
-	"fridge/internal/container"
+	"fridge/internal/engine"
 	"fridge/internal/objstore"
 	"fridge/internal/pki"
 	"fridge/internal/secret"
 	"fridge/internal/store"
 	"fridge/internal/store/storetest"
+	"fridge/internal/swarm"
 )
 
-// Real Docker + an S3 (MinIO): users, ownership, permissions, per-node users and network isolation through the HTTP API.
-//
-//	Run: bash scripts/test-db.sh && FRIDGE_IT_S3_ENDPOINT=http://localhost:19000 FRIDGE_IT_S3_ACCESS=minioadmin \
-//	  FRIDGE_IT_S3_SECRET=minioadmin FRIDGE_IT_S3_BUCKET=fridge go test -tags integration -timeout 30m ./internal/api/ -run E2E -v
+// Real swarm + an S3 (MinIO): users, ownership, permissions, per-node users and network isolation through the HTTP API.
+// It runs inside the test swarm (scripts/swarm-test/gotest.sh), which provides the Docker socket, the overlays,
+// the metadata Postgres and the S3.
 func TestE2EOwnershipFlow(t *testing.T) {
+	serverImg, jobImg := os.Getenv("FRIDGE_SERVER_IMAGE"), os.Getenv("FRIDGE_JOB_IMAGE")
 	ep, ak, sk, bucket := os.Getenv("FRIDGE_IT_S3_ENDPOINT"), os.Getenv("FRIDGE_IT_S3_ACCESS"), os.Getenv("FRIDGE_IT_S3_SECRET"), os.Getenv("FRIDGE_IT_S3_BUCKET")
-	if ep == "" || ak == "" || sk == "" || bucket == "" {
-		t.Skip("FRIDGE_IT_S3_* not set")
+	if serverImg == "" || jobImg == "" || ep == "" || ak == "" || sk == "" || bucket == "" {
+		t.Skip("FRIDGE_SERVER_IMAGE, FRIDGE_JOB_IMAGE and FRIDGE_IT_S3_* are not set")
 	}
 	ctx := context.Background()
-	const network, proxyName = "fridge-it-api-net", "fridge-it-api-traefik"
-
-	rt, err := container.New(network)
+	egress := "fridge_egress"
+	rt, err := swarm.New(swarm.Config{EdgeNetwork: "fridge_edge", EgressNetwork: egress, ServerImage: serverImg})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := rt.EnsureNetwork(ctx); err != nil {
+	defer rt.Close()
+	if err := rt.Ping(ctx); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { exec.Command("docker", "network", "rm", network).Run() })
-	_ = rt.Remove(ctx, proxyName, proxyName)
-	if _, err := rt.Run(ctx, container.RunSpec{Name: proxyName, Image: "postgres:17-alpine", Env: []string{"POSTGRES_PASSWORD=x"}, Volume: proxyName, VolumePath: "/var/lib/postgresql/data"}); err != nil {
+	if err := rt.EnsureNetworks(ctx); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = rt.Remove(ctx, proxyName, proxyName) })
 
 	key := make([]byte, 32)
 	rand.Read(key)
@@ -63,10 +61,8 @@ func TestE2EOwnershipFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := storetest.New(t)
-	a := &app.App{Store: st, Box: box, RT: rt, CA: ca, TraefikDir: t.TempDir(), HealthTimeout: 120 * time.Second,
-		Alert:          func(ctx context.Context, text string) { t.Logf("alert: %s", text) },
-		ControlNetwork: network, TraefikContainer: proxyName, Audit: &audit.Logger{Store: st},
-		WebCert: "/traefik/certs/web.crt", WebKey: "/traefik/certs/web.key"}
+	a := &app.App{Store: st, Box: box, RT: rt, CA: ca, HealthTimeout: 4 * time.Minute, JobImage: jobImg, EgressNetwork: egress,
+		Alert: func(ctx context.Context, text string) { t.Logf("alert: %s", text) }, Audit: &audit.Logger{Store: st}}
 	au, err := auth.New(st, key, "setup-tok")
 	if err != nil {
 		t.Fatal(err)
@@ -77,35 +73,59 @@ func TestE2EOwnershipFlow(t *testing.T) {
 	t.Cleanup(func() {
 		dbs, _ := st.ListDatabases(ctx)
 		for _, d := range dbs {
-			_ = rt.Remove(ctx, d.ContainerID, d.Volume)
-			_ = rt.Remove(ctx, d.Volume, d.Volume)
-			_ = rt.RemoveNetwork(ctx, app.NodeNetwork(d))
+			if d.NodeKey != "" {
+				_ = rt.RemoveNode(ctx, swarm.NodeRef{Key: d.NodeKey, HostID: d.HostID, Volume: d.Volume})
+			}
 		}
 	})
 
-	psql := func(d store.Database, sql string) (out, errs string, code int) {
+	// sql runs a statement as the app user of node d, through its edge sidecar (what a client behind Traefik gets).
+	sql := func(d store.Database, query string) (string, error) {
 		t.Helper()
-		var o, eb bytes.Buffer
-		code, err := rt.Exec(ctx, d.ContainerID, []string{"psql", "-U", d.User, "-d", d.Name, "-v", "ON_ERROR_STOP=1", "-tAc", sql}, nil, &o, &eb)
-		if err != nil {
-			t.Fatalf("psql %q on %s: %v", sql, d.Name, err)
-		}
-		return strings.TrimSpace(o.String()), eb.String(), code
-	}
-	must := func(d store.Database, sql string) string {
-		t.Helper()
-		out, errs, code := psql(d, sql)
-		if code != 0 {
-			t.Fatalf("psql %q on %s: exit %d: %s", sql, d.Name, code, errs)
-		}
-		return out
-	}
-	dockerCount := func() int {
-		out, err := exec.Command("docker", "ps", "-aq", "--filter", "label=fridge.db_id").Output()
+		pw, err := box.Decrypt(d.PasswordEnc)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return len(strings.Fields(string(out)))
+		eng, _, _ := engine.Get(d.Engine)
+		p := engine.Params{Name: d.Name, User: d.User, Version: d.Version, AdminUser: d.User, AdminPassword: pw}
+		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		c, err := pgx.Connect(cctx, eng.AdminDSN(p, swarm.EdgeService(d.NodeKey), swarm.EdgePort))
+		if err != nil {
+			t.Fatalf("connect to %s: %v", d.Name, err)
+		}
+		defer c.Close(cctx)
+		var out string
+		rows, err := c.Query(cctx, query, pgx.QueryExecModeSimpleProtocol)
+		if err != nil {
+			return "", err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			vals, err := rows.Values()
+			if err != nil {
+				return "", err
+			}
+			if len(vals) > 0 {
+				out = strings.TrimSpace(strings.Join([]string{out, toString(vals[0])}, ""))
+			}
+		}
+		return out, rows.Err()
+	}
+	must := func(d store.Database, query string) string {
+		t.Helper()
+		out, err := sql(d, query)
+		if err != nil {
+			t.Fatalf("%q on %s: %v", query, d.Name, err)
+		}
+		return out
+	}
+	nodeCount := func() int {
+		ns, err := rt.ListNodes(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(ns)
 	}
 	view := func(sid, db string) dbView {
 		var v dbView
@@ -121,7 +141,7 @@ func TestE2EOwnershipFlow(t *testing.T) {
 	_, e.alice = loginAs(t, e.h, "alice", pwAlice)
 	_, e.bob = loginAs(t, e.h, "bob", pwBob)
 
-	// MinIO sits on loopback, which users may not point a destination at: the admin exempts exactly that host.
+	// The S3 sits on a Fridge network, which users may not point a destination at: the admin exempts exactly that host.
 	u, err := url.Parse(ep)
 	if err != nil {
 		t.Fatal(err)
@@ -219,22 +239,22 @@ func TestE2EOwnershipFlow(t *testing.T) {
 	if _, err := o.Put(ctx, "upload/junk.dump", strings.NewReader("this is not a dump"), nil); err != nil {
 		t.Fatal(err)
 	}
-	before := dockerCount()
+	before := nodeCount()
 	junk := jb(map[string]any{"destination_id": mustAtoi(t, dAlice), "key": "upload/junk.dump", "new": map[string]string{"name": "junk", "domain": "copy.alice.lan"}})
 	if w := e.want(t, e.alice, "POST", "/api/restores", junk, 400); !strings.Contains(w.Body.String(), "pg_dump") {
 		t.Fatalf("junk refusal does not say why: %s", w.Body.String())
 	}
-	if after := dockerCount(); after != before {
-		t.Fatalf("a refused restore changed the container count %d -> %d", before, after)
+	if after := nodeCount(); after != before {
+		t.Fatalf("a refused restore changed the node count %d -> %d", before, after)
 	}
 
 	// ---- the app user is no superuser and cannot run programs on the server ----
-	if got := must(aliceApp, "select rolsuper from pg_roles where rolname = current_user"); got != "f" {
+	if got := must(aliceApp, "select rolsuper::text from pg_roles where rolname = current_user"); got != "false" {
 		t.Fatalf("app user rolsuper = %q", got)
 	}
 	must(aliceApp, "create table mine(a int)")
-	if _, errs, code := psql(aliceApp, "copy (select 1) to program 'id'"); code == 0 || !strings.Contains(errs, "permission denied") && !strings.Contains(errs, "must be superuser") {
-		t.Fatalf("COPY TO PROGRAM as the app user: exit %d %q", code, errs)
+	if _, err := sql(aliceApp, "copy (select 1) to program 'id'"); err == nil || !strings.Contains(err.Error(), "permission denied") && !strings.Contains(err.Error(), "must be superuser") {
+		t.Fatalf("COPY TO PROGRAM as the app user: %v", err)
 	}
 
 	// ---- one superuser per node; rotating one leaves the other alone ----
@@ -257,20 +277,37 @@ func TestE2EOwnershipFlow(t *testing.T) {
 	}
 	e.want(t, e.bob, "POST", "/api/databases/alice_shop/superuser/reveal", "", 404)
 
-	// ---- network isolation ----
-	for _, d := range []store.Database{aliceShop, bobShop} {
-		nets, err := rt.ContainerNetworks(ctx, d.Volume)
-		if err != nil || len(nets) != 1 || nets[0] != app.NodeNetwork(d) {
-			t.Fatalf("%s networks = %q, %v (want only %s)", d.Name, nets, err, app.NodeNetwork(d))
-		}
-	}
-	if app.NodeNetwork(aliceShop) == app.NodeNetwork(bobShop) {
+	// ---- network isolation: each node has its own overlay; a job on one cannot see the other ----
+	if swarm.Network(aliceShop.NodeKey) == swarm.Network(bobShop.NodeKey) {
 		t.Fatal("two nodes share a network")
 	}
-	if code, err := rt.Exec(ctx, aliceShop.ContainerID, []string{"pg_isready", "-h", bobShop.Volume, "-t", "3"}, nil, &bytes.Buffer{}, &bytes.Buffer{}); err != nil || code == 0 {
-		t.Fatalf("alice_shop reached bob_shop: code %d err %v", code, err)
+	ready := func(from string, target string) int {
+		res, err := rt.RunJob(ctx, swarm.JobSpec{Name: "isready", Image: jobImg, Entrypoint: []string{"/usr/lib/postgresql/17/bin/pg_isready"},
+			Args: []string{"-h", target, "-U", "x", "-t", "3"}, Networks: []string{from}, Timeout: 2 * time.Minute})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.ExitCode
 	}
-	if code, err := rt.Exec(ctx, aliceShop.ContainerID, []string{"pg_isready", "-h", proxyName, "-t", "3"}, nil, &bytes.Buffer{}, &bytes.Buffer{}); err != nil || code != 0 {
-		t.Fatalf("the proxy cannot reach alice_shop's network: code %d err %v", code, err)
+	if ready(swarm.Network(aliceShop.NodeKey), swarm.DBService(bobShop.NodeKey)) == 0 {
+		t.Fatal("alice_shop's network reached bob_shop")
+	}
+	if ready(swarm.Network(aliceShop.NodeKey), swarm.DBService(aliceShop.NodeKey)) != 0 {
+		t.Fatal("alice_shop's own network does not reach it")
+	}
+	if ready(swarm.Network(aliceShop.NodeKey), swarm.EdgeService(bobShop.NodeKey)) == 0 {
+		t.Fatal("alice_shop's network reached bob_shop's sidecar")
+	}
+}
+
+func toString(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case []byte:
+		return string(x)
+	default:
+		b, _ := json.Marshal(x)
+		return strings.Trim(string(b), `"`)
 	}
 }

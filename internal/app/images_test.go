@@ -7,29 +7,26 @@ import (
 	"testing"
 	"time"
 
-	"fridge/internal/container"
 	"fridge/internal/store"
+	"fridge/internal/swarm"
 )
 
 type fakeImages struct {
 	mu        sync.Mutex
-	images    map[string]container.ImageInfo // on disk
-	uses      []container.ContainerUse
-	removed   []string
+	images    map[string]swarm.ImageInfo // on the manager
 	pulled    []string
-	gate      chan struct{} // non-nil: pulls wait for it to be closed
-	removeErr map[string]error
+	gate      chan struct{}     // non-nil: pulls wait for it to be closed
 	remote    map[string]string // ref -> registry digest
 	remoteErr error
 }
 
-func (f *fakeImages) ImageInspect(_ context.Context, ref string) (container.ImageInfo, error) {
+func (f *fakeImages) ImageInspect(_ context.Context, ref string) (swarm.ImageInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if i, ok := f.images[ref]; ok {
 		return i, nil
 	}
-	return container.ImageInfo{}, container.ErrImageNotFound
+	return swarm.ImageInfo{}, swarm.ErrImageNotFound
 }
 
 func (f *fakeImages) ImagePull(_ context.Context, ref string) error {
@@ -45,21 +42,6 @@ func (f *fakeImages) ImagePull(_ context.Context, ref string) error {
 	return nil
 }
 
-func (f *fakeImages) ImageRemove(_ context.Context, ref string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := f.removeErr[ref]; err != nil {
-		return err
-	}
-	f.removed = append(f.removed, ref)
-	delete(f.images, ref)
-	return nil
-}
-
-func (f *fakeImages) DBContainers(context.Context) ([]container.ContainerUse, error) {
-	return f.uses, nil
-}
-
 func (f *fakeImages) RemoteDigest(_ context.Context, ref string) (string, error) {
 	return f.remote[ref], f.remoteErr
 }
@@ -73,33 +55,41 @@ func (f fakeRegistry) RemoteEnv(_ context.Context, ref, key string) (string, err
 	return f.env[ref], f.err
 }
 
-func img(ref, id string, size int64, version string, digests ...string) container.ImageInfo {
-	return container.ImageInfo{Ref: ref, ID: "sha256:" + id, Size: size, Created: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC),
+func img(ref, id string, size int64, version string, digests ...string) swarm.ImageInfo {
+	return swarm.ImageInfo{Ref: ref, ID: "sha256:" + id, Size: size, Created: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC),
 		RepoDigests: digests, Env: []string{"PATH=/x", "PG_VERSION=" + version}}
 }
 
 func newImgApp(t *testing.T) (*App, *fakeImages) {
 	a, _, _ := newTestApp(t)
-	f := &fakeImages{images: map[string]container.ImageInfo{}, remote: map[string]string{}}
+	f := &fakeImages{images: map[string]swarm.ImageInfo{}, remote: map[string]string{}}
 	a.Img = f
 	return a, f
 }
 
+// The databases that exist say which images are in use; a failed node does not count.
 func TestListImagesUsage(t *testing.T) {
 	a, f := newImgApp(t)
-	t0, t1 := time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC), time.Date(2026, 10, 9, 0, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+	t1 := time.Date(2026, 10, 9, 0, 0, 0, 0, time.UTC)
 	f.images["postgres:16"] = img("postgres:16", "aaaaaaaaaaaabbbbbbbb", 400, "16.4")
 	f.images["postgres:17"] = img("postgres:17", "cccccccccccc", 450, "17.2")
-	f.images["myorg/legacy:1"] = img("myorg/legacy:1", "dddd", 10, "")
-	f.uses = []container.ContainerUse{
-		{Name: "fridge-postgres-aa", Image: "postgres:16", ImageID: "sha256:aaaaaaaaaaaabbbbbbbb", StartedAt: t0},
-		{Name: "fridge-postgres-bb", Image: "postgres:16", ImageID: "sha256:aaaaaaaaaaaabbbbbbbb", StartedAt: t1}, // stopped, but ran later
-		{Name: "fridge-old", Image: "myorg/legacy:1", ImageID: "sha256:dddd"},
+	var dbs []store.Database
+	for _, n := range []string{"aa", "bb"} {
+		d, err := createDB(a, ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: n, Domain: n + ".com", Version: "16"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dbs = append(dbs, d)
 	}
-	if err := a.Store.UpsertImageCheck(context.Background(), store.ImageCheck{ImageRef: "postgres:17", RemoteVersion: "17.3", CheckedAt: t1}); err != nil {
+	a.RT.(*fakeRuntime).healthErr = errors.New("unhealthy")
+	if _, err := createDB(a, ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "cc", Domain: "cc.com", Version: "17"}); err == nil {
+		t.Fatal("want a failed node")
+	}
+	if err := a.Store.UpsertImageCheck(ctx, store.ImageCheck{ImageRef: "postgres:17", RemoteVersion: "17.3", CheckedAt: t1}); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := a.ListImages(context.Background())
+	rows, err := a.ListImages(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,52 +98,18 @@ func TestListImagesUsage(t *testing.T) {
 		by[r.Ref] = r
 	}
 	p16 := by["postgres:16"]
-	if !p16.Present || len(p16.UsedBy) != 2 || p16.UsedBy[0] != "fridge-postgres-aa" || p16.LastUsed == nil || !p16.LastUsed.Equal(t1) ||
+	if !p16.Present || len(p16.UsedBy) != 2 || p16.UsedBy[0] != dbs[0].Name || p16.UsedBy[1] != dbs[1].Name || p16.LastUsed == nil || p16.LastUsed.Before(dbs[1].CreatedAt) ||
 		p16.ShortDigest != "aaaaaaaaaaaa" || p16.Version != "16.4" || p16.Size != 400 {
 		t.Fatalf("postgres:16 %+v", p16)
+	}
+	if p17 := by["postgres:17"]; len(p17.UsedBy) != 0 || p17.Update == nil || p17.Update.RemoteVersion != "17.3" {
+		t.Fatalf("postgres:17 (its only node failed) %+v", p17)
 	}
 	if p15 := by["postgres:15"]; p15.Present || len(p15.UsedBy) != 0 || p15.ShortDigest != "" {
 		t.Fatalf("postgres:15 %+v", p15)
 	}
-	if r, ok := by["myorg/legacy:1"]; !ok || len(r.UsedBy) != 1 || !r.Present {
-		t.Fatalf("an image only a container uses must be listed: %+v", r)
-	}
-	if u := by["postgres:17"].Update; u == nil || u.RemoteVersion != "17.3" {
-		t.Fatalf("update info lost: %+v", by["postgres:17"])
-	}
-	if len(rows) != len(catalogRefs())+1 {
+	if len(rows) != len(catalogRefs()) {
 		t.Fatalf("%d rows", len(rows))
-	}
-}
-
-func TestPrune(t *testing.T) {
-	a, f := newImgApp(t)
-	ctx := context.Background()
-	f.images["postgres:16"] = img("postgres:16", "a1", 400, "16.4")
-	f.images["postgres:17"] = img("postgres:17", "b2", 450, "17.2")
-	f.images["postgres:18"] = img("postgres:18", "c3", 500, "18.1")
-	f.uses = []container.ContainerUse{{Name: "n1", Image: "postgres:17", ImageID: "sha256:b2"}}
-
-	rows, total, err := a.PrunePreview(ctx)
-	if err != nil || len(rows) != 2 || total != 900 {
-		t.Fatalf("preview %+v %d %v", rows, total, err)
-	}
-	removed, err := a.Prune(ctx, []string{"postgres:17", "nginx:latest", "postgres:15", "postgres:16", "postgres:16"})
-	if err != nil || len(removed) != 1 || removed[0] != "postgres:16" || len(f.removed) != 1 {
-		t.Fatalf("removed %v (%v) calls %v", removed, err, f.removed)
-	}
-	// a container that appeared since the preview protects its image
-	f.uses = append(f.uses, container.ContainerUse{Name: "n2", Image: "postgres:18", ImageID: "sha256:c3"})
-	if removed, _ = a.Prune(ctx, []string{"postgres:18"}); len(removed) != 0 || len(f.removed) != 1 {
-		t.Fatalf("pruned an image in use: %v", removed)
-	}
-	// one failing removal does not stop the others
-	f.uses = nil
-	f.images["postgres:16"] = img("postgres:16", "a1", 400, "16.4")
-	f.removeErr = map[string]error{"postgres:16": errors.New("busy")}
-	removed, err = a.Prune(ctx, []string{"postgres:16", "postgres:18"})
-	if err == nil || len(removed) != 1 || removed[0] != "postgres:18" {
-		t.Fatalf("removed %v err %v", removed, err)
 	}
 }
 

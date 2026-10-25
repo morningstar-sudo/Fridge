@@ -309,20 +309,13 @@ await step("activity shows who is online", async () => {
   await admin.locator("td", { hasText: "root1" }).first().waitFor();
 });
 
-await step("images: pull postgres:15, prune keeps used images, update check reports a state per image", async () => {
+await step("images: pull postgres:15 on every node, update check reports a state per image", async () => {
   await admin.goto(BASE + "/#/images");
   await admin.getByRole("button", { name: "Pull…" }).click();
   await modal(admin).locator('[id="pull-postgres:15"]').check();
   await modal(admin).getByRole("button", { name: "Pull", exact: true }).click();
   await admin.locator(".status.ok", { hasText: "xong" }).first().waitFor({ timeout: 600000 });
   await admin.locator("tr", { hasText: "postgres:15" }).getByText("đã có").waitFor();
-
-  await admin.getByRole("button", { name: "Prune…" }).click();
-  const m = modal(admin);
-  await m.getByText(/Dọn image|Không có image/).first().waitFor();
-  const used = await admin.locator("tr", { hasText: /\d+ database/ }).locator("td").first().textContent();
-  if ((await m.textContent()).includes(used.trim())) throw new Error("prune would remove an image in use: " + used);
-  await closeModal(admin);
 
   await admin.getByRole("button", { name: "Kiểm tra cập nhật" }).click();
   await admin.locator(".toast-msg", { hasText: "Đã kiểm tra" }).first().waitFor({ timeout: 180000 }); // one registry call per image

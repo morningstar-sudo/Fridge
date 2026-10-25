@@ -4,28 +4,26 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
-	"fmt"
 	"log"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"fridge/internal/container"
 	"fridge/internal/engine"
 	"fridge/internal/store"
+	"fridge/internal/swarm"
 )
 
-// Images is the Docker image surface the Images page needs; *container.Client satisfies it.
+// Images is the Docker image surface the Images page needs; *swarm.Client satisfies it. Inspecting looks at the
+// manager's daemon; pulling reaches every node.
 type Images interface {
-	ImageInspect(ctx context.Context, ref string) (container.ImageInfo, error)
+	ImageInspect(ctx context.Context, ref string) (swarm.ImageInfo, error)
 	ImagePull(ctx context.Context, ref string) error
-	ImageRemove(ctx context.Context, ref string) error
-	DBContainers(ctx context.Context) ([]container.ContainerUse, error)
 	RemoteDigest(ctx context.Context, ref string) (string, error)
 }
 
-var _ Images = (*container.Client)(nil)
+var _ Images = (*swarm.Client)(nil)
 
 // Registry reads an image's environment from the remote registry; *registry.Client satisfies it.
 type Registry interface {
@@ -80,7 +78,7 @@ func (a *App) ListImages(ctx context.Context) ([]ImageRow, error) {
 	if err := a.needImages(); err != nil {
 		return nil, err
 	}
-	uses, err := a.Img.DBContainers(ctx)
+	uses, err := a.imageUses(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +110,7 @@ func (a *App) ListImages(ctx context.Context) ([]ImageRow, error) {
 		row := ImageRow{Ref: ref}
 		info, err := a.Img.ImageInspect(ctx, ref)
 		switch {
-		case errors.Is(err, container.ErrImageNotFound):
+		case errors.Is(err, swarm.ErrImageNotFound):
 		case err != nil:
 			return nil, err
 		default:
@@ -124,7 +122,7 @@ func (a *App) ListImages(ctx context.Context) ([]ImageRow, error) {
 			row.Version = envValue(info.Env, versionEnv)
 		}
 		for _, u := range uses {
-			if u.Image != ref && !(row.Present && u.ImageID != "" && u.ImageID == info.ID) {
+			if u.Image != ref {
 				continue
 			}
 			row.UsedBy = append(row.UsedBy, u.Name)
@@ -274,50 +272,6 @@ func (a *App) RunningPulls() []store.Job {
 
 // ---- pruning ----
 
-// PrunePreview lists images that are on disk and used by no database container, and their total size.
-func (a *App) PrunePreview(ctx context.Context) ([]ImageRow, int64, error) {
-	rows, err := a.ListImages(ctx)
-	if err != nil {
-		return nil, 0, err
-	}
-	var out []ImageRow
-	var total int64
-	for _, r := range rows {
-		if r.Present && len(r.UsedBy) == 0 {
-			out = append(out, r)
-			total += r.Size
-		}
-	}
-	return out, total, nil
-}
-
-// Prune removes the listed images that are, right now, unused. Anything else is skipped silently.
-// It returns what it removed; a failing removal does not stop the rest.
-func (a *App) Prune(ctx context.Context, refs []string) ([]string, error) {
-	unused, _, err := a.PrunePreview(ctx) // checked again here, not trusted from an earlier preview
-	if err != nil {
-		return nil, err
-	}
-	ok := map[string]bool{}
-	for _, r := range unused {
-		ok[r.Ref] = true
-	}
-	var removed []string
-	var errs []error
-	for _, ref := range refs {
-		if !ok[ref] {
-			continue
-		}
-		delete(ok, ref)
-		if err := a.Img.ImageRemove(ctx, ref); err != nil && !errors.Is(err, container.ErrImageNotFound) {
-			errs = append(errs, fmt.Errorf("%s: %w", ref, err))
-			continue
-		}
-		removed = append(removed, ref)
-	}
-	return removed, errors.Join(errs...)
-}
-
 // ---- update check ----
 
 // CheckImageUpdates compares each catalog image on disk with the registry and records the result.
@@ -328,7 +282,7 @@ func (a *App) CheckImageUpdates(ctx context.Context) error {
 	}
 	for _, ref := range catalogRefs() {
 		info, err := a.Img.ImageInspect(ctx, ref)
-		if errors.Is(err, container.ErrImageNotFound) {
+		if errors.Is(err, swarm.ErrImageNotFound) {
 			continue
 		} else if err != nil {
 			return err
@@ -365,4 +319,29 @@ func hasDigest(repoDigests []string, digest string) bool {
 		}
 	}
 	return false
+}
+
+type imageUse struct {
+	Name, Image string
+	StartedAt   time.Time
+}
+
+// imageUses are the databases that exist and the image each is made from.
+func (a *App) imageUses(ctx context.Context) ([]imageUse, error) {
+	dbs, err := a.Store.ListDatabases(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []imageUse
+	for _, d := range dbs {
+		if d.Status == "error" || d.Status == "deleted" {
+			continue
+		}
+		eng, _, err := engine.Get(d.Engine)
+		if err != nil {
+			continue
+		}
+		out = append(out, imageUse{Name: d.Name, Image: eng.Spec(engine.Params{Version: d.Version}).Image, StartedAt: d.CreatedAt})
+	}
+	return out, nil
 }

@@ -60,6 +60,7 @@ type fakeRuntime struct {
 	jobFn     func(spec job.Spec, networks []string) (stdout, stderr string, code int)
 	hang      bool // RunJob blocks until ctx is done
 	objs      *fakeObjects
+	nodes     []swarm.NodeState // what ListNodes reports
 }
 
 func (f *fakeRuntime) Ping(ctx context.Context) error { return f.pingErr }
@@ -95,7 +96,11 @@ func (f *fakeRuntime) RemoveNode(ctx context.Context, ref swarm.NodeRef) error {
 	return nil
 }
 
-func (f *fakeRuntime) ListNodes(ctx context.Context) ([]swarm.NodeState, error) { return nil, nil }
+func (f *fakeRuntime) ListNodes(ctx context.Context) ([]swarm.NodeState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]swarm.NodeState(nil), f.nodes...), nil
+}
 
 func (f *fakeRuntime) Subnets(ctx context.Context) ([]netip.Prefix, error) { return f.subnets, nil }
 
