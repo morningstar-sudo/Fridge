@@ -73,6 +73,12 @@ stack_up() {
 	done
 }
 
+# the one-shot volume cleanup has finished on every server
+purge_done() {
+	out=$(docker service ps fridge-purge --format '{{.CurrentState}}' 2>/dev/null) || return 1
+	[ -n "$out" ] && ! printf '%s\n' "$out" | grep -qv '^Complete'
+}
+
 wait_for() { # <seconds> <what> <command...>
 	t=$1; what=$2; shift 2
 	i=0
@@ -111,7 +117,7 @@ if [ "$UNINSTALL" = 1 ]; then
 		docker service create -d --name fridge-purge --mode global-job --restart-condition none \
 			--mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
 			docker:cli sh -c 'for v in $(docker volume ls -q | grep -E "^fridge-postgres-|^fridge_fridge-(meta|data)$"); do docker volume rm "$v"; done' >/dev/null
-		sleep 20
+		wait_for 300 "the volume cleanup (it pulls docker:cli on every server)" purge_done
 		docker service rm fridge-purge >/dev/null 2>&1 || true
 		rm -rf "$DIR"
 		say "Fridge and all of its data are gone."
@@ -145,7 +151,8 @@ chmod 700 "$DIR"
 
 # stack.yml: the copy next to this script when it runs from a checkout, otherwise the one on GitHub
 REF=main
-[ -n "$VERSION" ] && [ "$VERSION" != latest ] && REF=$VERSION
+VERSION=${VERSION#v} # tags are v1.2.3, images 1.2.3
+[ -n "$VERSION" ] && [ "$VERSION" != latest ] && REF=v$VERSION
 HERE=$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)
 if [ -n "$HERE" ] && [ -f "$HERE/deploy/stack.yml" ]; then
 	cp "$HERE/deploy/stack.yml" "$DIR/stack.yml"

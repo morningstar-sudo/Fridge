@@ -1,48 +1,72 @@
 # Fridge
 
-Creates Postgres nodes behind one Traefik port (routed by TLS SNI), backs them up to S3 and restores them.
-A web UI and a CLI, with user accounts and per-user ownership, drive it.
+Creates Postgres nodes on Docker Swarm, reachable on one port (routed by TLS SNI), backs them up to S3 and restores
+them. A web UI and a CLI, with user accounts and per-user ownership, drive it.
 
-## Run it (docker compose)
+Everything is a swarm service. Adding a server is `docker swarm join`: nothing else is installed on it.
+
+## Install
+
+On the server that becomes the swarm manager (needs Docker):
 
 ```sh
-# 1. secrets (deploy/.env is gitignored; every variable is explained in deploy/.env.example)
-cp deploy/.env.example deploy/.env
-# then fill FRIDGE_META_PASSWORD (openssl rand -hex 16), FRIDGE_SECRET_KEY (openssl rand -base64 32),
-# FRIDGE_SETUP_TOKEN (openssl rand -hex 32) and FRIDGE_PUBLIC_HOSTS (the names/IPs you reach the UI by,
-# e.g. fridge.lan,192.168.1.10); optional FRIDGE_ALERT_WEBHOOK, TZ
-
-# 2. start (add --profile dev for a local MinIO with bucket "fridge", minioadmin/minioadmin)
-docker compose -f deploy/docker-compose.yml --profile dev up -d --build
+curl -fsSL https://raw.githubusercontent.com/morningstar-sudo/Fridge/main/install.sh | sh -s -- --admin alice
 ```
 
-The web UI and the API are on **https://localhost:8443** (plain `:8080` only redirects there). The certificate is
-signed by Fridge's own CA; to avoid the browser warning, download the CA from `https://localhost:8443/api/ca`
-(or `fridge ca`) and add it to your trust store. The first visit shows the Setup page: enter `FRIDGE_SETUP_TOKEN` and
-choose the admin account's name and password. The password never leaves the browser (SCRAM-SHA-256 login).
-The setup token is not used again once a user exists.
+On Windows, `irm https://raw.githubusercontent.com/morningstar-sudo/Fridge/main/install.ps1 | iex` does the same inside
+WSL. The script starts a swarm if there is none, labels the server, writes `.env` (secrets are generated only when
+missing; `FRIDGE_SECRET_KEY` is never regenerated), deploys the stack, waits until it answers and prints the web UI
+address and the admin password (once). Run it again to upgrade; `--version TAG` picks an image tag, `--hosts a,b` names
+the hosts the web certificate must cover. `--uninstall` stops Fridge and leaves databases and data;
+`--uninstall --purge` deletes everything. The images are `ghcr.io/morningstar-sudo/fridge` and `…/fridge-job`
+(make the packages public, or `docker login ghcr.io` first).
 
-**Upgrading from the Postgres 17 metadata database:** `fridge-meta` now runs `postgres:18`, which cannot open a
-volume made by 17. Development/smoke data: `docker compose -f deploy/docker-compose.yml down` then
-`docker volume rm fridge_fridge-meta`. Real data must be dumped from the old database and restored into the new one.
+By hand: copy `deploy/env.example` to `.env` next to `deploy/stack.yml`, fill it in, then
+`set -a; . ./.env; set +a; docker stack deploy --with-registry-auth -c stack.yml fridge`.
+
+The web UI and API are on **https://\<server\>:8443**. The certificate is signed by Fridge's own CA; to avoid the browser
+warning, download the CA from `https://<server>:8443/api/ca` (or `fridge ca`) and add it to your trust store. The first
+visit shows the Setup page when no admin exists: enter `FRIDGE_SETUP_TOKEN` from `.env` and choose a name and password.
+The password never leaves the browser (SCRAM-SHA-256 login).
+
+## How it is laid out
+
+| Service | Where | What |
+|---|---|---|
+| `traefik` | every server (global) | database port 5432 on the swarm routing mesh, web/API port 8443 on the server itself; routes and certificates are fetched from Fridge, nothing is stored |
+| `fridge` | the server labelled `fridge.control=true` | the API, the scheduler, the swarm client (needs a manager) |
+| `fridge-meta` | same server | metadata Postgres |
+| `fridge-db-<key>` | one server per database (`fridge.db=true`), pinned, with a local volume | the database |
+| `fridge-edge-<key>` | next to its database | forwards the shared edge network to the database's private network |
+
+Each database has its own encrypted overlay network that only its sidecar joins, so nodes cannot reach one another, the
+metadata database or the Fridge API. Dump, restore and the deep check of a backup run as one-shot services
+(`fridge-job` image, PostgreSQL clients 13–18) that join the database's network and the empty `fridge_egress` network,
+and talk to S3 themselves; nothing is streamed through Fridge.
+
+**Add a server:** `docker swarm join …` on it, then on the manager `docker node update --label-add fridge.db=true <node>`
+so it may hold databases. New databases go to the labelled server holding the fewest. A database lives on one server with
+its local volume; if that server goes down the database is down until it returns (restore from S3 to move it).
+
+**Firewall.** Open 8443 (web UI/API) and 5432 (databases). The routing mesh hides client addresses, so Fridge cannot
+filter port 5432 by IP: restrict it with the host firewall or the cloud security group. The IP allowlist (Settings, default
+loopback and the private ranges) applies to the web UI and API, whose port is published on each server itself.
 
 ## Using it
 
-Each user owns the databases and S3 destinations they create; admins see and manage everything. Database and role
-names carry the owner's account name as a prefix (`alice_shop`). Every database node runs on its own internal Docker
-network that only Traefik joins, so one node cannot reach another node, the metadata database or the Fridge API.
-User-created destinations may not point at Fridge's own networks or at loopback/link-local addresses (an admin can
-exempt hosts under Settings). Backup files are checked before a restore (header) and, on request, by a real
-`pg_restore` in a throwaway container without network.
+Each user owns the databases and S3 destinations they create; admins see and manage everything. Database and role names
+carry the owner's account name as a prefix (`alice_shop`). User-created destinations may not point into Fridge's own
+networks or at loopback/link-local addresses (an admin can exempt hosts under Settings). Backup files are checked before
+a restore (header) and, on request, by a real `pg_restore` in a job that has S3 and nothing else.
 
 ### CLI
 
 ```sh
 go build -o fridge ./cmd/fridge
-export FRIDGE_URL=https://localhost:8443      # the default
+export FRIDGE_URL=https://<server>:8443       # default https://localhost:8443
 ./fridge login --user alice                   # first time: shows the CA fingerprint and asks before trusting it
 ./fridge domains add shop.example.com         # a database needs a domain you registered
-./fridge dest add local --endpoint http://minio:9000 --bucket fridge --access-key minioadmin --secret-key minioadmin --path-style
+./fridge dest add local --endpoint https://s3.example.com --bucket fridge --access-key AK --secret-key SK
 ./fridge create postgres shop --domain shop.example.com --version 16 --random-credentials   # creates alice_shop; prints the generated user and password once
 ./fridge show alice_shop --reveal             # connection string with the password (audited)
 ./fridge backup alice_shop --wait
@@ -57,61 +81,70 @@ session is only ever sent to the server it came from, and there is no way to swi
 `FRIDGE_SESSION` overrides the session file, `FRIDGE_CA_FILE` names a CA to trust. A server with no browser at hand can
 create its first admin with `fridge setup --setup-token T --user NAME`.
 
-If nobody can log in any more, three commands work on the metadata database from inside the server container:
+If nobody can log in any more, three commands work on the metadata database from inside the server container
+(`docker exec $(docker ps -q -f name=fridge_fridge) /fridge recover …`):
 
 ```sh
-docker compose -f deploy/docker-compose.yml exec fridge /fridge recover allowlist 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
-docker compose -f deploy/docker-compose.yml exec fridge /fridge recover reset-password alice   # prints a one-time link
-docker compose -f deploy/docker-compose.yml exec fridge /fridge recover promote alice
+/fridge recover allowlist 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+/fridge recover reset-password alice   # prints a one-time link
+/fridge recover promote alice
 ```
 
-Clients connect on port 5432 with TLS; the hostname selects the database (SNI). Without DNS, let `host` drive SNI
-and `hostaddr` pick the server:
+Clients connect on port 5432 with TLS; the hostname selects the database (SNI), on any server of the swarm. Without DNS,
+let `host` drive SNI and `hostaddr` pick the server:
 
 ```sh
-psql "postgresql://abc_app:<pw>@abc.com:5432/abc?sslmode=require&hostaddr=127.0.0.1"
+psql "postgresql://abc_app:<pw>@abc.com:5432/abc?sslmode=require&hostaddr=203.0.113.10"
 ./fridge ca > fridge-ca.crt   # then sslmode=verify-full&sslrootcert=fridge-ca.crt
 ```
 
-The IP allowlist (default `10.0.0.0/8 172.16.0.0/12 192.168.0.0/16`) also guards the web UI and API behind Traefik.
-Admins change it under Settings or with `fridge allowlist set <cidr>...`; if that locks you out, use
-`recover allowlist` above, which bypasses Traefik.
+Stopping `fridge` does not interrupt database traffic; Traefik keeps routing with the last config it fetched. A Traefik
+that starts while Fridge is down has no routes until Fridge is back. Fridge checks the swarm at boot and every five
+minutes: it recreates a missing edge sidecar, cleans up what failed creations left behind, and alerts (once per problem)
+about a database service that is gone or swarm resources that belong to no database.
 
-Stopping `fridge` does not interrupt database traffic; Traefik keeps routing with the last config.
+The Images page lists the catalog images, pulls one on every server (a job pinned to each, no agent) and reports newer
+versions in the registry. There is no Prune: nothing runs on the other servers to clean them.
 
 ## `fridge server` environment
 
 | Variable | Default | |
 |---|---|---|
-| `FRIDGE_DATABASE_URL` | — (required) | metadata Postgres; compose points it at `fridge-meta` |
+| `FRIDGE_DATABASE_URL` | — (required) | metadata Postgres |
 | `FRIDGE_SECRET_KEY` | — (required) | base64 of exactly 32 bytes; encrypts DB passwords and S3 secrets — keep it, losing it loses them |
-| `FRIDGE_SETUP_TOKEN` | empty | lets the first admin be created; without it setup is impossible until it is set. Unused once a user exists |
-| `FRIDGE_PUBLIC_HOSTS` | empty | comma-separated host names/IPs for the web certificate (`localhost`, `127.0.0.1` are always included); the certificate is reissued when this changes and renewed 30 days before it expires |
-| `FRIDGE_TRUSTED_PROXY` | the `fridge-net` subnet | CIDRs of peers whose `X-Forwarded-For` is believed; anything else is taken at its socket address |
-| `FRIDGE_LISTEN` | `:8080` | plain-HTTP listen address inside the container (not published; Traefik terminates TLS in front of it) |
-| `FRIDGE_DATA` | `/data` | holds the internal CA (`<data>/ca`) |
-| `FRIDGE_TRAEFIK_DIR` | `/traefik` | shared with Traefik: `dynamic/` (routes), `certs/` (per-database certificates and `web.crt`/`web.key`) |
-| `FRIDGE_NETWORK` | `fridge-net` | control network (traefik, fridge, fridge-meta); each DB node gets its own internal `fridge-node-<key>` network |
-| `FRIDGE_TRAEFIK_CONTAINER` | `fridge-traefik` | Traefik container Fridge attaches to every node network |
+| `FRIDGE_PROVIDER_TOKEN` | — (required) | bearer token of the Traefik configuration endpoint |
+| `FRIDGE_SERVER_IMAGE` | — (required) | the server image; also runs the edge sidecars and volume jobs |
+| `FRIDGE_JOB_IMAGE` | — (required) | the dump/restore/check job image |
+| `FRIDGE_SETUP_TOKEN` | empty | lets the first admin be created; unused once a user exists |
+| `FRIDGE_PUBLIC_HOSTS` | empty | comma-separated host names/IPs for the web certificate (`localhost`, `127.0.0.1` are always included); reissued when this changes, renewed 30 days before expiry |
+| `FRIDGE_TRUSTED_PROXY` | the edge network's subnet | CIDRs of peers whose `X-Forwarded-For` is believed |
+| `FRIDGE_LISTEN` | `:8080` | plain-HTTP API address inside the container (Traefik terminates TLS in front of it) |
+| `FRIDGE_PROVIDER_LISTEN` | `:8081` | Traefik's configuration endpoint (edge network only, token required) |
+| `FRIDGE_DATA` | `/data` | holds the internal CA (`<data>/ca`) and the web certificate (`<data>/web`) |
+| `FRIDGE_EDGE_NETWORK` / `FRIDGE_EGRESS_NETWORK` | `fridge_edge` / `fridge_egress` | shared overlays (Traefik, Fridge, sidecars / empty, open to the internet, for jobs) |
 | `FRIDGE_API_BACKEND` | `http://fridge:8080` | URL Traefik uses to reach the API |
-| `FRIDGE_ALERT_WEBHOOK` | empty (log only) | receives `POST {"text": "..."}` on failed backups/restores |
-| `TZ` | `UTC` | time zone the backup schedules' cron expressions run in (e.g. `Asia/Ho_Chi_Minh`); compose passes it through from `deploy/.env` |
+| `FRIDGE_ALERT_WEBHOOK` | empty (log only) | receives `POST {"text": "..."}` on failed backups/restores and swarm problems |
+| `TZ` | `UTC` | time zone the backup schedules' cron expressions run in |
 
-Compose also reads `FRIDGE_META_PASSWORD` (use URL-safe characters, it goes into `FRIDGE_DATABASE_URL`).
-`fridge healthcheck` exits 0 when `/readyz` answers 200 (used by the compose healthcheck).
-
-Runbook: a recreated Traefik container loses its attachments to the `fridge-node-*` networks. Compose restarts Fridge when it recreates Traefik, and Fridge re-attaches them at boot and re-checks every minute. If Traefik was recreated outside compose while Fridge was down, DB routes recover within 1 minute of Fridge starting.
+Passwords reach services and jobs through their environment (as before; Docker secrets are a later step).
+`fridge healthcheck` exits 0 when `/readyz` answers 200.
 
 ## Tests
 
 ```sh
-bash scripts/test-db.sh && go test ./...          # the metadata-database tests need Postgres 18 from this script
+bash scripts/test-db.sh && go test ./...          # unit tests; the metadata-database tests need Postgres 18 from this script
 
-# end-to-end against real Docker and an S3 (the dev profile's MinIO is enough)
-S3="FRIDGE_IT_S3_ENDPOINT=http://localhost:59000 FRIDGE_IT_S3_ACCESS=minioadmin FRIDGE_IT_S3_SECRET=minioadmin FRIDGE_IT_S3_BUCKET=fridge-it"
-env $S3 go test -tags integration -timeout 30m ./internal/app/ -run 'E2E|DumpCheckReal' -v   # backup a 14 node, restore into 17; real pg_restore check
-env $S3 go test -tags integration -timeout 30m ./internal/api/ -run E2E -v                    # users, ownership, permissions, per-node users, network isolation
-go test -tags integration ./internal/container/ -run Images -v                                # Docker image calls
-
-bash scripts/ui-smoke/run.sh   # the whole web UI in a real browser (Playwright in Docker) against a throwaway stack
+# everything below runs in a throwaway two-node swarm made of two docker:dind containers, never on your own Docker
+docker build -f deploy/Dockerfile -t fridge:dev . && docker build -f deploy/Dockerfile --target job -t fridge-job:dev .
+IMAGES="fridge:dev fridge-job:dev postgres:17 postgres:18 traefik:v3.5 cgr.dev/chainguard/minio:latest cgr.dev/chainguard/minio-client:latest"
+bash scripts/swarm-test/up.sh $IMAGES
+bash scripts/swarm-test/gotest.sh        # swarm client, jobs, isolation (internal/app) and users/ownership through the API (internal/api)
+bash scripts/swarm-test/down.sh && bash scripts/swarm-test/up.sh $IMAGES
+bash scripts/swarm-test/e2e.sh           # install.sh, mesh access from both servers, TLS/SNI refusals, Traefik restart, drain, reconcile
+bash scripts/swarm-test/down.sh && bash scripts/swarm-test/up.sh $IMAGES
+bash scripts/ui-smoke/run.sh             # the whole web UI in a real browser (Playwright in Docker) against the installed stack
+bash scripts/swarm-test/down.sh
 ```
+
+`.github/workflows/ci.yml` runs the same, and publishes the two images (`linux/amd64`, `linux/arm64`) from `main` and
+`v*` tags.

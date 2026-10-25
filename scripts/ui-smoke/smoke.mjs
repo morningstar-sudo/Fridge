@@ -62,7 +62,7 @@ const newPage = async (label) => {
 };
 const admin = await newPage("admin");
 const heading = (page, text) => page.locator("h1", { hasText: text }).waitFor();
-const toast = (page, text) => page.locator(".toast-msg", { hasText: text }).first().waitFor();
+const toast = (page, text, timeout = 20000) => page.locator(".toast-msg", { hasText: text }).first().waitFor({ timeout });
 const modal = (page) => page.locator(".modal.show");
 // Escape right after opening is swallowed by the fade-in; the close button is not.
 const closeModal = async (page) => {
@@ -143,7 +143,7 @@ await step("add a MinIO destination and test it", async () => {
   const row = admin.locator("tr", { hasText: "minio" });
   await row.waitFor();
   await row.getByRole("button", { name: "Test" }).click();
-  await toast(admin, "kết nối được");
+  await toast(admin, "kết nối được", 90000);
 });
 
 let dbUser, dbPass;
