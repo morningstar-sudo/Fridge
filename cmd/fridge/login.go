@@ -350,6 +350,9 @@ func (c *cli) login(args []string) error {
 	if err := c.trustCA(yes); err != nil {
 		return err
 	}
+	if err := c.requireSetupDone(); err != nil {
+		return err
+	}
 	if user == "" {
 		fmt.Fprint(c.errw, "Username: ")
 		var err error
@@ -486,5 +489,21 @@ func (c *cli) setup(args []string) error {
 		return err
 	}
 	fmt.Fprintf(c.out, "admin %s created — now run: fridge login --user %s\n", user, user)
+	return nil
+}
+
+// requireSetupDone stops a login attempt on a server that has no accounts yet: SCRAM would only say "bad credentials".
+func (c *cli) requireSetupDone() error {
+	status, b, err := roundTrip("GET", "/api/setup/status", nil, "")
+	if err != nil {
+		return err
+	}
+	if err := apiError(status, b); err != nil {
+		return err
+	}
+	var st struct{ Needed bool }
+	if json.Unmarshal(b, &st) == nil && st.Needed {
+		return apiError(401, []byte(`{"error":"setup required"}`))
+	}
 	return nil
 }

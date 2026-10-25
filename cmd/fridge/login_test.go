@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,8 +29,9 @@ const (
 
 // apiLog records what the fake server saw.
 type apiLog struct {
-	mu   sync.Mutex
-	reqs []rec
+	setupNeeded atomic.Bool
+	mu          sync.Mutex
+	reqs        []rec
 }
 
 func (l *apiLog) add(r rec) { l.mu.Lock(); l.reqs = append(l.reqs, r); l.mu.Unlock() }
@@ -59,7 +62,7 @@ func fakeServer(t *testing.T, ca *pki.CA) (*httptest.Server, *apiLog) {
 		case "/api/ca":
 			w.Write(ca.CertPEM())
 		case "/api/setup/status":
-			w.Write([]byte(`{"needed":false}`))
+			w.Write([]byte(fmt.Sprintf(`{"needed":%v}`, log.setupNeeded.Load())))
 		case "/api/auth/scram/start":
 			var in struct {
 				ClientFirst string `json:"client_first"`
@@ -384,5 +387,19 @@ func TestSetupCommand(t *testing.T) {
 	}
 	if code, _, errs := runWith(t, "short\n", "setup", "--setup-token", "t", "--user", "alice", "--password-stdin"); code != 1 || !strings.Contains(errs, "12") {
 		t.Errorf("short password: %d %q", code, errs)
+	}
+}
+
+func TestLoginBeforeSetupSaysSetupNeeded(t *testing.T) {
+	ca := newTestCA(t)
+	srv, log := fakeServer(t, ca)
+	cliEnv(t, srv.URL)
+	log.setupNeeded.Store(true)
+	code, _, errs := runWith(t, testPass+"\n", "login", "--user", testUser, "--password-stdin", "--yes")
+	if code != 1 || !strings.Contains(errs, "fridge setup") || !strings.Contains(errs, "no accounts") {
+		t.Fatalf("%d %q", code, errs)
+	}
+	if _, ok := log.last("/api/auth/scram/start"); ok {
+		t.Fatal("a SCRAM round was started against a server with no accounts")
 	}
 }

@@ -35,6 +35,36 @@ User-created destinations may not point at Fridge's own networks or at loopback/
 exempt hosts under Settings). Backup files are checked before a restore (header) and, on request, by a real
 `pg_restore` in a throwaway container without network.
 
+### CLI
+
+```sh
+go build -o fridge ./cmd/fridge
+export FRIDGE_URL=https://localhost:8443      # the default
+./fridge login --user alice                   # first time: shows the CA fingerprint and asks before trusting it
+./fridge domains add shop.example.com         # a database needs a domain you registered
+./fridge dest add local --endpoint http://minio:9000 --bucket fridge --access-key minioadmin --secret-key minioadmin --path-style
+./fridge create postgres shop --domain shop.example.com --version 16 --random-credentials   # creates alice_shop; prints the generated user and password once
+./fridge show alice_shop --reveal             # connection string with the password (audited)
+./fridge backup alice_shop --wait
+./fridge check --from local:<key> --wait      # deep check of a backup file with a real pg_restore
+./fridge restore --from local:<key> --name copy --domain copy.example.com --version 17 --wait
+./fridge members add alice_shop bob           # bob can back up and read the connection string, not add people
+./fridge audit --since 24h
+```
+
+`fridge login` saves the session in `~/.config/fridge/session` (0600) and the CA in `~/.config/fridge/ca.pem`; a saved
+session is only ever sent to the server it came from, and there is no way to switch certificate checking off.
+`FRIDGE_SESSION` overrides the session file, `FRIDGE_CA_FILE` names a CA to trust. A server with no browser at hand can
+create its first admin with `fridge setup --setup-token T --user NAME`.
+
+If nobody can log in any more, three commands work on the metadata database from inside the server container:
+
+```sh
+docker compose -f deploy/docker-compose.yml exec fridge /fridge recover allowlist 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+docker compose -f deploy/docker-compose.yml exec fridge /fridge recover reset-password alice   # prints a one-time link
+docker compose -f deploy/docker-compose.yml exec fridge /fridge recover promote alice
+```
+
 Clients connect on port 5432 with TLS; the hostname selects the database (SNI). Without DNS, let `host` drive SNI
 and `hostaddr` pick the server:
 
@@ -43,12 +73,9 @@ psql "postgresql://abc_app:<pw>@abc.com:5432/abc?sslmode=require&hostaddr=127.0.
 ./fridge ca > fridge-ca.crt   # then sslmode=verify-full&sslrootcert=fridge-ca.crt
 ```
 
-The IP allowlist (default `10.0.0.0/8 172.16.0.0/12 192.168.0.0/16`) also guards the web UI and API behind Traefik. If you lock
-yourself out, set it from inside the container, which bypasses Traefik:
-
-```sh
-docker compose -f deploy/docker-compose.yml exec fridge /fridge allowlist set 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
-```
+The IP allowlist (default `10.0.0.0/8 172.16.0.0/12 192.168.0.0/16`) also guards the web UI and API behind Traefik.
+Admins change it under Settings or with `fridge allowlist set <cidr>...`; if that locks you out, use
+`recover allowlist` above, which bypasses Traefik.
 
 Stopping `fridge` does not interrupt database traffic; Traefik keeps routing with the last config.
 
@@ -78,8 +105,13 @@ Runbook: a recreated Traefik container loses its attachments to the `fridge-node
 ## Tests
 
 ```sh
-bash scripts/test-db.sh && go test ./...
-# end-to-end (Docker + MinIO): backup a Postgres 14 node, restore it into Postgres 17
-FRIDGE_IT_S3_ENDPOINT=http://localhost:59000 FRIDGE_IT_S3_ACCESS=minioadmin FRIDGE_IT_S3_SECRET=minioadmin \
-FRIDGE_IT_S3_BUCKET=fridge-it go test -tags integration -timeout 20m ./internal/app/ -run E2E -v
+bash scripts/test-db.sh && go test ./...          # the metadata-database tests need Postgres 18 from this script
+
+# end-to-end against real Docker and an S3 (the dev profile's MinIO is enough)
+S3="FRIDGE_IT_S3_ENDPOINT=http://localhost:59000 FRIDGE_IT_S3_ACCESS=minioadmin FRIDGE_IT_S3_SECRET=minioadmin FRIDGE_IT_S3_BUCKET=fridge-it"
+env $S3 go test -tags integration -timeout 30m ./internal/app/ -run 'E2E|DumpCheckReal' -v   # backup a 14 node, restore into 17; real pg_restore check
+env $S3 go test -tags integration -timeout 30m ./internal/api/ -run E2E -v                    # users, ownership, permissions, per-node users, network isolation
+go test -tags integration ./internal/container/ -run Images -v                                # Docker image calls
+
+bash scripts/ui-smoke/run.sh   # the whole web UI in a real browser (Playwright in Docker) against a throwaway stack
 ```
