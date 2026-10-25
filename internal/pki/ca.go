@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -61,6 +62,27 @@ func (c *CA) Issue(domain string, validFor time.Duration) (certPEM, keyPEM []byt
 	if domain == "" {
 		return nil, nil, errors.New("pki: empty domain")
 	}
+	return c.IssueNames([]string{domain}, validFor)
+}
+
+// IssueNames is Issue for several names: an IP literal goes into the IP SANs, anything else into the DNS SANs.
+// The first name is the common name.
+func (c *CA) IssueNames(names []string, validFor time.Duration) (certPEM, keyPEM []byte, err error) {
+	if len(names) == 0 || names[0] == "" {
+		return nil, nil, errors.New("pki: no names")
+	}
+	var dns []string
+	var ips []net.IP
+	for _, n := range names {
+		if n == "" {
+			return nil, nil, errors.New("pki: empty name")
+		}
+		if ip := net.ParseIP(n); ip != nil {
+			ips = append(ips, ip)
+		} else {
+			dns = append(dns, n)
+		}
+	}
 	if validFor <= 0 {
 		return nil, nil, errors.New("pki: validFor must be positive")
 	}
@@ -80,8 +102,9 @@ func (c *CA) Issue(domain string, validFor time.Duration) (certPEM, keyPEM []byt
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: domain},
-		DNSNames:     []string{domain},
+		Subject:      pkix.Name{CommonName: names[0]},
+		DNSNames:     dns,
+		IPAddresses:  ips,
 		NotBefore:    now.Add(-time.Hour),
 		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,

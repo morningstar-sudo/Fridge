@@ -17,8 +17,9 @@ services:
     image: traefik:v3.5
     container_name: fridge-traefik # Fridge attaches it to every node network (FRIDGE_TRAEFIK_CONTAINER)
     ports:
-      - "5432:5432"
-      - "8080:8080"
+      - "5432:5432" # databases, routed by TLS SNI
+      - "8443:8443" # web UI and API over HTTPS
+      - "8080:8080" # only redirects to :8443
     volumes:
       - ./traefik.yml:/etc/traefik/traefik.yml:ro
       - traefik:/traefik
@@ -34,13 +35,13 @@ services:
       retries: 3
 
   fridge-meta:
-    image: postgres:17
+    image: postgres:18
     environment:
       POSTGRES_DB: fridge
       POSTGRES_USER: fridge
       POSTGRES_PASSWORD: ${FRIDGE_META_PASSWORD:?set FRIDGE_META_PASSWORD in deploy/.env}
     volumes:
-      - fridge-meta:/var/lib/postgresql/data
+      - fridge-meta:/var/lib/postgresql # image 18 keeps PGDATA below this (…/18/docker); a volume made by 17 does not open
     networks: [fridge-net]
     restart: always
     healthcheck:
@@ -62,7 +63,10 @@ services:
     environment:
       FRIDGE_DATABASE_URL: postgres://fridge:${FRIDGE_META_PASSWORD}@fridge-meta:5432/fridge?sslmode=disable
       FRIDGE_SECRET_KEY: ${FRIDGE_SECRET_KEY:?set FRIDGE_SECRET_KEY in deploy/.env}
-      FRIDGE_TOKEN: ${FRIDGE_TOKEN:?set FRIDGE_TOKEN in deploy/.env}
+      FRIDGE_SETUP_TOKEN: ${FRIDGE_SETUP_TOKEN:-} # creates the first admin; unused afterwards
+      FRIDGE_PUBLIC_HOSTS: ${FRIDGE_PUBLIC_HOSTS:-}
+      FRIDGE_TRUSTED_PROXY: ${FRIDGE_TRUSTED_PROXY:-} # empty = the fridge-net subnet
+      FRIDGE_TRAEFIK_CONTAINER: fridge-traefik
       FRIDGE_ALERT_WEBHOOK: ${FRIDGE_ALERT_WEBHOOK:-}
       FRIDGE_LISTEN: ":8080"
       FRIDGE_DATA: /data

@@ -1,13 +1,16 @@
 # Static Traefik config. Routes come from the files Fridge writes into /traefik/dynamic.
 entryPoints:
+  # Plain HTTP only redirects to HTTPS (:8443); the web UI and the API are served on websecure.
+  web:
+    address: ":8080"
+  websecure:
+    address: ":8443"
   pg:
     address: ":5432"
-  api:
-    address: ":8080"
   ping:
     address: ":8082"
 
-# Must name the entrypoint: the default internal "traefik" entrypoint is :8080, which clashes with "api".
+# Must name the entrypoint: the default internal "traefik" entrypoint is :8080, which clashes with "web".
 ping:
   entryPoint: ping
 

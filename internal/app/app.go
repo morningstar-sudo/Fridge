@@ -41,20 +41,21 @@ type Runtime interface {
 var _ Runtime = (*container.Client)(nil)
 
 type App struct {
-	Store         *store.Store
-	Box           *secret.Box
-	RT            Runtime
-	CA            *pki.CA
-	TraefikDir    string
-	APIBackend    string
-	HealthTimeout time.Duration
-	Alert         func(ctx context.Context, text string)
-	Audit         *audit.Logger                                                                       // nil = no audit trail
-	Sched         *Scheduler                                                                          // may be nil in tests
-	OpenObjects   func(d store.Destination, secretKey string, g *objstore.Guard) (ObjectStore, error) // nil = real S3
-	now           func() time.Time                                                                    // test clock; nil = time.Now
-	backupTimeout time.Duration                                                                       // test override; 0 = backupTimeout
-	wg            sync.WaitGroup
+	Store           *store.Store
+	Box             *secret.Box
+	RT              Runtime
+	CA              *pki.CA
+	TraefikDir      string
+	WebCert, WebKey string // absolute paths, inside the Traefik container too, of the web UI certificate
+	APIBackend      string
+	HealthTimeout   time.Duration
+	Alert           func(ctx context.Context, text string)
+	Audit           *audit.Logger                                                                       // nil = no audit trail
+	Sched           *Scheduler                                                                          // may be nil in tests
+	OpenObjects     func(d store.Destination, secretKey string, g *objstore.Guard) (ObjectStore, error) // nil = real S3
+	now             func() time.Time                                                                    // test clock; nil = time.Now
+	backupTimeout   time.Duration                                                                       // test override; 0 = backupTimeout
+	wg              sync.WaitGroup
 
 	// ControlNetwork (FRIDGE_NETWORK) holds only traefik/fridge/fridge-meta; each DB node gets its own
 	// internal network shared with TraefikContainer (FRIDGE_TRAEFIK_CONTAINER).
@@ -108,7 +109,7 @@ func (a *App) SetAllowlist(ctx context.Context, cidrs []string) error {
 	if err := a.Store.SetSetting(ctx, "allowlist", string(b)); err != nil {
 		return err
 	}
-	return proxy.WriteBase(a.TraefikDir, cidrs, a.APIBackend)
+	return a.WriteProxyBase(cidrs)
 }
 
 // ObjectStore is the S3 surface the app needs; *objstore.Store satisfies it.
@@ -132,4 +133,10 @@ func (a *App) Ready(ctx context.Context) error {
 		return err
 	}
 	return a.RT.Ping(ctx)
+}
+
+// WriteProxyBase writes Traefik's base config (allowlists, web/API router, web certificate).
+// Rewriting it also makes Traefik re-read a renewed web certificate.
+func (a *App) WriteProxyBase(cidrs []string) error {
+	return proxy.WriteBase(a.TraefikDir, cidrs, a.APIBackend, a.WebCert, a.WebKey)
 }

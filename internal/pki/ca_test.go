@@ -112,3 +112,40 @@ func TestLoadOrCreateRejectsBrokenState(t *testing.T) {
 		t.Fatal("mismatched ca.key: want error")
 	}
 }
+
+func TestIssueNames(t *testing.T) {
+	ca, err := LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM, _, err := ca.IssueNames([]string{"localhost", "127.0.0.1", "fridge.lan", "192.168.1.10", "::1"}, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(certPEM)
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leaf.DNSNames) != 2 || leaf.DNSNames[0] != "localhost" || leaf.DNSNames[1] != "fridge.lan" {
+		t.Fatalf("DNS names %v", leaf.DNSNames)
+	}
+	if len(leaf.IPAddresses) != 3 || leaf.IPAddresses[0].String() != "127.0.0.1" || leaf.IPAddresses[1].String() != "192.168.1.10" || leaf.IPAddresses[2].String() != "::1" {
+		t.Fatalf("IPs %v", leaf.IPAddresses)
+	}
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(ca.CertPEM())
+	for _, name := range []string{"localhost", "fridge.lan", "127.0.0.1", "192.168.1.10"} {
+		if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: name}); err != nil {
+			t.Errorf("verify %s: %v", name, err)
+		}
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: "evil.lan"}); err == nil {
+		t.Error("verified a name that is not in the certificate")
+	}
+	for _, bad := range [][]string{nil, {""}, {"a", ""}} {
+		if _, _, err := ca.IssueNames(bad, time.Hour); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}

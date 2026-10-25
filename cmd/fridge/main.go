@@ -24,7 +24,6 @@ import (
 	"fridge/internal/auth"
 	"fridge/internal/container"
 	"fridge/internal/pki"
-	"fridge/internal/proxy"
 	"fridge/internal/registry"
 	"fridge/internal/secret"
 	"fridge/internal/store"
@@ -115,7 +114,16 @@ func runServer() error {
 	if err != nil {
 		return err
 	}
-	if err := proxy.WriteBase(traefikDir, allow, apiBackend); err != nil {
+	absTraefik, err := filepath.Abs(traefikDir)
+	if err != nil {
+		return err
+	}
+	a.WebCert, a.WebKey = filepath.Join(absTraefik, "certs", "web.crt"), filepath.Join(absTraefik, "certs", "web.key")
+	webNames := webCertNames(os.Getenv("FRIDGE_PUBLIC_HOSTS"))
+	if _, err := ensureWebCert(ca, a.WebCert, a.WebKey, webNames); err != nil {
+		return fmt.Errorf("web certificate: %w", err)
+	}
+	if err := a.WriteProxyBase(allow); err != nil {
 		return err
 	}
 	a.Sched = app.NewScheduler(a)
@@ -160,6 +168,26 @@ func runServer() error {
 		}
 	}); err != nil {
 		log.Printf("image update job: %v", err)
+	}
+	// Traefik re-reads the certificate files when its dynamic config changes, so a renewal rewrites the base file.
+	if err := a.Sched.AddFixed("41 3 * * *", func() {
+		changed, err := ensureWebCert(ca, a.WebCert, a.WebKey, webNames)
+		if err == nil && changed {
+			var cidrs []string
+			if cidrs, err = a.Allowlist(ctx); err == nil {
+				err = a.WriteProxyBase(cidrs)
+			}
+		}
+		if err != nil {
+			log.Printf("renew web certificate: %v", err)
+			if a.Alert != nil {
+				a.Alert(ctx, "renewing the web certificate failed: "+err.Error())
+			}
+		} else if changed {
+			log.Print("web certificate renewed")
+		}
+	}); err != nil {
+		log.Printf("web certificate job: %v", err)
 	}
 	// A recreated Traefik container comes back on the control network only; re-attach it.
 	if err := a.Sched.AddFixed("@every 1m", func() {

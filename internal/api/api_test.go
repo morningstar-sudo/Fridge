@@ -110,7 +110,7 @@ func newRawSrv(t *testing.T, setupToken string, o Options) (http.Handler, *fakeR
 	}
 	rt := &fakeRT{}
 	st := storetest.New(t)
-	a := &app.App{Store: st, Box: box, RT: rt, CA: ca, TraefikDir: t.TempDir(), HealthTimeout: time.Second, Audit: &audit.Logger{Store: st}}
+	a := &app.App{Store: st, Box: box, RT: rt, CA: ca, TraefikDir: t.TempDir(), HealthTimeout: time.Second, Audit: &audit.Logger{Store: st}, WebCert: "/traefik/certs/web.crt", WebKey: "/traefik/certs/web.key"}
 	head := dumpFile(t, "pg17.dump") // every object is restorable
 	a.OpenObjects = func(store.Destination, string, *objstore.Guard) (app.ObjectStore, error) {
 		return &fakeObjs{head: head}, nil

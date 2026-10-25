@@ -1,5 +1,5 @@
 // Package proxy writes Traefik file-provider config: one dynamic YAML per DB
-// (TCP router by TLS SNI) plus a base file with the IP allowlists and API router.
+// (TCP router by TLS SNI) plus a base file with the IP allowlists, the HTTPS web/API router and its certificate.
 package proxy
 
 import (
@@ -79,9 +79,13 @@ func RemoveCert(dir string, id int64) error {
 	return nil
 }
 
-// WriteBase writes <dir>/dynamic/_base.yml: the allowlist middlewares for TCP and
-// HTTP (same CIDRs) and the API router/service pointing at apiBackend.
-func WriteBase(dir string, cidrs []string, apiBackend string) error {
+// WriteBase writes <dir>/dynamic/_base.yml: the allowlist middlewares for TCP and HTTP (same CIDRs),
+// the HTTPS router (entry point websecure) for the web UI and API pointing at apiBackend, the plain-HTTP
+// router that only redirects to HTTPS, and the default TLS certificate (webCert/webKey) for the web UI.
+func WriteBase(dir string, cidrs []string, apiBackend, webCert, webKey string) error {
+	if webCert == "" || webKey == "" {
+		return errors.New("proxy: web certificate and key are required")
+	}
 	allowlist := map[string]any{
 		"ipAllowList": map[string]any{"sourceRange": cidrs},
 	}
@@ -90,13 +94,23 @@ func WriteBase(dir string, cidrs []string, apiBackend string) error {
 			"middlewares": map[string]any{"allowlist-tcp": allowlist},
 		},
 		"http": map[string]any{
-			"middlewares": map[string]any{"allowlist-http": allowlist},
+			"middlewares": map[string]any{
+				"allowlist-http": allowlist,
+				"to-https":       map[string]any{"redirectScheme": map[string]any{"scheme": "https", "port": "8443", "permanent": true}},
+			},
 			"routers": map[string]any{
-				"fridge-api": map[string]any{
-					"entryPoints": []string{"api"},
+				"fridge-web": map[string]any{
+					"entryPoints": []string{"websecure"},
 					"rule":        "PathPrefix(`/`)",
 					"service":     "fridge-api",
 					"middlewares": []string{"allowlist-http@file"},
+					"tls":         map[string]any{},
+				},
+				"fridge-redirect": map[string]any{
+					"entryPoints": []string{"web"},
+					"rule":        "PathPrefix(`/`)",
+					"service":     "fridge-api",
+					"middlewares": []string{"to-https@file"},
 				},
 			},
 			"services": map[string]any{
@@ -105,6 +119,11 @@ func WriteBase(dir string, cidrs []string, apiBackend string) error {
 						"servers": []any{map[string]any{"url": apiBackend}},
 					},
 				},
+			},
+		},
+		"tls": map[string]any{
+			"stores": map[string]any{
+				"default": map[string]any{"defaultCertificate": map[string]any{"certFile": webCert, "keyFile": webKey}},
 			},
 		},
 	}

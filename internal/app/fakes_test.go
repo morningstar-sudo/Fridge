@@ -264,7 +264,7 @@ func newTestApp(t *testing.T) (*App, *fakeRuntime, *fakeObjects) {
 	rt := &fakeRuntime{}
 	a := &App{
 		Store: storetest.New(t), Box: box, RT: rt, CA: ca,
-		TraefikDir: t.TempDir(), HealthTimeout: time.Second,
+		TraefikDir: t.TempDir(), HealthTimeout: time.Second, WebCert: "/traefik/certs/web.crt", WebKey: "/traefik/certs/web.key",
 		ControlNetwork: "fridge-net", TraefikContainer: "fridge-traefik",
 	}
 	a.Alert = func(ctx context.Context, text string) {

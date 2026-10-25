@@ -138,7 +138,7 @@ func TestWriteCert(t *testing.T) {
 func TestWriteBase(t *testing.T) {
 	dir := t.TempDir()
 	cidrs := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
-	if err := WriteBase(dir, cidrs, "http://fridge:8080"); err != nil {
+	if err := WriteBase(dir, cidrs, "http://fridge:8080", "/traefik/certs/web.crt", "/traefik/certs/web.key"); err != nil {
 		t.Fatal(err)
 	}
 	doc := readYAML(t, filepath.Join(dir, "dynamic", "_base.yml"))
@@ -160,11 +160,55 @@ func TestWriteBase(t *testing.T) {
 	if got := dig(t, doc, "http", "services", "fridge-api", "loadBalancer", "servers", 0, "url"); got != "http://fridge:8080" {
 		t.Errorf("api url = %v", got)
 	}
-	if got := dig(t, doc, "http", "routers", "fridge-api", "middlewares", 0); got != "allowlist-http@file" {
+	if got := dig(t, doc, "http", "routers", "fridge-web", "middlewares", 0); got != "allowlist-http@file" {
 		t.Errorf("api middleware = %v", got)
 	}
-	if got := dig(t, doc, "http", "routers", "fridge-api", "rule"); got != "PathPrefix(`/`)" {
+	if got := dig(t, doc, "http", "routers", "fridge-web", "rule"); got != "PathPrefix(`/`)" {
 		t.Errorf("api rule = %v", got)
 	}
 	assertNoTmp(t, dir)
+}
+
+func TestWriteBaseHTTPS(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteBase(dir, []string{"10.0.0.0/8"}, "http://fridge:8080", "/traefik/certs/web.crt", "/traefik/certs/web.key"); err != nil {
+		t.Fatal(err)
+	}
+	doc := readYAML(t, filepath.Join(dir, "dynamic", "_base.yml"))
+	if got := dig(t, doc, "http", "routers", "fridge-web", "entryPoints", 0); got != "websecure" {
+		t.Errorf("web entry point = %v", got)
+	}
+	if got := dig(t, doc, "http", "routers", "fridge-web", "tls"); got == nil {
+		t.Error("web router has no tls")
+	}
+	if got := dig(t, doc, "http", "routers", "fridge-web", "middlewares", 0); got != "allowlist-http@file" {
+		t.Errorf("web middleware = %v", got)
+	}
+	if got := dig(t, doc, "http", "routers", "fridge-redirect", "entryPoints", 0); got != "web" {
+		t.Errorf("redirect entry point = %v", got)
+	}
+	if got := dig(t, doc, "http", "routers", "fridge-redirect", "middlewares", 0); got != "to-https@file" {
+		t.Errorf("redirect middleware = %v", got)
+	}
+	rs := dig(t, doc, "http", "middlewares", "to-https", "redirectScheme")
+	if m := rs.(map[string]any); m["scheme"] != "https" || m["port"] != "8443" || m["permanent"] != true {
+		t.Errorf("redirectScheme = %v", rs)
+	}
+	if got := dig(t, doc, "tls", "stores", "default", "defaultCertificate", "certFile"); got != "/traefik/certs/web.crt" {
+		t.Errorf("certFile = %v", got)
+	}
+	if got := dig(t, doc, "tls", "stores", "default", "defaultCertificate", "keyFile"); got != "/traefik/certs/web.key" {
+		t.Errorf("keyFile = %v", got)
+	}
+	if dig(t, doc, "tcp", "middlewares", "allowlist-tcp") == nil {
+		t.Error("TCP allowlist lost")
+	}
+	if _, ok := doc["http"].(map[string]any)["routers"].(map[string]any)["fridge-api"]; ok {
+		t.Error("the plain-HTTP API router is still there")
+	}
+	for _, c := range [][2]string{{"", "k"}, {"c", ""}} {
+		if err := WriteBase(dir, nil, "http://x", c[0], c[1]); err == nil {
+			t.Errorf("%q accepted", c)
+		}
+	}
 }

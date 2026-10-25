@@ -283,3 +283,19 @@ func TestRecoverInterrupted(t *testing.T) {
 		t.Fatalf("second run: err=%v removes=%+v alerts=%q", err, rt.removes, rt.alerts)
 	}
 }
+
+func TestSetAllowlistKeepsWebCert(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	a.WebCert, a.WebKey = "/traefik/certs/web.crt", "/traefik/certs/web.key"
+	if err := a.SetAllowlist(context.Background(), []string{"203.0.113.0/24"}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(a.TraefikDir, "dynamic", "_base.yml"))
+	if err != nil || !strings.Contains(string(b), "defaultCertificate") || !strings.Contains(string(b), "/traefik/certs/web.crt") {
+		t.Fatalf("base = %s, %v", b, err)
+	}
+	a.WebCert = ""
+	if err := a.SetAllowlist(context.Background(), []string{"203.0.113.0/24"}); err == nil {
+		t.Fatal("wrote a base file without a web certificate")
+	}
+}
