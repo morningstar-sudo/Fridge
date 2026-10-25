@@ -137,7 +137,7 @@ func TestCreateDatabaseDefaultSchedule(t *testing.T) {
 func TestSetAllowlist(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	ctx := context.Background()
-	if got, _ := a.Allowlist(ctx); len(got) != 3 {
+	if got, _ := a.Allowlist(ctx); len(got) != 5 {
 		t.Fatalf("default = %v", got)
 	}
 	if err := a.SetAllowlist(ctx, []string{"10.0.0.0/8", "bad"}); !errors.Is(err, ErrInvalid) {

@@ -393,7 +393,7 @@ func (c *Client) ListNodes(ctx context.Context) ([]NodeState, error) {
 	return out, nil
 }
 
-// Subnets are the address ranges of the edge, egress and every database overlay: what a user-supplied
+// Subnets are the address ranges of every overlay (edge, egress, metadata, each database, ingress) and bridge: what a user-supplied
 // S3 endpoint must never point into.
 func (c *Client) Subnets(ctx context.Context) ([]netip.Prefix, error) {
 	list, err := c.cli.NetworkList(ctx, network.ListOptions{})
@@ -402,7 +402,7 @@ func (c *Client) Subnets(ctx context.Context) ([]netip.Prefix, error) {
 	}
 	var out []netip.Prefix
 	for _, n := range list {
-		if n.Name != c.cfg.EdgeNetwork && n.Name != c.cfg.EgressNetwork && !strings.HasPrefix(n.Name, NodeNetPfx) {
+		if n.Driver != "overlay" && n.Driver != "bridge" { // every network Fridge or its stack lives on, and the host's bridges
 			continue
 		}
 		for _, cfg := range n.IPAM.Config {

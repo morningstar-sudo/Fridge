@@ -73,7 +73,8 @@ func (a *App) auditSystem(ctx context.Context, action string, dbID int64, target
 // Wait blocks until all background jobs finish.
 func (a *App) Wait() { a.wg.Wait() }
 
-var defaultAllowlist = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+// Loopback is the machine itself (install.sh, a browser on the host); the rest are the private ranges.
+var defaultAllowlist = []string{"127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
 
 func (a *App) Allowlist(ctx context.Context) ([]string, error) {
 	v, ok, err := a.Store.GetSetting(ctx, "allowlist")
