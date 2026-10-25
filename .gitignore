@@ -1,3 +1,6 @@
 /fridge
 deploy/.env
 .superpowers/
+node_modules/
+scripts/ui-smoke/fail-*.png
+scripts/ui-smoke/package*.json

@@ -382,7 +382,7 @@ func TestSecurityHeaders(t *testing.T) {
 	for _, p := range []string{"/healthz", "/api/ca", "/api/databases", "/nope", "/api/setup/status"} {
 		w := req(h, "GET", p, "")
 		hd := w.Header()
-		if hd.Get("Content-Security-Policy") != "default-src 'self'; frame-ancestors 'none'" || hd.Get("X-Frame-Options") != "DENY" ||
+		if hd.Get("Content-Security-Policy") != "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'" || hd.Get("X-Frame-Options") != "DENY" ||
 			hd.Get("Referrer-Policy") != "no-referrer" || hd.Get("X-Content-Type-Options") != "nosniff" {
 			t.Fatal(p, hd)
 		}

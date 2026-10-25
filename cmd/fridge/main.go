@@ -27,6 +27,7 @@ import (
 	"fridge/internal/registry"
 	"fridge/internal/secret"
 	"fridge/internal/store"
+	"fridge/internal/web"
 )
 
 func main() {
@@ -201,7 +202,7 @@ func runServer() error {
 	}
 	a.Sched.Start()
 
-	srv := &http.Server{Addr: listen, Handler: api.New(a, au, api.Options{TrustedProxy: api.TrustCIDRs(prefixes)}), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: listen, Handler: api.New(a, au, api.Options{TrustedProxy: api.TrustCIDRs(prefixes), Web: web.Handler()}), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	log.Printf("fridge listening on %s", listen)

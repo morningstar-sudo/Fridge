@@ -1,0 +1,5 @@
+Third-party files, copied unmodified from jsDelivr (source-map comments removed). No CDN is used at run time.
+
+bootstrap/bootstrap.min.css, bootstrap/bootstrap.bundle.min.js   Bootstrap 5.3.3        MIT  https://getbootstrap.com
+bootstrap-icons/*                                                Bootstrap Icons 1.11.3 MIT  https://icons.getbootstrap.com
+fonts/ibm-plex-sans-*, fonts/ibm-plex-mono-*                     @fontsource/ibm-plex-sans 5.1.1, @fontsource/ibm-plex-mono 5.1.1 (IBM Plex, SIL OFL 1.1)
