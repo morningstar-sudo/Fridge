@@ -57,7 +57,7 @@ func TestOwnershipOnCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := mkDest(t, a, "s", x.root, true)
-	objs.objs["k.dump"] = fakeObj{[]byte("x"), map[string]string{"fridge-engine": "postgres", "fridge-version": "17"}}
+	objs.objs["k.dump"] = fakeObj{dumpFile(t, "pg17.dump"), map[string]string{"fridge-engine": "postgres", "fridge-version": "17"}}
 	nr := &CreateRequest{Name: "abc2", Domain: "abc2.com"}
 	if _, err := startRestore(a, ctx, RestoreRequest{DestinationID: dest.ID, Key: "k.dump", New: nr}); !errors.Is(err, ErrInvalid) {
 		t.Fatal(err)

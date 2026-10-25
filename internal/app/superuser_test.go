@@ -218,15 +218,16 @@ func TestRestoreUsesAppRole(t *testing.T) {
 	a, rt, objs := newTestApp(t)
 	ctx := context.Background()
 	dumpKey, sqlKey := "fridge/postgres-17/abc/abc-1.dump", "upload/x.sql.gz"
-	dest := restoreFixture(t, a, objs, dumpKey, []byte("DUMP"), nil)
-	objs.objs[sqlKey] = fakeObj{gz("select 1;"), nil}
+	dump := dumpFile(t, "pg17.dump")
+	dest := restoreFixture(t, a, objs, dumpKey, dump, nil)
+	objs.objs[sqlKey] = fakeObj{gz("CREATE TABLE t(id int);"), nil}
 
 	if _, err := startRestore(a, ctx, RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: dumpKey, New: &CreateRequest{Name: "r1", Domain: "r1.com"}}); err != nil {
 		t.Fatal(err)
 	}
 	a.Wait()
 	x := lastExec(t, rt)
-	if got := strings.Join(x.Cmd, " "); !strings.Contains(got, "--role=root1_r1") || !strings.Contains(got, "-U su_") || x.Stdin != "DUMP" {
+	if got := strings.Join(x.Cmd, " "); !strings.Contains(got, "--role=root1_r1") || !strings.Contains(got, "-U su_") || x.Stdin != string(dump) {
 		t.Fatalf("dump restore exec %+v", x)
 	}
 
@@ -235,7 +236,7 @@ func TestRestoreUsesAppRole(t *testing.T) {
 	}
 	a.Wait()
 	x = lastExec(t, rt)
-	if x.Cmd[0] != "psql" || x.Stdin != "SET ROLE \"root1_r2\";\nselect 1;" {
+	if x.Cmd[0] != "psql" || x.Stdin != "SET ROLE \"root1_r2\";\nCREATE TABLE t(id int);" {
 		t.Fatalf("sql restore exec %+v", x)
 	}
 }

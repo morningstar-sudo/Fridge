@@ -142,3 +142,21 @@ func FilterSort(objs []Object, q string, limit int) ([]Object, bool) {
 	}
 	return out, false
 }
+
+// ReadHead returns the first n bytes of key (fewer if the object is shorter).
+func (s *Store) ReadHead(ctx context.Context, key string, n int) ([]byte, error) {
+	var opts minio.GetObjectOptions
+	if err := opts.SetRange(0, int64(n)-1); err != nil {
+		return nil, err
+	}
+	o, err := s.c.GetObject(ctx, s.bucket, key, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer o.Close()
+	b, err := io.ReadAll(io.LimitReader(o, int64(n)))
+	if minio.ToErrorResponse(err).Code == "InvalidRange" { // S3 refuses any range of an empty object
+		return nil, nil
+	}
+	return b, err
+}

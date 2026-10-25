@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/minio/minio-go/v7"
 
+	"fridge/internal/dumpcheck"
 	"fridge/internal/engine"
 	"fridge/internal/store"
 )
@@ -111,9 +113,26 @@ func (a *App) StartRestore(ctx context.Context, req RestoreRequest) (store.Resto
 	if err != nil {
 		return store.Restore{}, invalid("%v", err)
 	}
+	var hdr dumpcheck.Header
+	if srcEng == "postgres" { // vet the file's first bytes before any node is built for it
+		head, err := objs.ReadHead(ctx, req.Key, dumpcheck.HeadSize)
+		if err != nil {
+			return store.Restore{}, err
+		}
+		if hdr, err = dumpcheck.Inspect(req.Key, head); err != nil {
+			return store.Restore{}, invalid("%v", err)
+		}
+		if hdr.ServerVersion != "" { // the file's own word beats the key and the metadata
+			srcVer = hdr.ServerVersion
+		}
+	}
 	nr.Engine = srcEng
 	if nr.Version == "" && srcVer != "" {
-		if v, err := engine.ResolveVersion(srcEng, srcVer); err == nil {
+		want := srcVer
+		if hdr.ServerVersion != "" { // the catalog lists Postgres majors only
+			want = strconv.Itoa(dumpcheck.Major(srcVer))
+		}
+		if v, err := engine.ResolveVersion(srcEng, want); err == nil {
 			nr.Version = v
 		}
 	}
@@ -123,6 +142,9 @@ func (a *App) StartRestore(ctx context.Context, req RestoreRequest) (store.Resto
 	warning, err := CheckCompat(srcEng, srcVer, srcEng, nr.Version)
 	if err != nil {
 		return store.Restore{}, err
+	}
+	if hdr.PgDumpVersion != "" && dumpcheck.Major(hdr.PgDumpVersion) > dumpcheck.Major(nr.Version) {
+		return store.Restore{}, invalid("dump made by pg_dump %s cannot be restored by pg_restore %s", hdr.PgDumpVersion, nr.Version)
 	}
 	if _, _, _, err := eng.RestoreCmd(engine.Params{}, req.Key); err != nil {
 		return store.Restore{}, invalid("%v", err)

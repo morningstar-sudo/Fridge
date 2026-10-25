@@ -158,7 +158,7 @@ func TestBackupGetAndDownload(t *testing.T) {
 
 func TestRestores(t *testing.T) {
 	h, _, a := newSrv(t)
-	fo := &fakeObjs{meta: map[string]string{"fridge-engine": "postgres", "fridge-version": "17"}}
+	fo := &fakeObjs{meta: map[string]string{"fridge-engine": "postgres", "fridge-version": "17"}, head: dumpFile(t, "pg17.dump")}
 	a.OpenObjects = func(store.Destination, string, *objstore.Guard) (app.ObjectStore, error) { return fo, nil }
 	do(h, "POST", "/api/destinations", destBody, true)
 	if w := do(h, "POST", "/api/restores", `{"destination_id":1,"key":"k.dump"}`, true); w.Code != 400 {

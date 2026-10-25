@@ -10,6 +10,8 @@ import (
 	"github.com/minio/minio-go/v7"
 	"io"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -317,4 +319,24 @@ func startRestore(a *App, ctx context.Context, req RestoreRequest) (store.Restor
 		regDomain(a, req.OwnerID, req.New.Domain)
 	}
 	return a.StartRestore(ctx, req)
+}
+
+func (f *fakeObjects) ReadHead(ctx context.Context, key string, n int) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	o, ok := f.objs[key]
+	if !ok {
+		return nil, minio.ErrorResponse{Code: "NoSuchKey"}
+	}
+	return o.data[:min(n, len(o.data))], nil
+}
+
+// dumpFile is one of the real pg_dump files in internal/dumpcheck/testdata.
+func dumpFile(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "dumpcheck", "testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

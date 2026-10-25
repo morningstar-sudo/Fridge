@@ -113,6 +113,7 @@ type ObjectStore interface {
 	Put(ctx context.Context, key string, r io.Reader, meta map[string]string) (int64, error)
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
 	Meta(ctx context.Context, key string) (map[string]string, error)
+	ReadHead(ctx context.Context, key string, n int) ([]byte, error) // the object's first n bytes
 	List(ctx context.Context, prefix, q string, limit int) ([]objstore.Object, bool, error)
 	Delete(ctx context.Context, key string) error
 }

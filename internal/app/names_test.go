@@ -130,7 +130,7 @@ func TestRestoreNamePrefix(t *testing.T) {
 	alice := mkUser(t, a, "alice", "user")
 	regDomain(a, alice, "copy.lan")
 	key := "fridge/postgres-17/abc/abc-1.dump"
-	dest := restoreFixture(t, a, objs, key, []byte("D"), nil)
+	dest := restoreFixture(t, a, objs, key, dumpFile(t, "pg17.dump"), nil)
 	r, err := a.StartRestore(context.Background(), RestoreRequest{OwnerID: alice, DestinationID: dest.ID, Key: key, New: &CreateRequest{Name: "copy", Domain: "copy.lan"}})
 	if err != nil {
 		t.Fatal(err)

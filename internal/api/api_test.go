@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -67,6 +69,7 @@ type fakeObjs struct {
 	list    []objstore.Object
 	meta    map[string]string
 	body    string // what Get returns
+	head    []byte // what ReadHead returns
 }
 
 func (f *fakeObjs) Test(context.Context) error { return f.testErr }
@@ -108,7 +111,10 @@ func newRawSrv(t *testing.T, setupToken string, o Options) (http.Handler, *fakeR
 	rt := &fakeRT{}
 	st := storetest.New(t)
 	a := &app.App{Store: st, Box: box, RT: rt, CA: ca, TraefikDir: t.TempDir(), HealthTimeout: time.Second, Audit: &audit.Logger{Store: st}}
-	a.OpenObjects = func(store.Destination, string, *objstore.Guard) (app.ObjectStore, error) { return &fakeObjs{}, nil }
+	head := dumpFile(t, "pg17.dump") // every object is restorable
+	a.OpenObjects = func(store.Destination, string, *objstore.Guard) (app.ObjectStore, error) {
+		return &fakeObjs{head: head}, nil
+	}
 	au, err := auth.New(a.Store, key, setupToken)
 	if err != nil {
 		t.Fatal(err)
@@ -242,4 +248,16 @@ func regDomains(t *testing.T, a *app.App) {
 			t.Fatal(err)
 		}
 	}
+}
+
+func (f *fakeObjs) ReadHead(context.Context, string, int) ([]byte, error) { return f.head, nil }
+
+// dumpFile is one of the real pg_dump files in internal/dumpcheck/testdata.
+func dumpFile(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "dumpcheck", "testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
