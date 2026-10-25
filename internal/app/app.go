@@ -63,6 +63,10 @@ type App struct {
 	netMu      sync.Mutex     // serializes node-network repair (Reconcile/Heal) with removeNode's teardown
 	healFailed map[int64]bool // under netMu: DBs whose last heal failed (alert once per OK→failed)
 	suLocks    sync.Map       // db id -> *sync.Mutex: one superuser rotation per node at a time
+
+	Img      Images   // nil: the Images page is unavailable (tests)
+	Registry Registry // nil: remote versions are not looked up
+	pulls    pulls
 }
 
 // auditSystem records an action taken by Fridge itself (scheduler, retention).

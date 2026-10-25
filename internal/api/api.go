@@ -74,6 +74,7 @@ func New(a *app.App, au *auth.Service, o Options) http.Handler {
 	api.HandleFunc("PUT /api/settings/endpoint-allowlist", s.putEndpointAllow)
 	s.adminRoutes(api)
 	s.auditRoutes(api)
+	s.imageRoutes(api)
 	m.HandleFunc("GET /api/ca", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.Write(a.CA.CertPEM())

@@ -25,6 +25,7 @@ import (
 	"fridge/internal/container"
 	"fridge/internal/pki"
 	"fridge/internal/proxy"
+	"fridge/internal/registry"
 	"fridge/internal/secret"
 	"fridge/internal/store"
 )
@@ -102,7 +103,7 @@ func runServer() error {
 		Store: st, Box: box, RT: rt, CA: ca, TraefikDir: traefikDir, APIBackend: apiBackend,
 		HealthTimeout: 120 * time.Second, Alert: alert.Webhook(os.Getenv("FRIDGE_ALERT_WEBHOOK")),
 		ControlNetwork: network, TraefikContainer: env("FRIDGE_TRAEFIK_CONTAINER", "fridge-traefik"),
-		Audit: &audit.Logger{Store: st},
+		Audit: &audit.Logger{Store: st}, Img: rt, Registry: &registry.Client{},
 	}
 	if err := a.RecoverInterrupted(ctx); err != nil { // after FailRunning, before the scheduler loads
 		return fmt.Errorf("recover interrupted nodes: %w", err)
@@ -150,6 +151,15 @@ func runServer() error {
 		}
 	}); err != nil {
 		log.Printf("audit purge job: %v", err)
+	}
+	if err := a.Sched.AddFixed("17 4 * * *", func() {
+		cctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		defer cancel()
+		if err := a.CheckImageUpdates(cctx); err != nil {
+			log.Printf("check image updates: %v", err)
+		}
+	}); err != nil {
+		log.Printf("image update job: %v", err)
 	}
 	// A recreated Traefik container comes back on the control network only; re-attach it.
 	if err := a.Sched.AddFixed("@every 1m", func() {

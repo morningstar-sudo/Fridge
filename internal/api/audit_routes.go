@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -213,6 +214,8 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
+	jobs = append(jobs, s.a.RunningPulls()...)
+	sort.SliceStable(jobs, func(i, j int) bool { return jobs[i].StartedAt.Before(jobs[j].StartedAt) })
 	on, err := s.a.Store.OnlineSessions(r.Context(), time.Now().Add(-5*time.Minute))
 	if err != nil {
 		fail(w, err)
