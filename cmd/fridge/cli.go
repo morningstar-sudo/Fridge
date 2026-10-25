@@ -1,13 +1,12 @@
 package main
 
 import (
-	"bytes"
+	"bufio"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -17,6 +16,8 @@ import (
 )
 
 const usage = `usage: fridge <command> [args]
+  login [--user U] [--password-stdin] [--yes] [--ca-file F] | logout | whoami
+  setup --setup-token T --user U [--password-stdin]        (first admin, no browser needed)
   engines | ls | show <db> | backups <db> | ca
   create <engine> <name> --domain D [--version V]
   dest add|ls|test|rm ...
@@ -25,19 +26,22 @@ const usage = `usage: fridge <command> [args]
   backup <db> [--dest D] [--wait]
   restore --from <dest>:<key> --name N --domain D [--version V] [--engine E] [--wait]
   allowlist [set <cidr>...]
-All commands accept --json. Env: FRIDGE_URL, FRIDGE_TOKEN.`
+  recover allowlist <cidr>... | reset-password <user> | promote <user>   (run inside the server container)
+All commands accept --json. Env: FRIDGE_URL (default https://localhost:8443), FRIDGE_SESSION, FRIDGE_CA_FILE.`
 
 type usageErr string
 
 func (e usageErr) Error() string { return string(e) }
 
-// ponytail: one 5-minute client timeout for everything (create pulls images); split if short calls must fail fast.
-var httpClient = &http.Client{Timeout: 5 * time.Minute}
-
 var pollEvery = 2 * time.Second
+
+// cliStdin is where prompts and --password-stdin read from; tests replace it.
+var cliStdin io.Reader = os.Stdin
 
 type cli struct {
 	out, errw io.Writer
+	in        io.Reader
+	rd        *bufio.Reader
 	json      bool
 }
 
@@ -50,46 +54,8 @@ func parseFrom(s string) (dest, key string, err error) {
 	return dest, key, nil
 }
 
-// call performs a request and returns the body; non-2xx becomes an error with the API message.
-func call(method, path string, in any) ([]byte, error) {
-	base := os.Getenv("FRIDGE_URL")
-	if base == "" {
-		base = "http://localhost:8080"
-	}
-	var rd io.Reader
-	if in != nil {
-		b, _ := json.Marshal(in)
-		rd = bytes.NewReader(b)
-	}
-	req, err := http.NewRequest(method, strings.TrimRight(base, "/")+path, rd)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+os.Getenv("FRIDGE_TOKEN"))
-	if in != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 400 {
-		var e struct{ Error string }
-		if json.Unmarshal(b, &e) == nil && e.Error != "" {
-			return nil, errors.New(e.Error)
-		}
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-	return b, nil
-}
-
 func runCLI(args []string, stdout, stderr io.Writer) int {
-	c := &cli{out: stdout, errw: stderr}
+	c := &cli{out: stdout, errw: stderr, in: cliStdin}
 	err := c.dispatch(args)
 	var ue usageErr
 	switch {
@@ -388,6 +354,16 @@ func (c *cli) dispatch(args []string) error {
 		}
 		c.out.Write(b)
 		return nil
+	case "login":
+		return c.login(rest)
+	case "logout":
+		return c.logout(rest)
+	case "whoami":
+		return c.whoami(rest)
+	case "setup":
+		return c.setup(rest)
+	case "recover":
+		return c.recover(rest)
 	case "help", "-h", "--help":
 		fmt.Fprintln(c.out, usage)
 		return nil

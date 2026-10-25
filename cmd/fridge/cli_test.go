@@ -38,7 +38,8 @@ func run(t *testing.T, h http.HandlerFunc, args ...string) (int, string, string,
 	}))
 	defer srv.Close()
 	t.Setenv("FRIDGE_URL", srv.URL)
-	t.Setenv("FRIDGE_TOKEN", "tok")
+	t.Setenv("FRIDGE_SESSION", "tok")
+	t.Setenv("FRIDGE_CONFIG_DIR", t.TempDir())
 	var out, errb bytes.Buffer
 	code := runCLI(args, &out, &errb)
 	return code, out.String(), errb.String(), recs
