@@ -20,7 +20,7 @@ func TestMinioRoundTrip(t *testing.T) {
 	}
 	ctx := context.Background()
 	d := store.Destination{Endpoint: ep, AccessKey: ak, Bucket: bucket, PathStyle: true}
-	s, err := New(d, sk)
+	s, err := New(d, sk, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
