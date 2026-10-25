@@ -54,7 +54,7 @@ func TestMinioRoundTrip(t *testing.T) {
 	if err := s.Delete(ctx, key); err != nil {
 		t.Fatal(err)
 	}
-	bad, _ := New(d, sk+"x")
+	bad, _ := New(d, sk+"x", nil)
 	if err := bad.Test(ctx); err == nil {
 		t.Fatal("wrong secret must fail Test")
 	}
