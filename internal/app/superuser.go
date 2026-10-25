@@ -4,8 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"io"
-	"strings"
 	"sync"
 
 	"fridge/internal/engine"
@@ -43,12 +41,12 @@ func (a *App) RotateSuperuser(ctx context.Context, d store.Database) error {
 	if err != nil {
 		return err
 	}
-	code, err := a.RT.Exec(ctx, d.ContainerID, eng.AdminCmd(nodeParams(d)), strings.NewReader(eng.SetPasswordSQL(d.AdminUser, pw)), io.Discard, io.Discard)
-	switch {
-	case err != nil:
+	_, oldPW, err := a.RevealSuperuser(ctx, d)
+	if err != nil {
+		return err
+	}
+	if err := a.execAsAdmin(ctx, d, eng, oldPW, eng.SetPasswordSQL(d.AdminUser, pw)); err != nil {
 		return fmt.Errorf("rotate superuser: %w", err)
-	case code != 0:
-		return fmt.Errorf("rotate superuser: exited %d", code)
 	}
 	return a.Store.SetDatabaseAdminPassword(ctx, d.ID, enc)
 }

@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,7 +12,9 @@ import (
 	"github.com/minio/minio-go/v7"
 
 	"fridge/internal/engine"
+	"fridge/internal/job"
 	"fridge/internal/store"
+	"fridge/internal/swarm"
 )
 
 // BackupKey is <prefix>/<engine>-<version>/<db>/<db>-<YYYYMMDD-HHMMSS><ext> (UTC).
@@ -92,10 +93,21 @@ func (a *App) StartBackup(ctx context.Context, dbID, destID int64, scheduleID *i
 	if err != nil {
 		return store.Backup{}, err
 	}
+	params, err := a.jobParams(ctx, db)
+	if err != nil {
+		return store.Backup{}, err
+	}
+	s3, guard, err := a.s3Job(ctx, destID)
+	if err != nil {
+		return store.Backup{}, err
+	}
+	key := BackupKey(prefix, db.Engine, db.Version, db.Name, a.clock(), eng.DumpExt())
+	spec := job.Spec{Op: "dump", Params: params, Engine: db.Engine, S3: s3, Guard: guard, Key: key,
+		Meta: map[string]string{"fridge-engine": db.Engine, "fridge-version": db.Version, "fridge-db": db.Name}}
 	b := store.Backup{
 		DatabaseID: dbID, DestinationID: destID, ScheduleID: scheduleID, Trigger: trigger, StartedByID: startedBy,
 		Engine: db.Engine, EngineVersion: db.Version,
-		S3Key: BackupKey(prefix, db.Engine, db.Version, db.Name, a.clock(), eng.DumpExt()),
+		S3Key: key,
 	}
 	if err := a.Store.StartBackup(ctx, &b); err != nil {
 		return store.Backup{}, err
@@ -103,12 +115,12 @@ func (a *App) StartBackup(ctx context.Context, dbID, destID int64, scheduleID *i
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		a.runBackup(objs, db, b)
+		a.runBackup(objs, db, b, spec)
 	}()
 	return b, nil
 }
 
-func (a *App) runBackup(objs ObjectStore, db store.Database, b store.Backup) {
+func (a *App) runBackup(objs ObjectStore, db store.Database, b store.Backup, spec job.Spec) {
 	ctx := context.Background() // outlives the request; bookkeeping uses it so a timeout cannot block recording the result
 	timeout := a.backupTimeout
 	if timeout == 0 {
@@ -116,39 +128,18 @@ func (a *App) runBackup(objs ObjectStore, db store.Database, b store.Backup) {
 	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	eng, _, _ := engine.Get(db.Engine)
-	cmd := eng.DumpCmd(nodeParams(db))
 
-	pr, pw := io.Pipe()
-	var stderr bytes.Buffer
-	done := make(chan error, 1)
-	go func() { // stderr is only read after <-done
-		code, err := a.RT.Exec(runCtx, db.ContainerID, cmd, nil, pw, &stderr)
-		switch {
-		case err != nil:
-			err = fmt.Errorf("dump failed: %w", err)
-		case code != 0:
-			err = fmt.Errorf("dump exited %d", code)
-		}
-		pw.CloseWithError(err) // nil -> plain EOF
-		done <- err
-	}()
-
-	size, putErr := objs.Put(runCtx, b.S3Key, pr, map[string]string{
-		"fridge-engine": db.Engine, "fridge-version": db.Version, "fridge-db": db.Name,
-	})
-	if putErr != nil {
-		pr.CloseWithError(putErr) // unblock the dump writer
-	} else {
-		pr.Close()
+	// The job dumps straight into S3 from inside the node's network: nothing large passes through Fridge.
+	res, stderr, jerr := a.runJob(runCtx, "dump", spec, []string{swarm.Network(db.NodeKey), a.EgressNetwork}, timeout)
+	size, serr := int64(0), error(nil)
+	if jerr == nil {
+		size, serr = resultInt(res, "size")
 	}
-	dumpErr := <-done
-
-	if err := errors.Join(dumpErr, putErr); err != nil {
-		a.failBackup(ctx, objs, db, b, stderr.String(), err)
+	if err := errors.Join(jerr, serr); err != nil {
+		a.failBackup(ctx, objs, db, b, stderr, err)
 		return
 	}
-	if err := a.Store.FinishBackup(ctx, b.ID, "ok", size, tail(stderr.String()), ""); err != nil {
+	if err := a.Store.FinishBackup(ctx, b.ID, "ok", size, tail(stderr), ""); err != nil {
 		a.alertf(ctx, "backup %s: recording result failed: %v", db.Name, err)
 		return
 	}

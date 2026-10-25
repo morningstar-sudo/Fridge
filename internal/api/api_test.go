@@ -21,48 +21,52 @@ import (
 	"fridge/internal/app"
 	"fridge/internal/audit"
 	"fridge/internal/auth"
-	"fridge/internal/container"
+	"fridge/internal/job"
 	"fridge/internal/objstore"
 	"fridge/internal/pki"
 	"fridge/internal/secret"
 	"fridge/internal/store"
 	"fridge/internal/store/storetest"
+	"fridge/internal/swarm"
 )
 
+// fakeRT is a swarm that only agrees: nodes come up, jobs succeed (a dump reports the size of dump).
 type fakeRT struct {
 	pingErr error
-	dump    string        // written to every exec's stdout (a backup's dump)
-	gate    chan struct{} // non-nil: every exec waits until it is closed
+	dump    string        // what a backup's dump job pretends to have uploaded
+	gate    chan struct{} // non-nil: every job waits until it is closed
 }
 
 func (f *fakeRT) Ping(context.Context) error { return f.pingErr }
-func (f *fakeRT) Run(_ context.Context, s container.RunSpec) (string, error) {
-	return "ctr-" + s.Name, nil
+func (f *fakeRT) PickHost(context.Context) (swarm.Host, error) {
+	return swarm.Host{ID: "host1", Hostname: "n1"}, nil
 }
-func (f *fakeRT) WaitHealthy(context.Context, string, time.Duration) error { return nil }
-func (f *fakeRT) Exec(_ context.Context, _ string, _ []string, _ io.Reader, stdout, _ io.Writer) (int, error) {
+func (f *fakeRT) CreateNode(context.Context, swarm.NodeSpec) error       { return nil }
+func (f *fakeRT) NodeReady(context.Context, string, time.Duration) error { return nil }
+func (f *fakeRT) RemoveNode(context.Context, swarm.NodeRef) error        { return nil }
+func (f *fakeRT) ListNodes(context.Context) ([]swarm.NodeState, error)   { return nil, nil }
+func (f *fakeRT) Subnets(context.Context) ([]netip.Prefix, error)        { return nil, nil }
+func (f *fakeRT) RunJob(_ context.Context, j swarm.JobSpec) (swarm.JobResult, error) {
 	if f.gate != nil {
 		<-f.gate
 	}
-	if f.dump != "" {
-		io.WriteString(stdout, f.dump)
+	size := len(f.dump)
+	if size == 0 {
+		size = 4
 	}
-	return 0, nil
+	res := func(v any) string { b, _ := json.Marshal(v); return job.ResultPrefix + string(b) + "\n" }
+	for _, e := range j.Env {
+		if strings.Contains(e, `"Op":"check"`) {
+			return swarm.JobResult{Stdout: res(map[string]any{"format": "custom", "bytes": size})}, nil
+		}
+	}
+	return swarm.JobResult{Stdout: res(map[string]any{"size": size})}, nil
 }
-func (f *fakeRT) Remove(context.Context, string, string) error { return nil }
-func (f *fakeRT) CreateNetwork(context.Context, string) error  { return nil }
-func (f *fakeRT) RemoveNetwork(context.Context, string) error  { return nil }
-func (f *fakeRT) NetworkExists(context.Context, string) (bool, error) {
-	return true, nil
-}
-func (f *fakeRT) ConnectNetwork(context.Context, string, string, []string) error {
-	return nil
-}
-func (f *fakeRT) DisconnectNetwork(context.Context, string, string) error { return nil }
-func (f *fakeRT) ContainerNetworks(context.Context, string) ([]string, error) {
-	return nil, nil
-}
-func (f *fakeRT) FridgeSubnets(context.Context) ([]netip.Prefix, error) { return nil, nil }
+
+// noAdmin lets provisioning succeed without a database to talk to.
+type noAdmin struct{}
+
+func (noAdmin) Exec(context.Context, string, string) error { return nil }
 
 type fakeObjs struct {
 	testErr error
@@ -110,7 +114,7 @@ func newRawSrv(t *testing.T, setupToken string, o Options) (http.Handler, *fakeR
 	}
 	rt := &fakeRT{}
 	st := storetest.New(t)
-	a := &app.App{Store: st, Box: box, RT: rt, CA: ca, TraefikDir: t.TempDir(), HealthTimeout: time.Second, Audit: &audit.Logger{Store: st}, WebCert: "/traefik/certs/web.crt", WebKey: "/traefik/certs/web.key"}
+	a := &app.App{Store: st, Box: box, RT: rt, Admin: noAdmin{}, JobImage: "fridge-job:test", EgressNetwork: "fridge_egress", CA: ca, TraefikDir: t.TempDir(), HealthTimeout: time.Second, Audit: &audit.Logger{Store: st}, WebCert: "/traefik/certs/web.crt", WebKey: "/traefik/certs/web.key"}
 	head := dumpFile(t, "pg17.dump") // every object is restorable
 	a.OpenObjects = func(store.Destination, string, *objstore.Guard) (app.ObjectStore, error) {
 		return &fakeObjs{head: head}, nil

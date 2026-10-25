@@ -59,7 +59,7 @@ func (a *App) SetEndpointAllowlist(ctx context.Context, hosts []string) error {
 
 // endpointGuard is what keeps a non-admin's destination away from Fridge's own networks.
 func (a *App) endpointGuard(ctx context.Context) (*objstore.Guard, error) {
-	subnets, err := a.RT.FridgeSubnets(ctx)
+	subnets, err := a.RT.Subnets(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -4,13 +4,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
-	"io"
 	"strings"
 	"testing"
 
+	"fridge/internal/job"
 	"fridge/internal/store"
 )
 
@@ -74,12 +72,6 @@ func TestRestoreHappyPath(t *testing.T) {
 	key := "fridge/postgres-14/abc/abc-1.dump"
 	data := dumpFile(t, "pg14.dump")
 	dest := restoreFixture(t, a, objs, key, data, map[string]string{"fridge-engine": "postgres", "fridge-version": "14"})
-	var cmd0, in string
-	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int {
-		b, _ := io.ReadAll(stdin)
-		cmd0, in = cmd[0], string(b)
-		return 0
-	}
 	r, err := startRestore(a, context.Background(), RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: key, New: &CreateRequest{OwnerID: own(t, a), Name: "abc2", Domain: "abc2.com", Version: "17"}})
 	if err != nil {
 		t.Fatal(err)
@@ -93,8 +85,8 @@ func TestRestoreHappyPath(t *testing.T) {
 	if db.Name != "root1_abc2" || db.Status != "running" || db.Version != "17" {
 		t.Fatalf("db %+v", db)
 	}
-	if cmd0 != "pg_restore" || in != string(data) {
-		t.Fatalf("exec %q %q", cmd0, in)
+	if j, ok := rt.lastJob("restore"); !ok || j.Spec.Key != key || j.Spec.Params.User != "root1_abc2" || j.Spec.Params.Version != "17" {
+		t.Fatalf("restore job = %+v", j)
 	}
 }
 
@@ -116,12 +108,6 @@ func TestRestorePlainSQLGzNeedsEngine(t *testing.T) {
 	if _, err := startRestore(a, context.Background(), RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: key, New: nr}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("want ErrInvalid, got %v", err)
 	}
-	var cmd0, in string
-	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int {
-		b, _ := io.ReadAll(stdin)
-		cmd0, in = cmd[0], string(b)
-		return 0
-	}
 	r, err := startRestore(a, context.Background(), RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: key, Engine: "postgres", New: nr})
 	if err != nil {
 		t.Fatal(err)
@@ -130,8 +116,8 @@ func TestRestorePlainSQLGzNeedsEngine(t *testing.T) {
 	if got, _ := a.Store.GetRestore(context.Background(), r.ID); got.Status != "ok" {
 		t.Fatalf("restore %+v", got)
 	}
-	if cmd0 != "psql" || in != "SET ROLE \"root1_abc2\";\nCREATE TABLE t(id int);" {
-		t.Fatalf("exec %q %q", cmd0, in)
+	if j, ok := rt.lastJob("restore"); !ok || j.Spec.Key != key || j.Spec.Engine != "postgres" || j.Spec.Params.User != "root1_abc2" {
+		t.Fatalf("restore job = %+v", j)
 	}
 }
 
@@ -139,12 +125,8 @@ func TestRestoreGarbageRollsBack(t *testing.T) {
 	a, rt, objs := newTestApp(t)
 	key := "upload/x.dump"
 	dest := restoreFixture(t, a, objs, key, dumpFile(t, "pg17.dump"), nil)
-	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int {
-		if cmd[0] != "pg_restore" { // let provisioning succeed
-			return 0
-		}
-		stderr.Write([]byte("invalid input"))
-		return 1
+	rt.jobFn = func(spec job.Spec, _ []string) (string, string, int) {
+		return "", "pg_restore: error: invalid input\njob failed: restore failed: exit status 1", 1
 	}
 	r, err := startRestore(a, context.Background(), RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: key, New: &CreateRequest{OwnerID: own(t, a), Name: "abc2", Domain: "abc2.com"}})
 	if err != nil {
@@ -161,32 +143,6 @@ func TestRestoreGarbageRollsBack(t *testing.T) {
 	}
 	if s, _ := a.Store.ListSchedules(context.Background(), db.ID); len(s) != 0 {
 		t.Fatalf("rolled-back node kept schedules: %+v", s)
-	}
-}
-
-func TestRestoreBadGzipRollsBack(t *testing.T) {
-	a, rt, objs := newTestApp(t)
-	key := "upload/x.sql.gz"
-	// Valid for the first 64 KiB the header check reads, corrupt after it: only the restore itself can notice.
-	var raw bytes.Buffer
-	zw := gzip.NewWriter(&raw)
-	zw.Write([]byte("CREATE TABLE t(id int);\n"))
-	noise := make([]byte, 300<<10)
-	rand.Read(noise)
-	zw.Write([]byte(hex.EncodeToString(noise)))
-	zw.Close()
-	bad := raw.Bytes()
-	for i := 100 << 10; i < 100<<10+64; i++ {
-		bad[i] ^= 0xff
-	}
-	dest := restoreFixture(t, a, objs, key, bad, nil)
-	r, err := startRestore(a, context.Background(), RestoreRequest{OwnerID: own(t, a), DestinationID: dest.ID, Key: key, Engine: "postgres", New: &CreateRequest{OwnerID: own(t, a), Name: "abc2", Domain: "abc2.com"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	a.Wait()
-	if got, _ := a.Store.GetRestore(context.Background(), r.ID); got.Status != "failed" || len(rt.removes) != 1 {
-		t.Fatalf("restore %+v removes %+v", got, rt.removes)
 	}
 }
 

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -39,9 +40,21 @@ func (postgres) Spec(p Params) Spec {
 	}
 }
 
-// Exec inside the container needs no password: the image's local socket is trust.
+// hostArgs are the connection flags of the client tools: none for the local socket, -h/-p for a job.
+func hostArgs(p Params) []string {
+	if p.Host == "" {
+		return nil
+	}
+	port := p.Port
+	if port == 0 {
+		port = 5432
+	}
+	return []string{"-h", p.Host, "-p", strconv.Itoa(port)}
+}
+
+// Over TCP (jobs) the password comes in PGPASSWORD; on the local socket the image is trust.
 func (postgres) DumpCmd(p Params) []string {
-	return []string{"pg_dump", "-U", p.AdminUser, "-d", p.Name, "-Fc"}
+	return append([]string{"pg_dump", "-U", p.AdminUser, "-d", p.Name, "-Fc"}, hostArgs(p)...)
 }
 
 func (postgres) DumpExt() string { return ".dump" }
@@ -50,8 +63,8 @@ func (postgres) DumpExt() string { return ".dump" }
 func (postgres) RestoreCmd(p Params, key string) ([]string, bool, bool, error) {
 	switch {
 	case strings.HasSuffix(key, ".dump"):
-		return []string{"pg_restore", "-U", p.AdminUser, "-d", p.Name,
-			"--no-owner", "--no-acl", "--exit-on-error", "--role=" + p.User}, false, false, nil
+		return append([]string{"pg_restore", "-U", p.AdminUser, "-d", p.Name,
+			"--no-owner", "--no-acl", "--exit-on-error", "--role=" + p.User}, hostArgs(p)...), false, false, nil
 	case strings.HasSuffix(key, ".sql"):
 		return postgres{}.AdminCmd(p), false, true, nil
 	case strings.HasSuffix(key, ".sql.gz"):
@@ -61,7 +74,14 @@ func (postgres) RestoreCmd(p Params, key string) ([]string, bool, bool, error) {
 }
 
 func (postgres) AdminCmd(p Params) []string {
-	return []string{"psql", "-U", p.AdminUser, "-d", p.Name, "-v", "ON_ERROR_STOP=1", "-q"}
+	return append([]string{"psql", "-U", p.AdminUser, "-d", p.Name, "-v", "ON_ERROR_STOP=1", "-q"}, hostArgs(p)...)
+}
+
+// AdminDSN connects as the node superuser; the sidecar speaks plain TCP, TLS is the proxy's job.
+func (postgres) AdminDSN(p Params, host string, port int) string {
+	u := url.URL{Scheme: "postgres", User: url.UserPassword(p.AdminUser, p.AdminPassword), Host: net.JoinHostPort(host, strconv.Itoa(port)),
+		Path: "/" + p.Name, RawQuery: "sslmode=disable&connect_timeout=5"}
+	return u.String()
 }
 
 func (postgres) ConnString(p Params, domain string) string {

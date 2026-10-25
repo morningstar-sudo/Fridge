@@ -5,9 +5,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
-	"fridge/internal/objstore"
-	"github.com/minio/minio-go/v7"
 	"io"
 	"net/netip"
 	"os"
@@ -17,163 +16,167 @@ import (
 	"testing"
 	"time"
 
-	"fridge/internal/container"
+	"github.com/minio/minio-go/v7"
+
+	"fridge/internal/job"
+	"fridge/internal/objstore"
 	"fridge/internal/pki"
 	"fridge/internal/secret"
 	"fridge/internal/store"
 	"fridge/internal/store/storetest"
+	"fridge/internal/swarm"
 )
 
+// removeCall is what RemoveNode was asked to remove; ID mimics the old container id so assertions read the same.
 type removeCall struct{ ID, Volume string }
 
-type execCall struct {
-	ID    string
-	Cmd   []string
-	Stdin string
+type runCall struct {
+	Name, Image string // Name is the volume (= the node's old container name)
+	Env         []string
+	Spec        swarm.NodeSpec
 }
 
+type jobCall struct {
+	Name     string
+	Spec     job.Spec
+	Networks []string
+	NodeID   string
+}
+
+// fakeRuntime is a swarm that only keeps notes. Jobs succeed and, for a dump, leave a small object in objs,
+// unless jobFn says otherwise.
 type fakeRuntime struct {
 	mu        sync.Mutex
-	subnets   []netip.Prefix // what FridgeSubnets reports
-	runs      []container.RunSpec
+	subnets   []netip.Prefix // what Subnets reports
+	runs      []runCall
 	removes   []removeCall
-	execs     []execCall
+	jobs      []jobCall
 	healthErr error
 	pingErr   error
+	pickErr   error
+	createErr error
 	alerts    []string
 	onWait    func()
-	execFn    func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int
-	hang      bool // Exec blocks until ctx is done
-
-	// network state: network -> attached containers; ops logs Run/Remove/network calls in order.
-	nets       map[string]map[string]bool
-	ops        []string
-	connectErr error
+	jobFn     func(spec job.Spec, networks []string) (stdout, stderr string, code int)
+	hang      bool // RunJob blocks until ctx is done
+	objs      *fakeObjects
 }
 
 func (f *fakeRuntime) Ping(ctx context.Context) error { return f.pingErr }
 
-func (f *fakeRuntime) Run(ctx context.Context, s container.RunSpec) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.runs = append(f.runs, s)
-	f.ops = append(f.ops, "run "+s.Name+" "+s.Network)
-	if f.nets[s.Network] != nil {
-		f.nets[s.Network][s.Name] = true
-	}
-	return "ctr-" + s.Name, nil
+func (f *fakeRuntime) PickHost(ctx context.Context) (swarm.Host, error) {
+	return swarm.Host{ID: "host1", Hostname: "n1"}, f.pickErr
 }
 
-func (f *fakeRuntime) CreateNetwork(ctx context.Context, name string) error {
+func (f *fakeRuntime) CreateNode(ctx context.Context, n swarm.NodeSpec) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.ops = append(f.ops, "create "+name)
-	if f.nets == nil {
-		f.nets = map[string]map[string]bool{}
+	if f.createErr != nil {
+		return f.createErr
 	}
-	if f.nets[name] == nil {
-		f.nets[name] = map[string]bool{}
-	}
+	f.runs = append(f.runs, runCall{Name: n.VolumeName, Image: n.Image, Env: n.Env, Spec: n})
 	return nil
 }
 
-func (f *fakeRuntime) NetworkExists(ctx context.Context, name string) (bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.nets[name] != nil, nil
-}
-
-func (f *fakeRuntime) RemoveNetwork(ctx context.Context, name string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.ops = append(f.ops, "rmnet "+name)
-	if len(f.nets[name]) > 0 { // like Docker: attached endpoints block removal
-		return errors.New("network has active endpoints")
-	}
-	delete(f.nets, name)
-	return nil
-}
-
-func (f *fakeRuntime) ConnectNetwork(ctx context.Context, net, ctr string, aliases []string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.ops = append(f.ops, "connect "+net+" "+ctr+" "+strings.Join(aliases, ","))
-	if f.connectErr != nil {
-		return f.connectErr
-	}
-	if f.nets[net] == nil {
-		return errors.New("no such network " + net)
-	}
-	f.nets[net][ctr] = true // already connected: no-op
-	return nil
-}
-
-func (f *fakeRuntime) DisconnectNetwork(ctx context.Context, net, ctr string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.ops = append(f.ops, "disconnect "+net+" "+ctr)
-	delete(f.nets[net], ctr)
-	return nil
-}
-
-func (f *fakeRuntime) ContainerNetworks(ctx context.Context, ctr string) ([]string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var out []string
-	for n, cs := range f.nets {
-		if cs[ctr] {
-			out = append(out, n)
-		}
-	}
-	return out, nil
-}
-
-func (f *fakeRuntime) FridgeSubnets(ctx context.Context) ([]netip.Prefix, error) {
-	return f.subnets, nil
-}
-
-func (f *fakeRuntime) WaitHealthy(ctx context.Context, id string, d time.Duration) error {
+func (f *fakeRuntime) NodeReady(ctx context.Context, key string, timeout time.Duration) error {
 	if f.onWait != nil {
 		f.onWait()
 	}
 	return f.healthErr
 }
 
-func (f *fakeRuntime) Exec(ctx context.Context, id string, cmd []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
-	if f.hang {
-		<-ctx.Done()
-		return -1, ctx.Err()
-	}
-	c := execCall{ID: id, Cmd: cmd}
-	if stdin != nil {
-		b, err := io.ReadAll(stdin)
-		if err != nil {
-			return -1, err
-		}
-		c.Stdin, stdin = string(b), bytes.NewReader(b)
-	}
-	f.mu.Lock()
-	f.execs = append(f.execs, c)
-	f.mu.Unlock()
-	if f.execFn == nil {
-		return 0, nil
-	}
-	return f.execFn(cmd, stdin, stdout, stderr), nil
-}
-
-func (f *fakeRuntime) Remove(ctx context.Context, id, volume string) error {
+func (f *fakeRuntime) RemoveNode(ctx context.Context, ref swarm.NodeRef) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return err // like the real client: a dead ctx removes nothing
 	}
-	f.removes = append(f.removes, removeCall{id, volume})
-	f.ops = append(f.ops, "remove "+id)
-	for _, cs := range f.nets {
-		delete(cs, strings.TrimPrefix(id, "ctr-"))
-	}
+	f.removes = append(f.removes, removeCall{"ctr-" + ref.Volume, ref.Volume})
 	return nil
 }
+
+func (f *fakeRuntime) ListNodes(ctx context.Context) ([]swarm.NodeState, error) { return nil, nil }
+
+func (f *fakeRuntime) Subnets(ctx context.Context) ([]netip.Prefix, error) { return f.subnets, nil }
+
+// result renders a job's FRIDGE_RESULT stdout line.
+func result(v any) string {
+	b, _ := json.Marshal(v)
+	return job.ResultPrefix + string(b) + "\n"
+}
+
+func (f *fakeRuntime) RunJob(ctx context.Context, j swarm.JobSpec) (swarm.JobResult, error) {
+	if f.hang {
+		<-ctx.Done()
+		return swarm.JobResult{}, ctx.Err()
+	}
+	var spec job.Spec
+	for _, e := range j.Env {
+		if v, ok := strings.CutPrefix(e, job.EnvSpec+"="); ok {
+			if err := json.Unmarshal([]byte(v), &spec); err != nil {
+				return swarm.JobResult{}, err
+			}
+		}
+	}
+	f.mu.Lock()
+	f.jobs = append(f.jobs, jobCall{Name: j.Name, Spec: spec, Networks: j.Networks, NodeID: j.NodeID})
+	fn := f.jobFn
+	f.mu.Unlock()
+	if fn != nil {
+		out, errs, code := fn(spec, j.Networks)
+		return swarm.JobResult{ExitCode: code, Stdout: out, Stderr: errs}, nil
+	}
+	if spec.Op == "dump" && f.objs != nil {
+		f.objs.put(spec.Key, []byte("DUMP"), spec.Meta)
+		return swarm.JobResult{Stdout: result(map[string]any{"size": 4})}, nil
+	}
+	return swarm.JobResult{}, nil
+}
+
+// lastJob is the most recent job of this kind (zero value if none).
+func (f *fakeRuntime) lastJob(op string) (jobCall, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.jobs) - 1; i >= 0; i-- {
+		if f.jobs[i].Spec.Op == op {
+			return f.jobs[i], true
+		}
+	}
+	return jobCall{}, false
+}
+
+type adminCall struct{ DSN, SQL string }
+
+// fakeAdmin records the SQL a node would have run as its superuser.
+type fakeAdmin struct {
+	fn    func(dsn, sql string) error // runs before the call is recorded (may be slow or fail)
+	mu    sync.Mutex
+	calls []adminCall
+	err   error
+}
+
+func (f *fakeAdmin) Exec(ctx context.Context, dsn, sql string) error {
+	if f.fn != nil {
+		if err := f.fn(dsn, sql); err != nil {
+			return err
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, adminCall{dsn, sql})
+	return f.err
+}
+
+func (f *fakeAdmin) last() adminCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.calls) == 0 {
+		return adminCall{}
+	}
+	return f.calls[len(f.calls)-1]
+}
+
+func adminOf(a *App) *fakeAdmin { return a.Admin.(*fakeAdmin) }
 
 type fakeObj struct {
 	data []byte
@@ -265,7 +268,7 @@ func newTestApp(t *testing.T) (*App, *fakeRuntime, *fakeObjects) {
 	a := &App{
 		Store: storetest.New(t), Box: box, RT: rt, CA: ca,
 		TraefikDir: t.TempDir(), HealthTimeout: time.Second, WebCert: "/traefik/certs/web.crt", WebKey: "/traefik/certs/web.key",
-		ControlNetwork: "fridge-net", TraefikContainer: "fridge-traefik",
+		Admin: &fakeAdmin{}, JobImage: "fridge-job:test", EgressNetwork: "fridge_egress",
 	}
 	a.Alert = func(ctx context.Context, text string) {
 		rt.mu.Lock()
@@ -273,6 +276,7 @@ func newTestApp(t *testing.T) (*App, *fakeRuntime, *fakeObjects) {
 		rt.mu.Unlock()
 	}
 	objs := &fakeObjects{objs: map[string]fakeObj{}}
+	rt.objs = objs
 	a.OpenObjects = func(d store.Destination, sk string, _ *objstore.Guard) (ObjectStore, error) { return objs, nil }
 	return a, rt, objs
 }
@@ -339,4 +343,22 @@ func dumpFile(t *testing.T, name string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+func (f *fakeObjects) put(key string, data []byte, meta map[string]string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.objs[key] = fakeObj{data, meta}
+}
+
+// dumps makes dump jobs behave as the real one: with code 0 the object holds data and the job reports its size;
+// otherwise nothing is stored and the job fails with stderr.
+func (f *fakeRuntime) dumps(data, stderr string, code int) {
+	f.jobFn = func(spec job.Spec, _ []string) (string, string, int) {
+		if code != 0 {
+			return "", stderr, code
+		}
+		f.objs.put(spec.Key, []byte(data), spec.Meta)
+		return result(map[string]any{"size": len(data)}), stderr, 0
+	}
 }

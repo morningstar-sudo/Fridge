@@ -3,11 +3,10 @@ package app
 import (
 	"context"
 	"errors"
-	"io"
 	"strings"
 	"testing"
 
-	"fridge/internal/container"
+	"fridge/internal/job"
 	"fridge/internal/store"
 )
 
@@ -21,33 +20,10 @@ func waitCheck(t *testing.T, a *App, id int64) store.DumpCheck {
 	return c
 }
 
-func TestDumpCheckSQLGzTruncated(t *testing.T) {
+func TestDumpCheckRejectsBeforeStarting(t *testing.T) {
 	a, rt, objs := newTestApp(t)
 	ctx := context.Background()
-	full := gz("CREATE TABLE t(id int);\n" + strings.Repeat("INSERT INTO t VALUES (1);\n", 5000))
-	dest := restoreFixture(t, a, objs, "up/ok.sql.gz", full, nil)
-	objs.objs["up/cut.sql.gz"] = fakeObj{full[:len(full)/2], nil}
-	objs.objs["up/nul.sql"] = fakeObj{[]byte("CREATE TABLE t(id int);\n\x00"), nil}
-
-	c, err := a.StartDumpCheck(ctx, dest.ID, "up/ok.sql.gz", own(t, a))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := waitCheck(t, a, c.ID)
-	if got.Status != "ok" || got.Result["format"] != "sql" || got.Result["bytes"] != float64(len(full)) {
-		t.Fatalf("intact: %+v", got)
-	}
-	c, _ = a.StartDumpCheck(ctx, dest.ID, "up/cut.sql.gz", own(t, a))
-	if got = waitCheck(t, a, c.ID); got.Status != "failed" || !strings.Contains(got.Error, "unexpected EOF") || got.FinishedAt == nil {
-		t.Fatalf("truncated: %+v", got)
-	}
-	c, _ = a.StartDumpCheck(ctx, dest.ID, "up/nul.sql", own(t, a))
-	if got = waitCheck(t, a, c.ID); got.Status != "failed" || !strings.Contains(got.Error, "NUL") {
-		t.Fatalf("NUL: %+v", got)
-	}
-	if len(rt.runs) != 0 {
-		t.Fatalf("plain SQL started %d container(s)", len(rt.runs))
-	}
+	dest := restoreFixture(t, a, objs, "up/ok.sql.gz", gz("CREATE TABLE t(id int);"), nil)
 	for _, bad := range []struct {
 		key  string
 		want error
@@ -59,64 +35,58 @@ func TestDumpCheckSQLGzTruncated(t *testing.T) {
 	if _, err := a.StartDumpCheck(ctx, 999, "up/ok.sql.gz", own(t, a)); !errors.Is(err, ErrInvalid) {
 		t.Errorf("no destination: %v", err)
 	}
+	if len(rt.jobs) != 0 {
+		t.Fatalf("%d job(s) started for requests that were refused", len(rt.jobs))
+	}
 }
 
-func TestDumpCheckDumpUsesTempContainer(t *testing.T) {
+// The check runs as a job that can reach S3 and nothing else: no database network, no sidecar.
+func TestDumpCheckRunsAsAJobWithoutDatabaseAccess(t *testing.T) {
 	a, rt, objs := newTestApp(t)
 	ctx := context.Background()
-	data := dumpFile(t, "pg14.dump")
-	dest := restoreFixture(t, a, objs, "up/a.dump", data, nil)
-	objs.objs["up/bad.dump"] = fakeObj{data, nil}
-
-	var stdin string
-	var cmd []string
-	rt.execFn = func(c []string, in io.Reader, stdout, stderr io.Writer) int {
-		b, _ := io.ReadAll(in)
-		stdin, cmd = string(b), c
-		stderr.Write([]byte("pg_restore: connecting to database for restore\npg_restore: processing item 1 ENCODING\npg_restore: processing item 2 STDSTRINGS\n"))
-		return 0
+	dest := restoreFixture(t, a, objs, "up/a.dump", dumpFile(t, "pg14.dump"), nil)
+	rt.jobFn = func(spec job.Spec, networks []string) (string, string, int) {
+		return result(map[string]any{"format": "custom", "bytes": 2877, "source_version": "14.24", "pg_dump_version": "14.24", "toc_entries": 2}),
+			"pg_restore: creating TABLE \"public.note\"\n", 0
 	}
 	c, err := a.StartDumpCheck(ctx, dest.ID, "up/a.dump", own(t, a))
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := waitCheck(t, a, c.ID)
-	if got.Status != "ok" || got.Result["toc_entries"] != float64(2) || got.Result["bytes"] != float64(len(data)) ||
-		got.Result["source_version"] == "" || got.Result["pg_dump_version"] == "" {
+	if got.Status != "ok" || got.Result["toc_entries"] != float64(2) || got.Result["bytes"] != float64(2877) || got.Result["source_version"] != "14.24" || !strings.Contains(got.Log, "creating TABLE") || got.FinishedAt == nil {
 		t.Fatalf("%+v", got)
 	}
-	if stdin != string(data) || strings.Join(cmd, " ") != "pg_restore -v -f /dev/null" {
-		t.Fatalf("exec %q stdin ok=%v", cmd, stdin == string(data))
+	j, ok := rt.lastJob("check")
+	if !ok || strings.Join(j.Networks, ",") != "fridge_egress" || j.Spec.Key != "up/a.dump" || j.Spec.S3.Bucket != "b" || j.NodeID != "" {
+		t.Fatalf("job %+v", j)
 	}
-	if len(rt.runs) != 1 {
-		t.Fatalf("runs: %+v", rt.runs)
+	if v := j.Spec.Params.Version; v != "18" { // the newest catalog version: its pg_restore reads every older archive
+		t.Fatalf("pg_restore version %q", v)
 	}
-	r := rt.runs[0]
-	if r.Network != container.NoNetwork || !r.Ephemeral || r.Cmd[0] != "sleep" || r.Name != "fridge-check-1" || !strings.HasPrefix(r.Image, "postgres:") || r.Volume != "" {
-		t.Fatalf("run spec %+v", r)
+	if len(rt.runs) != 0 {
+		t.Fatalf("a check created %d node(s)", len(rt.runs))
 	}
-	if len(rt.removes) != 1 || rt.removes[0].ID != "ctr-fridge-check-1" {
-		t.Fatalf("removes %+v", rt.removes)
+}
+
+func TestDumpCheckFailureCarriesTheJobsReason(t *testing.T) {
+	a, rt, objs := newTestApp(t)
+	ctx := context.Background()
+	dest := restoreFixture(t, a, objs, "up/cut.dump", dumpFile(t, "pg14.dump"), nil)
+	rt.jobFn = func(spec job.Spec, networks []string) (string, string, int) {
+		return result(map[string]any{"format": "custom", "bytes": 100}),
+			"pg_restore: error: could not read from input file: end of file\njob failed: pg_restore: exit status 1\n", 1
+	}
+	c, _ := a.StartDumpCheck(ctx, dest.ID, "up/cut.dump", own(t, a))
+	got := waitCheck(t, a, c.ID)
+	if got.Status != "failed" || got.Error != "pg_restore: exit status 1" || !strings.Contains(got.Log, "end of file") || got.Result["bytes"] != float64(100) {
+		t.Fatalf("%+v", got)
 	}
 
-	// pg_restore refuses the file: the check fails with its message, and the container still goes
-	rt.execFn = func(c []string, in io.Reader, stdout, stderr io.Writer) int {
-		io.Copy(io.Discard, in)
-		stderr.Write([]byte("pg_restore: error: could not read from input file: end of file"))
-		return 1
-	}
-	c, _ = a.StartDumpCheck(ctx, dest.ID, "up/bad.dump", own(t, a))
-	got = waitCheck(t, a, c.ID)
-	if got.Status != "failed" || !strings.Contains(got.Log, "end of file") || !strings.Contains(got.Error, "exited 1") {
+	// a job that dies without saying why: the error is the exit status
+	rt.jobFn = func(spec job.Spec, networks []string) (string, string, int) { return "", "", 137 }
+	c, _ = a.StartDumpCheck(ctx, dest.ID, "up/cut.dump", own(t, a))
+	if got = waitCheck(t, a, c.ID); got.Status != "failed" || !strings.Contains(got.Error, "137") {
 		t.Fatalf("%+v", got)
-	}
-	if len(rt.removes) != 2 {
-		t.Fatalf("removes %+v", rt.removes)
-	}
-	// a file with a bad header never reaches a container
-	objs.objs["up/png.dump"] = fakeObj{dumpFile(t, "not-a-dump.dump"), nil}
-	c, _ = a.StartDumpCheck(ctx, dest.ID, "up/png.dump", own(t, a))
-	if got = waitCheck(t, a, c.ID); got.Status != "failed" || !strings.Contains(got.Error, "PGDMP") || len(rt.runs) != 2 {
-		t.Fatalf("%+v runs=%d", got, len(rt.runs))
 	}
 }

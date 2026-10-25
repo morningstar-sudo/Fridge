@@ -13,37 +13,35 @@ import (
 	"time"
 
 	"fridge/internal/audit"
-	"fridge/internal/container"
 	"fridge/internal/objstore"
 	"fridge/internal/pki"
 	"fridge/internal/proxy"
 	"fridge/internal/secret"
 	"fridge/internal/store"
+	"fridge/internal/swarm"
 )
 
 var ErrInvalid = errors.New("invalid")
 
+// Runtime is the swarm as the app sees it: database nodes, one-shot jobs and the network ranges to keep S3 away from.
 type Runtime interface {
 	Ping(ctx context.Context) error
-	Run(ctx context.Context, s container.RunSpec) (string, error)
-	WaitHealthy(ctx context.Context, id string, timeout time.Duration) error
-	Exec(ctx context.Context, id string, cmd []string, stdin io.Reader, stdout, stderr io.Writer) (int, error)
-	Remove(ctx context.Context, id, volume string) error
-	CreateNetwork(ctx context.Context, name string) error
-	NetworkExists(ctx context.Context, name string) (bool, error)
-	RemoveNetwork(ctx context.Context, name string) error
-	ConnectNetwork(ctx context.Context, netName, containerName string, aliases []string) error
-	DisconnectNetwork(ctx context.Context, netName, containerName string) error
-	ContainerNetworks(ctx context.Context, containerName string) ([]string, error)
-	FridgeSubnets(ctx context.Context) ([]netip.Prefix, error)
+	PickHost(ctx context.Context) (swarm.Host, error)
+	CreateNode(ctx context.Context, n swarm.NodeSpec) error
+	NodeReady(ctx context.Context, key string, timeout time.Duration) error
+	RemoveNode(ctx context.Context, ref swarm.NodeRef) error
+	ListNodes(ctx context.Context) ([]swarm.NodeState, error)
+	RunJob(ctx context.Context, j swarm.JobSpec) (swarm.JobResult, error)
+	Subnets(ctx context.Context) ([]netip.Prefix, error)
 }
 
-var _ Runtime = (*container.Client)(nil)
+var _ Runtime = (*swarm.Client)(nil)
 
 type App struct {
 	Store           *store.Store
 	Box             *secret.Box
 	RT              Runtime
+	Admin           AdminConn // runs SQL as a node's superuser; nil = pgx through the node's edge sidecar
 	CA              *pki.CA
 	TraefikDir      string
 	WebCert, WebKey string // absolute paths, inside the Traefik container too, of the web UI certificate
@@ -57,13 +55,10 @@ type App struct {
 	backupTimeout   time.Duration                                                                       // test override; 0 = backupTimeout
 	wg              sync.WaitGroup
 
-	// ControlNetwork (FRIDGE_NETWORK) holds only traefik/fridge/fridge-meta; each DB node gets its own
-	// internal network shared with TraefikContainer (FRIDGE_TRAEFIK_CONTAINER).
-	ControlNetwork, TraefikContainer string
+	// JobImage runs dump/restore/check jobs; EgressNetwork is the empty overlay that gives them internet.
+	JobImage, EgressNetwork string
 
-	netMu      sync.Mutex     // serializes node-network repair (Reconcile/Heal) with removeNode's teardown
-	healFailed map[int64]bool // under netMu: DBs whose last heal failed (alert once per OK→failed)
-	suLocks    sync.Map       // db id -> *sync.Mutex: one superuser rotation per node at a time
+	suLocks sync.Map // db id -> *sync.Mutex: one superuser rotation per node at a time
 
 	Img      Images   // nil: the Images page is unavailable (tests)
 	Registry Registry // nil: remote versions are not looked up

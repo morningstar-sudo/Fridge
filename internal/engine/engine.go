@@ -12,6 +12,8 @@ import (
 // AdminUser is the node superuser; legacy single-user nodes pass AdminUser = User.
 type Params struct {
 	Name, User, Password, Version, AdminUser, AdminPassword string
+	Host                                                    string // when set the client tools connect over TCP to Host:Port (jobs); otherwise over the local socket
+	Port                                                    int
 }
 
 // Spec describes the container an engine runs.
@@ -34,6 +36,8 @@ type Engine interface {
 	AppUserSQL(user, password, db string) string
 	SetPasswordSQL(user, password string) string
 	AdminCmd(p Params) []string // superuser SQL shell; SQL (and passwords) go on stdin, never argv
+	// AdminDSN is a connection URL for running SQL as the node superuser at host:port (the edge sidecar).
+	AdminDSN(p Params, host string, port int) string
 }
 
 // Info is the catalog entry for an engine.

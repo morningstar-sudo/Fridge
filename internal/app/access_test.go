@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
+	"hash/fnv"
 	"strings"
 	"testing"
 
@@ -37,12 +39,24 @@ func mkDest(t *testing.T, a *App, name string, owner int64, shared bool) store.D
 
 func mkDB(t *testing.T, a *App, name string, owner int64) store.Database {
 	t.Helper()
+	adminEnc, err := a.Box.Encrypt("fixture-admin-pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := fmt.Sprintf("%016x", fnvHash(name))
 	d := store.Database{Name: name, Engine: "postgres", Version: "17", Domain: name + ".example.com", TLSMode: "internal",
-		User: name + "_app", Volume: "fridge-postgres-" + name, Status: "running", ContainerID: "ctr-" + name, OwnerID: &owner}
+		User: name + "_app", Volume: "fridge-postgres-" + key, Status: "running", ContainerID: "fridge-db-" + key, OwnerID: &owner,
+		NodeKey: key, AdminUser: "su_" + key, AdminPasswordEnc: adminEnc, HostID: "host1"}
 	if err := a.Store.CreateDatabase(context.Background(), &d); err != nil {
 		t.Fatal(err)
 	}
 	return d
+}
+
+func fnvHash(s string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(s))
+	return h.Sum64()
 }
 
 func TestOwnershipOnCreate(t *testing.T) {

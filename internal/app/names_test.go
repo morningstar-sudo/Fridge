@@ -101,8 +101,8 @@ func TestCustomDBCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if x := lastExec(t, e.rt); !strings.Contains(x.Stdin, `CREATE ROLE "alice_shop_rw" LOGIN PASSWORD '`+pw+`'`) {
-		t.Fatalf("app user SQL = %q", x.Stdin)
+	if x := adminOf(e.a).last(); !strings.Contains(x.SQL, `CREATE ROLE "alice_shop_rw" LOGIN PASSWORD '`+pw+`'`) {
+		t.Fatalf("app user SQL = %q", x.SQL)
 	}
 	cs, err := e.a.ConnString(d)
 	if err != nil {

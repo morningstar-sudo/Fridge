@@ -3,13 +3,13 @@ package app
 import (
 	"context"
 	"errors"
-	"io"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"fridge/internal/audit"
+	"fridge/internal/job"
 	"fridge/internal/store"
 )
 
@@ -27,8 +27,13 @@ func TestBackupKey(t *testing.T) {
 func fixture(t *testing.T, a *App) (store.Database, store.Destination) {
 	t.Helper()
 	ctx := context.Background()
+	adminEnc, err := a.Box.Encrypt("fixture-admin-pw")
+	if err != nil {
+		t.Fatal(err)
+	}
 	d := store.Database{Name: "abc", Engine: "postgres", Version: "17", Domain: "abc.example.com", TLSMode: "internal",
-		User: "abc_app", Volume: "fridge-postgres-abc", Status: "running", ContainerID: "ctr-abc"}
+		User: "abc_app", Volume: "fridge-postgres-0123456789abcdef", Status: "running", ContainerID: "fridge-db-0123456789abcdef",
+		NodeKey: "0123456789abcdef", AdminUser: "su_0123456789abcdef", AdminPasswordEnc: adminEnc, HostID: "host1"}
 	if err := a.Store.CreateDatabase(ctx, &d); err != nil {
 		t.Fatal(err)
 	}
@@ -47,12 +52,7 @@ func fixture(t *testing.T, a *App) (store.Database, store.Destination) {
 func TestBackupHappyPath(t *testing.T) {
 	a, rt, objs := newTestApp(t)
 	d, dest := fixture(t, a)
-	var cmd0 string
-	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int {
-		cmd0 = cmd[0]
-		stdout.Write([]byte("DUMPDATA"))
-		return 0
-	}
+	rt.dumps("DUMPDATA", "", 0)
 	b, err := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -72,19 +72,15 @@ func TestBackupHappyPath(t *testing.T) {
 			t.Fatalf("meta = %v", o.meta)
 		}
 	}
-	if cmd0 != "pg_dump" {
-		t.Fatalf("cmd0 = %q", cmd0)
+	if j, ok := rt.lastJob("dump"); !ok || j.Spec.Key != b.S3Key || j.Spec.Engine != "postgres" || j.Spec.Params.Name != "abc" || j.Spec.S3.Bucket != "b" || j.Spec.S3.SecretKey != "sk" {
+		t.Fatalf("dump job = %+v", j)
 	}
 }
 
 func TestBackupDumpFailsMidStream(t *testing.T) {
 	a, rt, objs := newTestApp(t)
 	d, dest := fixture(t, a)
-	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int {
-		stdout.Write([]byte("PART"))
-		stderr.Write([]byte("boom"))
-		return 1
-	}
+	rt.dumps("PART", "boom", 1)
 	b, err := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -103,10 +99,9 @@ func TestBackupDumpFailsMidStream(t *testing.T) {
 }
 
 func TestBackupUploadFails(t *testing.T) {
-	a, rt, objs := newTestApp(t)
+	a, rt, _ := newTestApp(t)
 	d, dest := fixture(t, a)
-	objs.putErr = errors.New("s3 down")
-	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int { return 0 }
+	rt.dumps("", "job failed: s3 down", 1) // the job does the upload, so an S3 failure is the job's failure
 	b, err := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -122,9 +117,10 @@ func TestBackupConcurrent(t *testing.T) {
 	a, rt, _ := newTestApp(t)
 	d, dest := fixture(t, a)
 	gate := make(chan struct{})
-	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	rt.jobFn = func(spec job.Spec, _ []string) (string, string, int) {
 		<-gate
-		return 0
+		rt.objs.put(spec.Key, []byte("X"), spec.Meta)
+		return result(map[string]any{"size": 1}), "", 0
 	}
 	ctx := context.Background()
 	if _, err := a.StartBackup(ctx, d.ID, dest.ID, nil, "schedule", nil); err != nil {
@@ -149,12 +145,8 @@ func TestBackupNoDestination(t *testing.T) {
 }
 
 func TestRetention(t *testing.T) {
-	a, rt, objs := newTestApp(t)
+	a, _, objs := newTestApp(t)
 	d, dest := fixture(t, a)
-	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int {
-		stdout.Write([]byte("X"))
-		return 0
-	}
 	ctx := context.Background()
 	sc, err := a.CreateSchedule(ctx, store.Schedule{DatabaseID: d.ID, DestinationID: dest.ID, Cron: "0 2 * * *", Prefix: "fridge", KeepLatest: 2, Enabled: true})
 	if err != nil {
@@ -229,11 +221,7 @@ func TestBackupTimeout(t *testing.T) {
 func TestBackupInvalidUTF8Log(t *testing.T) {
 	a, rt, _ := newTestApp(t)
 	d, dest := fixture(t, a)
-	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int {
-		stdout.Write([]byte("X"))
-		stderr.Write([]byte("bad \xff\xfe bytes"))
-		return 0
-	}
+	rt.dumps("X", "bad \xff\xfe bytes", 0)
 	b, _ := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual", nil)
 	a.Wait()
 	got, _ := a.Store.GetBackup(context.Background(), b.ID)
@@ -245,10 +233,10 @@ func TestBackupInvalidUTF8Log(t *testing.T) {
 func TestBackupFinishFailureAlerts(t *testing.T) {
 	a, rt, _ := newTestApp(t)
 	d, dest := fixture(t, a)
-	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int {
-		stdout.Write([]byte("X"))
+	rt.jobFn = func(spec job.Spec, _ []string) (string, string, int) {
+		rt.objs.put(spec.Key, []byte("X"), spec.Meta)
 		a.Store.Close() // FinishBackup will now fail
-		return 0
+		return result(map[string]any{"size": 1}), "", 0
 	}
 	if _, err := a.StartBackup(context.Background(), d.ID, dest.ID, nil, "manual", nil); err != nil {
 		t.Fatal(err)
@@ -262,14 +250,10 @@ func TestBackupFinishFailureAlerts(t *testing.T) {
 }
 
 func TestBackupSameSecondKeyConflict(t *testing.T) {
-	a, rt, objs := newTestApp(t)
+	a, _, objs := newTestApp(t)
 	d, dest := fixture(t, a)
 	fixed := time.Date(2026, 10, 20, 2, 0, 0, 0, time.UTC)
 	a.now = func() time.Time { return fixed }
-	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int {
-		stdout.Write([]byte("X"))
-		return 0
-	}
 	ctx := context.Background()
 	b, err := a.StartBackup(ctx, d.ID, dest.ID, nil, "manual", nil)
 	if err != nil {
@@ -295,7 +279,6 @@ func TestSystemAudit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int { stdout.Write([]byte("X")); return 0 }
 	run := func(sched *int64, trigger string) {
 		t.Helper()
 		if _, err := a.StartBackup(ctx, d.ID, dest.ID, sched, trigger, nil); err != nil {
@@ -307,7 +290,7 @@ func TestSystemAudit(t *testing.T) {
 	run(&sc.ID, "schedule")
 	a.now = func() time.Time { return time.Now().Add(time.Hour) } // another key: the first one is the same second
 	run(&sc.ID, "schedule")                                       // keeps 1: the first is deleted
-	rt.execFn = func(cmd []string, stdin io.Reader, stdout, stderr io.Writer) int { return 1 }
+	rt.dumps("", "", 1)
 	a.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
 	run(&sc.ID, "schedule") // fails
 

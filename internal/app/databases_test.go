@@ -230,7 +230,7 @@ func TestRecoverInterrupted(t *testing.T) {
 		t.Fatal(err)
 	}
 	half := store.Database{Name: "half", Engine: "postgres", Version: "17", Domain: "half.com", TLSMode: "internal",
-		User: "half_app", Volume: "fridge-postgres-half", Status: "creating"}
+		User: "half_app", Volume: "fridge-postgres-half", Status: "creating", NodeKey: "aaaaaaaaaaaaaaaa"}
 	if err := a.Store.CreateDatabase(ctx, &half); err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestRecoverInterrupted(t *testing.T) {
 	if err := a.RecoverInterrupted(ctx); err != nil {
 		t.Fatal(err)
 	}
-	want := []removeCall{{"fridge-postgres-half", "fridge-postgres-half"}, {"ctr-" + tgt.Volume, tgt.Volume}}
+	want := []removeCall{{"ctr-fridge-postgres-half", "fridge-postgres-half"}, {"ctr-" + tgt.Volume, tgt.Volume}}
 	if len(rt.removes) != 2 || rt.removes[0] != want[0] || rt.removes[1] != want[1] {
 		t.Fatalf("removes = %+v", rt.removes)
 	}

@@ -1,12 +1,9 @@
 package app
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"regexp"
 	"strconv"
 	"strings"
@@ -15,7 +12,9 @@ import (
 
 	"fridge/internal/dumpcheck"
 	"fridge/internal/engine"
+	"fridge/internal/job"
 	"fridge/internal/store"
+	"fridge/internal/swarm"
 )
 
 var segRe = regexp.MustCompile(`^(postgres|mysql|mariadb|mongo|redis)-(\d+(?:\.\d+)*)$`)
@@ -176,12 +175,12 @@ func (a *App) StartRestore(ctx context.Context, req RestoreRequest) (store.Resto
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		a.runRestore(objs, eng, r, nr, r.Log)
+		a.runRestore(r, nr, r.Log)
 	}()
 	return r, nil
 }
 
-func (a *App) runRestore(objs ObjectStore, eng engine.Engine, r store.Restore, nr CreateRequest, prefixLog string) {
+func (a *App) runRestore(r store.Restore, nr CreateRequest, prefixLog string) {
 	ctx := context.Background() // outlives the request
 	timeout := a.backupTimeout
 	if timeout == 0 {
@@ -190,7 +189,7 @@ func (a *App) runRestore(objs ObjectStore, eng engine.Engine, r store.Restore, n
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	var stderr bytes.Buffer
+	var stderr string
 	var node *store.Database
 	err := func() error {
 		d, err := a.CreateDatabase(runCtx, nr)
@@ -201,38 +200,24 @@ func (a *App) runRestore(objs ObjectStore, eng engine.Engine, r store.Restore, n
 		if err := a.Store.SetRestoreTarget(ctx, r.ID, d.ID); err != nil {
 			return err
 		}
-		cmd, gunzip, setRole, err := eng.RestoreCmd(nodeParams(d), r.S3Key)
+		params, err := a.jobParams(runCtx, d)
 		if err != nil {
 			return err
 		}
-		rc, err := objs.Get(runCtx, r.S3Key)
+		s3, guard, err := a.s3Job(runCtx, r.DestinationID)
 		if err != nil {
-			return fmt.Errorf("download: %w", err)
+			return err
 		}
-		defer rc.Close()
-		var in io.Reader = rc
-		if gunzip {
-			zr, err := gzip.NewReader(rc)
-			if err != nil {
-				return fmt.Errorf("not a gzip file: %w", err)
-			}
-			defer zr.Close()
-			in = zr
-		}
-		if setRole { // objects from a plain SQL file must belong to the app user, not the superuser
-			in = io.MultiReader(strings.NewReader("SET ROLE "+engine.QuoteIdent(d.User)+";\n"), in)
-		}
-		code, err := a.RT.Exec(runCtx, d.ContainerID, cmd, in, io.Discard, &stderr)
-		switch {
-		case err != nil:
+		// The job reads the file from S3 and loads it into the node over the node's own network.
+		_, stderr, err = a.runJob(runCtx, "restore", job.Spec{Op: "restore", Params: params, Engine: r.SourceEngine, S3: s3, Guard: guard, Key: r.S3Key},
+			[]string{swarm.Network(d.NodeKey), a.EgressNetwork}, timeout)
+		if err != nil {
 			return fmt.Errorf("restore failed: %w", err)
-		case code != 0:
-			return fmt.Errorf("restore exited %d", code)
 		}
 		return nil
 	}()
 
-	logText := tail(prefixLog + stderr.String())
+	logText := tail(prefixLog + stderr)
 	if err == nil {
 		if ferr := a.Store.FinishRestore(ctx, r.ID, "ok", logText, ""); ferr != nil {
 			a.alertf(ctx, "restore %d: recording result failed: %v", r.ID, ferr)

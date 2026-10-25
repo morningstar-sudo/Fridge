@@ -7,17 +7,16 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash/fnv"
-	"io"
 	"log"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
-	"fridge/internal/container"
 	"fridge/internal/engine"
 	"fridge/internal/proxy"
 	"fridge/internal/store"
+	"fridge/internal/swarm"
 )
 
 type CreateRequest struct {
@@ -91,8 +90,13 @@ func (a *App) CreateDatabase(ctx context.Context, req CreateRequest) (store.Data
 	if err != nil {
 		return store.Database{}, err
 	}
+	host, err := a.RT.PickHost(ctx) // the database and its volume stay on this node for good
+	if err != nil {
+		return store.Database{}, err
+	}
 	d := store.Database{
-		Name: name, Engine: req.Engine, Version: version, Domain: req.Domain, TLSMode: req.TLSMode,
+		HostID: host.ID,
+		Name:   name, Engine: req.Engine, Version: version, Domain: req.Domain, TLSMode: req.TLSMode,
 		User: user, PasswordEnc: enc, DomainID: &domainID,
 		Volume: fmt.Sprintf("fridge-%s-%s", req.Engine, nodeKey), Status: "creating", OwnerID: &req.OwnerID,
 		NodeKey: nodeKey, AdminUser: "su_" + nodeKey, AdminPasswordEnc: adminEnc,
@@ -117,37 +121,29 @@ func (a *App) CreateDatabase(ctx context.Context, req CreateRequest) (store.Data
 	return d, nil
 }
 
-// provision runs the node as its superuser, then creates the non-superuser app user owning the database.
-// Passwords travel in env (container init) and on exec stdin, never in argv.
+// provision starts the node (its overlay network, the pinned database service and the edge sidecar), then creates the
+// non-superuser app user owning the database through the sidecar, and publishes the TLS route.
+// Passwords travel in the service environment (container init) and on the SQL connection, never in argv.
 func (a *App) provision(ctx context.Context, d *store.Database, eng engine.Engine, info engine.Info, pw, adminPW string) error {
 	p := nodeParams(*d)
 	p.Password, p.AdminPassword = pw, adminPW
 	spec := eng.Spec(p)
-	// The node lives only on its own internal network with Traefik: no control plane, no peers, no internet.
-	net := NodeNetwork(*d)
-	if err := a.RT.CreateNetwork(ctx, net); err != nil {
-		return fmt.Errorf("create network: %w", err)
-	}
-	if err := a.RT.ConnectNetwork(ctx, net, a.TraefikContainer, nil); err != nil {
-		return fmt.Errorf("connect proxy: %w", err)
-	}
-	id, err := a.RT.Run(ctx, container.RunSpec{
-		Name: d.Volume, Image: spec.Image, Env: spec.Env, Volume: d.Volume, VolumePath: spec.VolumePath,
-		Healthcheck: spec.Healthcheck, Labels: map[string]string{"fridge.db_id": fmt.Sprint(d.ID)}, Network: net,
+	err := a.RT.CreateNode(ctx, swarm.NodeSpec{
+		Key: d.NodeKey, DBID: d.ID, HostID: d.HostID, Image: spec.Image, Env: spec.Env,
+		VolumeName: d.Volume, VolumePath: spec.VolumePath, Port: spec.Port, Healthcheck: spec.Healthcheck,
 	})
 	if err != nil {
-		return fmt.Errorf("run container: %w", err)
+		return fmt.Errorf("create node: %w", err)
 	}
-	d.ContainerID = id
-	if err := a.RT.WaitHealthy(ctx, id, a.HealthTimeout); err != nil {
+	d.ContainerID = swarm.DBService(d.NodeKey) // the swarm service name; the column keeps its old name
+	if err := a.RT.NodeReady(ctx, d.NodeKey, a.HealthTimeout); err != nil {
 		return fmt.Errorf("wait healthy: %w", err)
 	}
-	code, err := a.RT.Exec(ctx, id, eng.AdminCmd(p), strings.NewReader(eng.AppUserSQL(d.User, pw, d.Name)), io.Discard, io.Discard)
-	switch {
-	case err != nil:
+	actx, cancel := context.WithTimeout(ctx, a.HealthTimeout)
+	defer cancel()
+	// Errors are not wrapped with the SQL: it carries the app user's password.
+	if err := a.execAsAdmin(actx, *d, eng, adminPW, eng.AppUserSQL(d.User, pw, d.Name)); err != nil {
 		return fmt.Errorf("create app user: %w", err)
-	case code != 0: // stderr deliberately dropped: psql error context can echo the statement, password included
-		return fmt.Errorf("create app user: exited %d", code)
 	}
 	certPEM, keyPEM, err := a.CA.Issue(d.Domain, 365*24*time.Hour)
 	if err != nil {
@@ -159,7 +155,7 @@ func (a *App) provision(ctx context.Context, d *store.Database, eng engine.Engin
 	}
 	if err := proxy.WriteRoute(a.TraefikDir, proxy.Route{
 		ID: d.ID, EntryPoint: info.EntryPoint, Domain: d.Domain,
-		Backend: fmt.Sprintf("%s:%d", d.Volume, spec.Port), CertFile: certFile, KeyFile: keyFile,
+		Backend: fmt.Sprintf("%s:%d", swarm.EdgeService(d.NodeKey), swarm.EdgePort), CertFile: certFile, KeyFile: keyFile,
 	}); err != nil {
 		return fmt.Errorf("write route: %w", err)
 	}
@@ -230,27 +226,16 @@ func nodeParams(d store.Database) engine.Params {
 	return p
 }
 
-// removeNode tears down container, volume, node network, route and cert, then marks the row "error". Failures are only logged.
+// removeNode tears down the node's services, network and volume, its route and cert, then marks the row "error". Failures are only logged.
 func (a *App) removeNode(ctx context.Context, d store.Database) {
 	// Rollback must survive a cancelled request context.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Minute)
 	defer cancel()
-	id := d.ContainerID
-	if id == "" {
-		id = d.Volume // container name == volume name
+	if d.NodeKey != "" {
+		if err := a.RT.RemoveNode(ctx, swarm.NodeRef{Key: d.NodeKey, HostID: d.HostID, Volume: d.Volume}); err != nil {
+			log.Printf("removeNode %s: %v", d.Name, err)
+		}
 	}
-	a.netMu.Lock() // a heal must not re-attach Traefik halfway through the teardown
-	if err := a.RT.Remove(ctx, id, d.Volume); err != nil {
-		log.Printf("removeNode %s: remove container: %v", d.Name, err)
-	}
-	net := NodeNetwork(d)
-	if err := a.RT.DisconnectNetwork(ctx, net, a.TraefikContainer); err != nil {
-		log.Printf("removeNode %s: disconnect proxy: %v", d.Name, err)
-	}
-	if err := a.RT.RemoveNetwork(ctx, net); err != nil {
-		log.Printf("removeNode %s: remove network: %v", d.Name, err)
-	}
-	a.netMu.Unlock()
 	if err := proxy.RemoveRoute(a.TraefikDir, d.ID); err != nil {
 		log.Printf("removeNode %s: remove route: %v", d.Name, err)
 	}

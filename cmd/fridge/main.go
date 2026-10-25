@@ -22,11 +22,11 @@ import (
 	"fridge/internal/app"
 	"fridge/internal/audit"
 	"fridge/internal/auth"
-	"fridge/internal/container"
 	"fridge/internal/pki"
 	"fridge/internal/registry"
 	"fridge/internal/secret"
 	"fridge/internal/store"
+	"fridge/internal/swarm"
 	"fridge/internal/web"
 )
 
@@ -38,6 +38,8 @@ func main() {
 				log.Fatal(err)
 			}
 			return
+		case "job":
+			os.Exit(runJob(os.Args[2:], os.Stdout, os.Stderr))
 		case "forward":
 			os.Exit(runForward(os.Args[2:], os.Stderr))
 		case "healthcheck":
@@ -56,7 +58,7 @@ func env(k, def string) string {
 
 func runServer() error {
 	var missing []string
-	for _, k := range []string{"FRIDGE_DATABASE_URL", "FRIDGE_SECRET_KEY"} {
+	for _, k := range []string{"FRIDGE_DATABASE_URL", "FRIDGE_SECRET_KEY", "FRIDGE_SERVER_IMAGE", "FRIDGE_JOB_IMAGE"} {
 		if os.Getenv(k) == "" {
 			missing = append(missing, k)
 		}
@@ -69,7 +71,7 @@ func runServer() error {
 		return fmt.Errorf("FRIDGE_SECRET_KEY: %w", err)
 	}
 	listen, dataDir, traefikDir := env("FRIDGE_LISTEN", ":8080"), env("FRIDGE_DATA", "/data"), env("FRIDGE_TRAEFIK_DIR", "/traefik")
-	network, apiBackend := env("FRIDGE_NETWORK", "fridge-net"), env("FRIDGE_API_BACKEND", "http://fridge:8080")
+	edgeNet, egressNet, apiBackend := env("FRIDGE_EDGE_NETWORK", "fridge_edge"), env("FRIDGE_EGRESS_NETWORK", "fridge_egress"), env("FRIDGE_API_BACKEND", "http://fridge:8080")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -84,12 +86,16 @@ func runServer() error {
 	} else if n > 0 {
 		log.Printf("marked %d interrupted job(s) failed", n)
 	}
-	rt, err := container.New(network)
+	rt, err := swarm.New(swarm.Config{EdgeNetwork: edgeNet, EgressNetwork: egressNet, ServerImage: os.Getenv("FRIDGE_SERVER_IMAGE")})
 	if err != nil {
 		return err
 	}
-	if err := rt.EnsureNetwork(ctx); err != nil {
-		return fmt.Errorf("docker network %s: %w", network, err)
+	defer rt.Close()
+	if err := rt.Ping(ctx); err != nil {
+		return fmt.Errorf("swarm: %w", err)
+	}
+	if err := rt.EnsureNetworks(ctx); err != nil {
+		return err
 	}
 	ca, err := pki.LoadOrCreate(filepath.Join(dataDir, "ca"))
 	if err != nil {
@@ -104,14 +110,11 @@ func runServer() error {
 	a := &app.App{
 		Store: st, Box: box, RT: rt, CA: ca, TraefikDir: traefikDir, APIBackend: apiBackend,
 		HealthTimeout: 120 * time.Second, Alert: alert.Webhook(os.Getenv("FRIDGE_ALERT_WEBHOOK")),
-		ControlNetwork: network, TraefikContainer: env("FRIDGE_TRAEFIK_CONTAINER", "fridge-traefik"),
-		Audit: &audit.Logger{Store: st}, Img: rt, Registry: &registry.Client{},
+		JobImage: os.Getenv("FRIDGE_JOB_IMAGE"), EgressNetwork: egressNet,
+		Audit: &audit.Logger{Store: st}, Registry: &registry.Client{},
 	}
 	if err := a.RecoverInterrupted(ctx); err != nil { // after FailRunning, before the scheduler loads
 		return fmt.Errorf("recover interrupted nodes: %w", err)
-	}
-	if err := a.ReconcileNetworks(ctx); err != nil { // isolation is best-effort at boot; serving matters more
-		log.Printf("reconcile node networks: %v", err)
 	}
 	allow, err := a.Allowlist(ctx)
 	if err != nil {
@@ -143,7 +146,7 @@ func runServer() error {
 	} else if need && !au.TokenConfigured() {
 		log.Printf("WARNING: no users yet and FRIDGE_SETUP_TOKEN is not set — setup is impossible until it is")
 	}
-	prefixes, err := trustedProxies(ctx, rt, network)
+	prefixes, err := trustedProxies(ctx, rt, edgeNet)
 	if err != nil {
 		return err
 	}
@@ -191,16 +194,6 @@ func runServer() error {
 		}
 	}); err != nil {
 		log.Printf("web certificate job: %v", err)
-	}
-	// A recreated Traefik container comes back on the control network only; re-attach it.
-	if err := a.Sched.AddFixed("@every 1m", func() {
-		hctx, cancel := context.WithTimeout(ctx, 50*time.Second)
-		defer cancel()
-		if _, err := a.HealNetworks(hctx); err != nil {
-			log.Printf("heal node networks: %v", err)
-		}
-	}); err != nil {
-		log.Printf("heal job: %v", err)
 	}
 	a.Sched.Start()
 
@@ -273,7 +266,7 @@ func healthcheck() int {
 
 // subnetser is the part of the Docker client trustedProxies needs.
 type subnetser interface {
-	Subnets(ctx context.Context, names ...string) ([]netip.Prefix, error)
+	SubnetsOf(ctx context.Context, names ...string) ([]netip.Prefix, error)
 }
 
 // trustedProxies: FRIDGE_TRUSTED_PROXY (CIDR list) wins; otherwise the fridge network's
@@ -286,7 +279,7 @@ func trustedProxies(ctx context.Context, rt subnetser, network string) ([]netip.
 		}
 		return p, nil
 	}
-	p, err := rt.Subnets(ctx, network)
+	p, err := rt.SubnetsOf(ctx, network)
 	if err != nil {
 		log.Printf("trusted proxy: cannot read subnets of %s, trusting loopback only: %v", network, err)
 		return nil, nil
