@@ -170,9 +170,13 @@ func (a *App) PullImages(refs []string, startedBy string) (string, error) {
 		inCatalog[r] = true
 	}
 	job := &pullJob{startedBy: startedBy, startedAt: a.clock(), status: map[string]string{}}
+	var todo []string // each ref once; the goroutines below write job.status, so nothing may range over it unlocked
 	for _, r := range refs {
 		if !inCatalog[r] {
 			return "", invalid("image %q is not in the catalog", r)
+		}
+		if _, dup := job.status[r]; !dup {
+			todo = append(todo, r)
 		}
 		job.status[r] = "pulling"
 	}
@@ -185,7 +189,7 @@ func (a *App) PullImages(refs []string, startedBy string) (string, error) {
 	a.prunePullJobs()
 	a.pulls.mu.Unlock()
 
-	for ref := range job.status {
+	for _, ref := range todo {
 		a.wg.Add(1)
 		go func() {
 			defer a.wg.Done()
