@@ -219,3 +219,12 @@ func TestAllowlistSet(t *testing.T) {
 		t.Fatalf("%d %q %q %+v", code, out, errs, recs)
 	}
 }
+
+// runStdin is run with the CLI's stdin set.
+func runStdin(t *testing.T, stdin string, h http.HandlerFunc, args ...string) (int, string, string, []rec) {
+	t.Helper()
+	old := cliStdin
+	cliStdin = strings.NewReader(stdin)
+	defer func() { cliStdin = old }()
+	return run(t, h, args...)
+}

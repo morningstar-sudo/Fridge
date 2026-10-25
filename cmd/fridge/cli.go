@@ -18,13 +18,19 @@ import (
 const usage = `usage: fridge <command> [args]
   login [--user U] [--password-stdin] [--yes] [--ca-file F] | logout | whoami
   setup --setup-token T --user U [--password-stdin]        (first admin, no browser needed)
-  engines | ls | show <db> | backups <db> | ca
-  create <engine> <name> --domain D [--version V]
-  dest add|ls|test|rm ...
+  engines | ls | backups <db> | ca
+  create <engine> <name> --domain D [--version V] [--reveal] [--db-user U] [--db-password-stdin | --random-credentials]
+  show <db> [--reveal]                                   (--reveal prints the password; it is audited)
+  superuser show <db> [--reveal] | superuser rotate <db>
+  members ls|add|rm <db> [user]
+  domains ls | add <name> | rm <name>
+  dest add|ls|test|rm|share ...                          (dest share <dest> on|off: admins only)
   objects <dest> [--prefix P] [--q Q]
   schedule add|ls|rm ...
   backup <db> [--dest D] [--wait]
-  restore --from <dest>:<key> --name N --domain D [--version V] [--engine E] [--wait]
+  restore --from <dest>:<key> --name N --domain D [--version V] [--engine E] [--wait] [credential flags as for create]
+  check --from <dest>:<key> [--wait]                     (deep check of a backup file with pg_restore)
+  audit [--user U] [--action A] [--db D] [--since 24h] [--csv]
   allowlist [set <cidr>...]
   recover allowlist <cidr>... | reset-password <user> | promote <user>   (run inside the server container)
 All commands accept --json. Env: FRIDGE_URL (default https://localhost:8443), FRIDGE_SESSION, FRIDGE_CA_FILE.`
@@ -156,25 +162,7 @@ func (c *cli) dispatch(args []string) error {
 			c.table(rows)
 		})
 	case "create":
-		var domain, version string
-		pos, err := c.need(cmd, rest, 2, func(fs *flag.FlagSet) {
-			fs.StringVar(&domain, "domain", "", "domain (required)")
-			fs.StringVar(&version, "version", "", "engine version")
-		})
-		if err != nil {
-			return err
-		}
-		if domain == "" {
-			return usageErr("create: --domain is required")
-		}
-		b, err := call("POST", "/api/databases", map[string]string{"engine": pos[0], "name": pos[1], "domain": domain, "version": version})
-		if err != nil {
-			return err
-		}
-		var v struct {
-			ConnectionString string `json:"connection_string"`
-		}
-		return c.show(b, &v, func() { fmt.Fprintln(c.out, v.ConnectionString) })
+		return c.create(rest)
 	case "ls":
 		if _, err := c.need(cmd, rest, 0, nil); err != nil {
 			return err
@@ -192,19 +180,17 @@ func (c *cli) dispatch(args []string) error {
 			c.table(rows)
 		})
 	case "show":
-		pos, err := c.need(cmd, rest, 1, nil)
-		if err != nil {
-			return err
-		}
-		b, err := call("GET", "/api/databases/"+url.PathEscape(pos[0]), nil)
-		if err != nil {
-			return err
-		}
-		var d dbT
-		return c.show(b, &d, func() {
-			c.table([][]string{{"ID", itoa(d.ID)}, {"NAME", d.Name}, {"ENGINE", d.Engine + " " + d.Version},
-				{"DOMAIN", d.Domain}, {"STATUS", d.Status}, {"CONNECTION", d.ConnectionString}})
-		})
+		return c.showDB(rest)
+	case "superuser":
+		return c.superuser(rest)
+	case "members":
+		return c.members(rest)
+	case "domains":
+		return c.domains(rest)
+	case "check":
+		return c.check(rest)
+	case "audit":
+		return c.audit(rest)
 	case "dest":
 		return c.dest(rest)
 	case "objects":
@@ -294,6 +280,7 @@ func (c *cli) dispatch(args []string) error {
 	case "restore":
 		var from, name, domain, version, eng string
 		var wait bool
+		var cf credFlags
 		timeout := 6 * time.Hour
 		_, err := c.need(cmd, rest, 0, func(fs *flag.FlagSet) {
 			fs.StringVar(&from, "from", "", "<dest>:<key> (required)")
@@ -303,6 +290,7 @@ func (c *cli) dispatch(args []string) error {
 			fs.StringVar(&eng, "engine", "", "engine")
 			fs.BoolVar(&wait, "wait", false, "wait until finished")
 			fs.DurationVar(&timeout, "timeout", timeout, "max time to wait with --wait")
+			cf.register(fs)
 		})
 		if err != nil {
 			return err
@@ -318,11 +306,22 @@ func (c *cli) dispatch(args []string) error {
 		if err != nil {
 			return err
 		}
-		b, err := call("POST", "/api/restores", map[string]any{"destination_id": id, "key": key, "engine": eng,
-			"new": map[string]string{"name": name, "domain": domain, "version": version}})
+		dbUser, dbPass, err := cf.resolve(c, "restore")
 		if err != nil {
 			return err
 		}
+		nw := map[string]string{"name": name, "domain": domain, "version": version}
+		if dbUser != "" {
+			nw["db_user"] = dbUser
+		}
+		if dbPass != "" {
+			nw["db_password"] = dbPass
+		}
+		b, err := call("POST", "/api/restores", map[string]any{"destination_id": id, "key": key, "engine": eng, "new": nw})
+		if err != nil {
+			return err
+		}
+		cf.announce(c, dbUser, dbPass)
 		return c.job(b, "/api/restores/", "GET /api/restores/<id>", wait, timeout)
 	case "allowlist":
 		if len(rest) > 0 && rest[0] == "set" {
@@ -514,6 +513,8 @@ func (c *cli) dest(args []string) error {
 			}
 			c.table(rows)
 		})
+	case "share":
+		return c.destShare(rest)
 	case "test", "rm":
 		pos, err := c.need("dest "+sub, rest, 1, nil)
 		if err != nil {
