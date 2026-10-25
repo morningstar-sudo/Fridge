@@ -1,101 +1,66 @@
-// Package proxy writes Traefik file-provider config: one dynamic YAML per DB
-// (TCP router by TLS SNI) plus a base file with the IP allowlists, the HTTPS web/API router and its certificate.
+// Package proxy builds Traefik's dynamic configuration and serves it over HTTP (Traefik's http provider),
+// so Traefik needs no shared directory and can run on any swarm node: one TCP route per database (by TLS SNI),
+// the HTTPS web/API router behind an IP allowlist, and the web certificate.
 package proxy
 
 import (
-	"errors"
+	"crypto/subtle"
+	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-
-	"gopkg.in/yaml.v3"
+	"log"
+	"net/http"
+	"strings"
 )
 
-// Route is one database's TCP route. Backend is "host:port".
-type Route struct {
-	ID                                             int64
-	EntryPoint, Domain, Backend, CertFile, KeyFile string
+// DB is one database's TCP route. Backend is "host:port" of its edge sidecar; the PEMs are inline.
+type DB struct {
+	ID              int64
+	Domain, Backend string
+	EntryPoint      string // the engine's Traefik entry point
+	CertPEM, KeyPEM string
 }
 
-// WriteRoute writes <dir>/dynamic/db-<id>.yml.
-func WriteRoute(dir string, r Route) error {
-	name := fmt.Sprintf("db-%d", r.ID)
-	doc := map[string]any{
-		"tcp": map[string]any{
-			"routers": map[string]any{
-				name: map[string]any{
-					"entryPoints": []string{r.EntryPoint},
-					"rule":        fmt.Sprintf("HostSNI(`%s`)", r.Domain),
-					"service":     name,
-					"middlewares": []string{"allowlist-tcp@file"},
-					"tls":         map[string]any{},
-				},
-			},
-			"services": map[string]any{
-				name: map[string]any{
-					"loadBalancer": map[string]any{
-						"servers": []any{map[string]any{"address": r.Backend}},
-					},
-				},
-			},
-		},
-		"tls": map[string]any{
-			"certificates": []any{map[string]any{"certFile": r.CertFile, "keyFile": r.KeyFile}},
-		},
-	}
-	return writeYAML(filepath.Join(dir, "dynamic", name+".yml"), doc)
+// Config is everything Traefik is told. The allowlist applies to the web UI and API only: a database's port is
+// open to whoever reaches it (the routing mesh hides the client address), so it is the host firewall's job.
+type Config struct {
+	DBs                   []DB
+	Allowlist             []string
+	APIBackend            string // URL of the Fridge API
+	WebCertPEM, WebKeyPEM string
 }
 
-// RemoveRoute deletes the route file; a missing file is not an error.
-func RemoveRoute(dir string, id int64) error {
-	return removeIfExists(filepath.Join(dir, "dynamic", fmt.Sprintf("db-%d.yml", id)))
-}
+const (
+	alpnPG = "postgresql" // libpq 17 sends ALPN "postgresql" and fails without an answer
+	tlsPG  = "pg"
+)
 
-// WriteCert writes the PEM pair to <dir>/certs and returns their absolute paths.
-// The key is written 0600, the cert 0644.
-func WriteCert(dir string, id int64, certPEM, keyPEM []byte) (certFile, keyFile string, err error) {
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return "", "", err
-	}
-	certFile = filepath.Join(abs, "certs", fmt.Sprintf("db-%d.crt", id))
-	keyFile = filepath.Join(abs, "certs", fmt.Sprintf("db-%d.key", id))
-	if err := writeFileAtomic(certFile, certPEM, 0o644); err != nil {
-		return "", "", err
-	}
-	if err := writeFileAtomic(keyFile, keyPEM, 0o600); err != nil {
-		return "", "", err
-	}
-	return certFile, keyFile, nil
-}
-
-// RemoveCert deletes both cert files; missing files are not an error.
-func RemoveCert(dir string, id int64) error {
-	for _, ext := range []string{".crt", ".key"} {
-		if err := removeIfExists(filepath.Join(dir, "certs", fmt.Sprintf("db-%d%s", id, ext))); err != nil {
-			return err
+// Build is the document Traefik's http provider expects.
+func Build(c Config) map[string]any {
+	routers, services := map[string]any{}, map[string]any{}
+	certs := []any{}
+	for _, d := range c.DBs {
+		name := fmt.Sprintf("db-%d", d.ID)
+		routers[name] = map[string]any{
+			"entryPoints": []string{d.EntryPoint},
+			"rule":        fmt.Sprintf("HostSNI(`%s`)", d.Domain),
+			"service":     name,
+			"tls":         map[string]any{"options": tlsPG},
 		}
+		services[name] = map[string]any{"loadBalancer": map[string]any{"servers": []any{map[string]any{"address": d.Backend}}}}
+		certs = append(certs, map[string]any{"certFile": d.CertPEM, "keyFile": d.KeyPEM})
 	}
-	return nil
-}
-
-// WriteBase writes <dir>/dynamic/_base.yml: the allowlist middlewares for TCP and HTTP (same CIDRs),
-// the HTTPS router (entry point websecure) for the web UI and API pointing at apiBackend, the plain-HTTP
-// router that only redirects to HTTPS, and the default TLS certificate (webCert/webKey) for the web UI.
-func WriteBase(dir string, cidrs []string, apiBackend, webCert, webKey string) error {
-	if webCert == "" || webKey == "" {
-		return errors.New("proxy: web certificate and key are required")
+	tls := map[string]any{
+		"options": map[string]any{tlsPG: map[string]any{"alpnProtocols": []string{alpnPG}}},
+		"stores": map[string]any{"default": map[string]any{
+			"defaultCertificate": map[string]any{"certFile": c.WebCertPEM, "keyFile": c.WebKeyPEM}}},
 	}
-	allowlist := map[string]any{
-		"ipAllowList": map[string]any{"sourceRange": cidrs},
+	if len(certs) > 0 {
+		tls["certificates"] = certs
 	}
 	doc := map[string]any{
-		"tcp": map[string]any{
-			"middlewares": map[string]any{"allowlist-tcp": allowlist},
-		},
 		"http": map[string]any{
 			"middlewares": map[string]any{
-				"allowlist-http": allowlist,
+				"allowlist-http": map[string]any{"ipAllowList": map[string]any{"sourceRange": c.Allowlist}},
 				"to-https":       map[string]any{"redirectScheme": map[string]any{"scheme": "https", "port": "8443", "permanent": true}},
 			},
 			"routers": map[string]any{
@@ -103,73 +68,50 @@ func WriteBase(dir string, cidrs []string, apiBackend, webCert, webKey string) e
 					"entryPoints": []string{"websecure"},
 					"rule":        "PathPrefix(`/`)",
 					"service":     "fridge-api",
-					"middlewares": []string{"allowlist-http@file"},
+					"middlewares": []string{"allowlist-http"},
 					"tls":         map[string]any{},
 				},
 				"fridge-redirect": map[string]any{
 					"entryPoints": []string{"web"},
 					"rule":        "PathPrefix(`/`)",
 					"service":     "fridge-api",
-					"middlewares": []string{"to-https@file"},
+					"middlewares": []string{"to-https"},
 				},
 			},
 			"services": map[string]any{
-				"fridge-api": map[string]any{
-					"loadBalancer": map[string]any{
-						"servers": []any{map[string]any{"url": apiBackend}},
-					},
-				},
+				"fridge-api": map[string]any{"loadBalancer": map[string]any{"servers": []any{map[string]any{"url": c.APIBackend}}}},
 			},
 		},
-		"tls": map[string]any{
-			"stores": map[string]any{
-				"default": map[string]any{"defaultCertificate": map[string]any{"certFile": webCert, "keyFile": webKey}},
-			},
-		},
+		"tls": tls,
 	}
-	return writeYAML(filepath.Join(dir, "dynamic", "_base.yml"), doc)
+	if len(routers) > 0 {
+		doc["tcp"] = map[string]any{"routers": routers, "services": services}
+	}
+	return doc
 }
 
-func writeYAML(path string, v any) error {
-	b, err := yaml.Marshal(v)
-	if err != nil {
-		return err
-	}
-	return writeFileAtomic(path, b, 0o644)
-}
-
-// writeFileAtomic writes to a temp file in the same directory, then renames it
-// over path. The temp name ends in .tmp so Traefik never loads it.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer func() {
-		if err != nil {
-			os.Remove(tmp)
+// Handler serves build() as JSON to callers that present the bearer token. The document carries private keys,
+// so a wrong token gets nothing and an empty configured token means nothing is served at all.
+func Handler(token string, build func(r *http.Request) (Config, error)) http.Handler {
+	want := []byte("Bearer " + token)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := []byte(r.Header.Get("Authorization"))
+		if token == "" || subtle.ConstantTimeCompare(got, want) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
 		}
-	}()
-	if _, err = f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err = f.Close(); err != nil {
-		return err
-	}
-	if err = os.Chmod(tmp, perm); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
-func removeIfExists(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
+		if r.Method != http.MethodGet || strings.TrimSuffix(r.URL.Path, "/") != "/traefik" {
+			http.NotFound(w, r)
+			return
+		}
+		cfg, err := build(r)
+		if err != nil {
+			log.Printf("proxy config: %v", err)
+			http.Error(w, "unavailable", http.StatusServiceUnavailable) // Traefik keeps its last good config
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		json.NewEncoder(w).Encode(Build(cfg))
+	})
 }

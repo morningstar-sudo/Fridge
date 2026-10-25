@@ -23,6 +23,7 @@ import (
 	"fridge/internal/audit"
 	"fridge/internal/auth"
 	"fridge/internal/pki"
+	"fridge/internal/proxy"
 	"fridge/internal/registry"
 	"fridge/internal/secret"
 	"fridge/internal/store"
@@ -58,7 +59,7 @@ func env(k, def string) string {
 
 func runServer() error {
 	var missing []string
-	for _, k := range []string{"FRIDGE_DATABASE_URL", "FRIDGE_SECRET_KEY", "FRIDGE_SERVER_IMAGE", "FRIDGE_JOB_IMAGE"} {
+	for _, k := range []string{"FRIDGE_DATABASE_URL", "FRIDGE_SECRET_KEY", "FRIDGE_SERVER_IMAGE", "FRIDGE_JOB_IMAGE", "FRIDGE_PROVIDER_TOKEN"} {
 		if os.Getenv(k) == "" {
 			missing = append(missing, k)
 		}
@@ -70,7 +71,7 @@ func runServer() error {
 	if err != nil {
 		return fmt.Errorf("FRIDGE_SECRET_KEY: %w", err)
 	}
-	listen, dataDir, traefikDir := env("FRIDGE_LISTEN", ":8080"), env("FRIDGE_DATA", "/data"), env("FRIDGE_TRAEFIK_DIR", "/traefik")
+	listen, dataDir, providerListen := env("FRIDGE_LISTEN", ":8080"), env("FRIDGE_DATA", "/data"), env("FRIDGE_PROVIDER_LISTEN", ":8081")
 	edgeNet, egressNet, apiBackend := env("FRIDGE_EDGE_NETWORK", "fridge_edge"), env("FRIDGE_EGRESS_NETWORK", "fridge_egress"), env("FRIDGE_API_BACKEND", "http://fridge:8080")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -101,14 +102,9 @@ func runServer() error {
 	if err != nil {
 		return fmt.Errorf("CA: %w", err)
 	}
-	for _, d := range []string{"dynamic", "certs"} {
-		if err := os.MkdirAll(filepath.Join(traefikDir, d), 0o755); err != nil {
-			return err
-		}
-	}
 
 	a := &app.App{
-		Store: st, Box: box, RT: rt, CA: ca, TraefikDir: traefikDir, APIBackend: apiBackend,
+		Store: st, Box: box, RT: rt, CA: ca, APIBackend: apiBackend,
 		HealthTimeout: 120 * time.Second, Alert: alert.Webhook(os.Getenv("FRIDGE_ALERT_WEBHOOK")),
 		JobImage: os.Getenv("FRIDGE_JOB_IMAGE"), EgressNetwork: egressNet,
 		Audit: &audit.Logger{Store: st}, Registry: &registry.Client{},
@@ -116,21 +112,10 @@ func runServer() error {
 	if err := a.RecoverInterrupted(ctx); err != nil { // after FailRunning, before the scheduler loads
 		return fmt.Errorf("recover interrupted nodes: %w", err)
 	}
-	allow, err := a.Allowlist(ctx)
-	if err != nil {
-		return err
-	}
-	absTraefik, err := filepath.Abs(traefikDir)
-	if err != nil {
-		return err
-	}
-	a.WebCert, a.WebKey = filepath.Join(absTraefik, "certs", "web.crt"), filepath.Join(absTraefik, "certs", "web.key")
+	a.WebCert, a.WebKey = filepath.Join(dataDir, "web", "web.crt"), filepath.Join(dataDir, "web", "web.key")
 	webNames := webCertNames(os.Getenv("FRIDGE_PUBLIC_HOSTS"))
 	if _, err := ensureWebCert(ca, a.WebCert, a.WebKey, webNames); err != nil {
 		return fmt.Errorf("web certificate: %w", err)
-	}
-	if err := a.WriteProxyBase(allow); err != nil {
-		return err
 	}
 	a.Sched = app.NewScheduler(a)
 	if err := a.Sched.Reload(ctx); err != nil {
@@ -175,15 +160,9 @@ func runServer() error {
 	}); err != nil {
 		log.Printf("image update job: %v", err)
 	}
-	// Traefik re-reads the certificate files when its dynamic config changes, so a renewal rewrites the base file.
+	// Traefik polls ProxyConfig, which reads the web certificate files each time: a renewal needs nothing more.
 	if err := a.Sched.AddFixed("41 3 * * *", func() {
 		changed, err := ensureWebCert(ca, a.WebCert, a.WebKey, webNames)
-		if err == nil && changed {
-			var cidrs []string
-			if cidrs, err = a.Allowlist(ctx); err == nil {
-				err = a.WriteProxyBase(cidrs)
-			}
-		}
 		if err != nil {
 			log.Printf("renew web certificate: %v", err)
 			if a.Alert != nil {
@@ -198,9 +177,13 @@ func runServer() error {
 	a.Sched.Start()
 
 	srv := &http.Server{Addr: listen, Handler: api.New(a, au, api.Options{TrustedProxy: api.TrustCIDRs(prefixes), Web: web.Handler()}), ReadHeaderTimeout: 10 * time.Second}
-	errc := make(chan error, 1)
+	// Traefik's configuration endpoint: only on the edge network, bearer token, carries the private keys of the routes.
+	prov := &http.Server{Addr: providerListen, ReadHeaderTimeout: 10 * time.Second,
+		Handler: proxy.Handler(os.Getenv("FRIDGE_PROVIDER_TOKEN"), func(r *http.Request) (proxy.Config, error) { return a.ProxyConfig(r.Context()) })}
+	errc := make(chan error, 2)
 	go func() { errc <- srv.ListenAndServe() }()
-	log.Printf("fridge listening on %s", listen)
+	go func() { errc <- prov.ListenAndServe() }()
+	log.Printf("fridge listening on %s, traefik config on %s", listen, providerListen)
 
 	select {
 	case err = <-errc: // listen failed; still drain below
@@ -212,6 +195,7 @@ func runServer() error {
 	if serr := srv.Shutdown(sctx); serr != nil {
 		log.Printf("http shutdown: %v", serr)
 	}
+	prov.Shutdown(sctx)
 	a.Sched.Stop()
 	done := make(chan struct{})
 	go func() { a.Wait(); close(done) }()

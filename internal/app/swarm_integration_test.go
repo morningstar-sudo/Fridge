@@ -78,7 +78,7 @@ func TestSwarmNodeLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &App{Store: storetest.New(t), Box: box, RT: rt, CA: ca, TraefikDir: t.TempDir(), HealthTimeout: 4 * time.Minute,
+	a := &App{Store: storetest.New(t), Box: box, RT: rt, CA: ca, HealthTimeout: 4 * time.Minute,
 		JobImage: jobImg, EgressNetwork: egress, backupTimeout: 5 * time.Minute,
 		Alert: func(ctx context.Context, text string) { t.Logf("alert: %s", text) }}
 	t.Cleanup(func() {

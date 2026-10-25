@@ -267,9 +267,10 @@ func newTestApp(t *testing.T) (*App, *fakeRuntime, *fakeObjects) {
 	rt := &fakeRuntime{}
 	a := &App{
 		Store: storetest.New(t), Box: box, RT: rt, CA: ca,
-		TraefikDir: t.TempDir(), HealthTimeout: time.Second, WebCert: "/traefik/certs/web.crt", WebKey: "/traefik/certs/web.key",
+		HealthTimeout: time.Second, APIBackend: "http://fridge:8080",
 		Admin: &fakeAdmin{}, JobImage: "fridge-job:test", EgressNetwork: "fridge_egress",
 	}
+	a.WebCert, a.WebKey = writeWebCert(t, ca)
 	a.Alert = func(ctx context.Context, text string) {
 		rt.mu.Lock()
 		rt.alerts = append(rt.alerts, text)
@@ -361,4 +362,22 @@ func (f *fakeRuntime) dumps(data, stderr string, code int) {
 		f.objs.put(spec.Key, []byte(data), spec.Meta)
 		return result(map[string]any{"size": len(data)}), stderr, 0
 	}
+}
+
+// writeWebCert issues a web UI certificate into a temp dir and returns the certificate and key paths.
+func writeWebCert(t *testing.T, ca *pki.CA) (certFile, keyFile string) {
+	t.Helper()
+	certPEM, keyPEM, err := ca.IssueNames([]string{"fridge.test"}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certFile, keyFile = filepath.Join(dir, "web.crt"), filepath.Join(dir, "web.key")
+	if err := os.WriteFile(certFile, certPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certFile, keyFile
 }

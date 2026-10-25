@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,15 +13,13 @@ import (
 	"fridge/internal/store/storetest"
 )
 
-// recoverEnv is a real metadata database, a Traefik directory and the server environment `recover` reads.
+// recoverEnv is a real metadata database and the server environment `recover` reads.
 func recoverEnv(t *testing.T) (*store.Store, string) {
 	t.Helper()
 	st := storetest.New(t)
 	dir := t.TempDir()
-	os.MkdirAll(filepath.Join(dir, "certs"), 0o755)
 	t.Setenv("FRIDGE_DATABASE_URL", storetest.URL(t))
 	t.Setenv("FRIDGE_SECRET_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	t.Setenv("FRIDGE_TRAEFIK_DIR", dir)
 	t.Setenv("FRIDGE_API_BACKEND", "http://fridge:8080")
 	t.Setenv("FRIDGE_PUBLIC_HOSTS", "fridge.lan,10.0.0.5")
 	return st, dir
@@ -50,7 +46,7 @@ func audits(t *testing.T, st *store.Store, prefix string) []store.AuditEntry {
 }
 
 func TestRecoverAllowlist(t *testing.T) {
-	st, dir := recoverEnv(t)
+	st, _ := recoverEnv(t)
 	code, out, errs := runWith(t, "", "recover", "allowlist", "10.0.0.0/8", "203.0.113.0/24")
 	if code != 0 || !strings.Contains(out, "10.0.0.0/8") {
 		t.Fatalf("%d %q %q", code, out, errs)
@@ -58,15 +54,6 @@ func TestRecoverAllowlist(t *testing.T) {
 	got, ok, err := st.GetSetting(context.Background(), "allowlist")
 	if err != nil || !ok || !strings.Contains(got, "203.0.113.0/24") {
 		t.Fatalf("setting %q %v %v", got, ok, err)
-	}
-	b, err := os.ReadFile(filepath.Join(dir, "dynamic", "_base.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := string(b)
-	abs, _ := filepath.Abs(dir)
-	if !strings.Contains(base, "203.0.113.0/24") || !strings.Contains(base, "defaultCertificate") || !strings.Contains(base, filepath.Join(abs, "certs", "web.crt")) {
-		t.Fatalf("base file lost the web certificate or the CIDRs:\n%s", base)
 	}
 	es := audits(t, st, "recover.")
 	if len(es) != 1 || es[0].Action != "recover.allowlist" || es[0].Actor != "recover" || es[0].ActorID != nil || !es[0].Success {

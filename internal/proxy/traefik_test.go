@@ -1,25 +1,12 @@
 package proxy
 
 import (
-	"os"
-	"path/filepath"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
-
-	"gopkg.in/yaml.v3"
 )
-
-func readYAML(t *testing.T, path string) map[string]any {
-	t.Helper()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m map[string]any
-	if err := yaml.Unmarshal(b, &m); err != nil {
-		t.Fatal(err)
-	}
-	return m
-}
 
 // dig walks nested maps (string key) and lists (int index).
 func dig(t *testing.T, v any, path ...any) any {
@@ -43,172 +30,128 @@ func dig(t *testing.T, v any, path ...any) any {
 	return v
 }
 
-func assertNoTmp(t *testing.T, dir string) {
+// roundTrip is the document as Traefik sees it: JSON.
+func roundTrip(t *testing.T, c Config) map[string]any {
 	t.Helper()
-	matches, _ := filepath.Glob(filepath.Join(dir, "*", "*.tmp"))
-	if len(matches) > 0 {
-		t.Fatalf("leftover temp files: %v", matches)
-	}
-}
-
-func TestWriteRoute(t *testing.T) {
-	dir := t.TempDir()
-	r := Route{
-		ID: 7, EntryPoint: "pg", Domain: "abc.com", Backend: "fridge-postgres-abc:5432",
-		CertFile: "/traefik/certs/db-7.crt", KeyFile: "/traefik/certs/db-7.key",
-	}
-	if err := WriteRoute(dir, r); err != nil {
+	b, err := json.Marshal(Build(c))
+	if err != nil {
 		t.Fatal(err)
 	}
-	doc := readYAML(t, filepath.Join(dir, "dynamic", "db-7.yml"))
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+var base = Config{Allowlist: []string{"10.0.0.0/8", "203.0.113.0/24"}, APIBackend: "http://fridge:8080", WebCertPEM: "WEBCERT", WebKeyPEM: "WEBKEY"}
+
+func TestBuildDatabaseRoute(t *testing.T) {
+	c := base
+	c.DBs = []DB{{ID: 7, EntryPoint: "pg", Domain: "abc.com", Backend: "fridge-edge-k1:5432", CertPEM: "CERT7", KeyPEM: "KEY7"}}
+	doc := roundTrip(t, c)
 
 	if got := dig(t, doc, "tcp", "routers", "db-7", "rule"); got != "HostSNI(`abc.com`)" {
 		t.Errorf("rule = %v", got)
 	}
 	if got := dig(t, doc, "tcp", "routers", "db-7", "entryPoints", 0); got != "pg" {
-		t.Errorf("entryPoints[0] = %v", got)
+		t.Errorf("entryPoint = %v", got)
 	}
-	if got := dig(t, doc, "tcp", "routers", "db-7", "middlewares", 0); got != "allowlist-tcp@file" {
-		t.Errorf("middlewares[0] = %v", got)
+	if got := dig(t, doc, "tcp", "routers", "db-7", "tls", "options"); got != "pg" {
+		t.Errorf("tls options = %v", got)
 	}
-	if got := dig(t, doc, "tcp", "routers", "db-7", "service"); got != "db-7" {
-		t.Errorf("service = %v", got)
+	if _, ok := dig(t, doc, "tcp", "routers", "db-7").(map[string]any)["middlewares"]; ok {
+		t.Error("the database port has no IP allowlist: the routing mesh hides client addresses")
 	}
-	if _, ok := dig(t, doc, "tcp", "routers", "db-7", "tls").(map[string]any); !ok {
-		t.Errorf("router missing tls: {}")
+	if got := dig(t, doc, "tcp", "services", "db-7", "loadBalancer", "servers", 0, "address"); got != "fridge-edge-k1:5432" {
+		t.Errorf("backend = %v", got)
 	}
-	if got := dig(t, doc, "tcp", "services", "db-7", "loadBalancer", "servers", 0, "address"); got != "fridge-postgres-abc:5432" {
-		t.Errorf("address = %v", got)
+	if got := dig(t, doc, "tls", "options", "pg", "alpnProtocols", 0); got != "postgresql" {
+		t.Errorf("alpn = %v", got)
 	}
-	if got := dig(t, doc, "tls", "certificates", 0, "certFile"); got != "/traefik/certs/db-7.crt" {
-		t.Errorf("certFile = %v", got)
+	if got := dig(t, doc, "tls", "certificates", 0, "certFile"); got != "CERT7" {
+		t.Errorf("cert = %v", got)
 	}
-	if got := dig(t, doc, "tls", "certificates", 0, "keyFile"); got != "/traefik/certs/db-7.key" {
-		t.Errorf("keyFile = %v", got)
-	}
-	assertNoTmp(t, dir)
-}
-
-func TestRemoveRouteIdempotent(t *testing.T) {
-	dir := t.TempDir()
-	if err := WriteRoute(dir, Route{ID: 7, EntryPoint: "pg", Domain: "abc.com", Backend: "x:5432"}); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 2; i++ {
-		if err := RemoveRoute(dir, 7); err != nil {
-			t.Fatalf("RemoveRoute call %d: %v", i+1, err)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(dir, "dynamic", "db-7.yml")); !os.IsNotExist(err) {
-		t.Errorf("route file still present: %v", err)
+	if got := dig(t, doc, "tls", "certificates", 0, "keyFile"); got != "KEY7" {
+		t.Errorf("key = %v", got)
 	}
 }
 
-func TestWriteCert(t *testing.T) {
-	dir := t.TempDir()
-	certFile, keyFile, err := WriteCert(dir, 7, []byte("CERT"), []byte("KEY"))
-	if err != nil {
-		t.Fatal(err)
+func TestBuildWebRouter(t *testing.T) {
+	doc := roundTrip(t, base)
+	if _, ok := doc["tcp"]; ok {
+		t.Error("no databases: no tcp section (Traefik rejects empty routers)")
 	}
-	if !filepath.IsAbs(certFile) || !filepath.IsAbs(keyFile) {
-		t.Fatalf("paths not absolute: %s %s", certFile, keyFile)
+	if got := dig(t, doc, "http", "middlewares", "allowlist-http", "ipAllowList", "sourceRange", 1); got != "203.0.113.0/24" {
+		t.Errorf("allowlist = %v", got)
 	}
-	if filepath.Base(certFile) != "db-7.crt" || filepath.Base(keyFile) != "db-7.key" {
-		t.Errorf("unexpected names: %s %s", certFile, keyFile)
-	}
-	if fi, err := os.Stat(keyFile); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Errorf("key perm: %v %v", fi, err)
-	}
-	if fi, err := os.Stat(certFile); err != nil || fi.Mode().Perm() != 0o644 {
-		t.Errorf("cert perm: %v %v", fi, err)
-	}
-	assertNoTmp(t, dir)
-
-	if err := RemoveCert(dir, 7); err != nil {
-		t.Fatal(err)
-	}
-	if err := RemoveCert(dir, 7); err != nil {
-		t.Fatalf("RemoveCert not idempotent: %v", err)
-	}
-	if _, err := os.Stat(certFile); !os.IsNotExist(err) {
-		t.Errorf("cert still present: %v", err)
-	}
-}
-
-func TestWriteBase(t *testing.T) {
-	dir := t.TempDir()
-	cidrs := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
-	if err := WriteBase(dir, cidrs, "http://fridge:8080", "/traefik/certs/web.crt", "/traefik/certs/web.key"); err != nil {
-		t.Fatal(err)
-	}
-	doc := readYAML(t, filepath.Join(dir, "dynamic", "_base.yml"))
-
-	for _, path := range [][]any{
-		{"tcp", "middlewares", "allowlist-tcp", "ipAllowList", "sourceRange"},
-		{"http", "middlewares", "allowlist-http", "ipAllowList", "sourceRange"},
-	} {
-		list, ok := dig(t, doc, path...).([]any)
-		if !ok || len(list) != len(cidrs) {
-			t.Fatalf("%v: got %v", path, dig(t, doc, path...))
-		}
-		for i, c := range cidrs {
-			if list[i] != c {
-				t.Errorf("%v[%d] = %v, want %s", path, i, list[i], c)
-			}
-		}
-	}
-	if got := dig(t, doc, "http", "services", "fridge-api", "loadBalancer", "servers", 0, "url"); got != "http://fridge:8080" {
-		t.Errorf("api url = %v", got)
-	}
-	if got := dig(t, doc, "http", "routers", "fridge-web", "middlewares", 0); got != "allowlist-http@file" {
-		t.Errorf("api middleware = %v", got)
-	}
-	if got := dig(t, doc, "http", "routers", "fridge-web", "rule"); got != "PathPrefix(`/`)" {
-		t.Errorf("api rule = %v", got)
-	}
-	assertNoTmp(t, dir)
-}
-
-func TestWriteBaseHTTPS(t *testing.T) {
-	dir := t.TempDir()
-	if err := WriteBase(dir, []string{"10.0.0.0/8"}, "http://fridge:8080", "/traefik/certs/web.crt", "/traefik/certs/web.key"); err != nil {
-		t.Fatal(err)
-	}
-	doc := readYAML(t, filepath.Join(dir, "dynamic", "_base.yml"))
-	if got := dig(t, doc, "http", "routers", "fridge-web", "entryPoints", 0); got != "websecure" {
-		t.Errorf("web entry point = %v", got)
-	}
-	if got := dig(t, doc, "http", "routers", "fridge-web", "tls"); got == nil {
-		t.Error("web router has no tls")
-	}
-	if got := dig(t, doc, "http", "routers", "fridge-web", "middlewares", 0); got != "allowlist-http@file" {
+	if got := dig(t, doc, "http", "routers", "fridge-web", "middlewares", 0); got != "allowlist-http" {
 		t.Errorf("web middleware = %v", got)
 	}
-	if got := dig(t, doc, "http", "routers", "fridge-redirect", "entryPoints", 0); got != "web" {
-		t.Errorf("redirect entry point = %v", got)
+	if got := dig(t, doc, "http", "routers", "fridge-web", "entryPoints", 0); got != "websecure" {
+		t.Errorf("web entrypoint = %v", got)
 	}
-	if got := dig(t, doc, "http", "routers", "fridge-redirect", "middlewares", 0); got != "to-https@file" {
-		t.Errorf("redirect middleware = %v", got)
+	if got := dig(t, doc, "http", "routers", "fridge-redirect", "middlewares", 0); got != "to-https" {
+		t.Errorf("redirect = %v", got)
 	}
-	rs := dig(t, doc, "http", "middlewares", "to-https", "redirectScheme")
-	if m := rs.(map[string]any); m["scheme"] != "https" || m["port"] != "8443" || m["permanent"] != true {
-		t.Errorf("redirectScheme = %v", rs)
+	if got := dig(t, doc, "http", "services", "fridge-api", "loadBalancer", "servers", 0, "url"); got != "http://fridge:8080" {
+		t.Errorf("api backend = %v", got)
 	}
-	if got := dig(t, doc, "tls", "stores", "default", "defaultCertificate", "certFile"); got != "/traefik/certs/web.crt" {
-		t.Errorf("certFile = %v", got)
+	if got := dig(t, doc, "tls", "stores", "default", "defaultCertificate", "certFile"); got != "WEBCERT" {
+		t.Errorf("default cert = %v", got)
 	}
-	if got := dig(t, doc, "tls", "stores", "default", "defaultCertificate", "keyFile"); got != "/traefik/certs/web.key" {
-		t.Errorf("keyFile = %v", got)
+	if _, ok := doc["tls"].(map[string]any)["certificates"]; ok {
+		t.Error("no databases: no certificates list")
 	}
-	if dig(t, doc, "tcp", "middlewares", "allowlist-tcp") == nil {
-		t.Error("TCP allowlist lost")
-	}
-	if _, ok := doc["http"].(map[string]any)["routers"].(map[string]any)["fridge-api"]; ok {
-		t.Error("the plain-HTTP API router is still there")
-	}
-	for _, c := range [][2]string{{"", "k"}, {"c", ""}} {
-		if err := WriteBase(dir, nil, "http://x", c[0], c[1]); err == nil {
-			t.Errorf("%q accepted", c)
+}
+
+func TestHandlerAuth(t *testing.T) {
+	h := Handler("s3cret-token", func(*http.Request) (Config, error) { return base, nil })
+	get := func(path, auth string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", path, nil)
+		if auth != "" {
+			r.Header.Set("Authorization", auth)
 		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	for _, auth := range []string{"", "Bearer wrong", "s3cret-token", "Bearer s3cret-token "} {
+		if w := get("/traefik", auth); w.Code != 401 || w.Body.Len() > 20 {
+			t.Errorf("auth %q: %d %q", auth, w.Code, w.Body)
+		}
+	}
+	w := get("/traefik", "Bearer s3cret-token")
+	if w.Code != 200 || w.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("%d %s", w.Code, w.Header())
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil || doc["http"] == nil {
+		t.Fatalf("body %s: %v", w.Body, err)
+	}
+	if w := get("/other", "Bearer s3cret-token"); w.Code != 404 {
+		t.Errorf("other path: %d", w.Code)
+	}
+}
+
+func TestHandlerWithoutTokenServesNothing(t *testing.T) {
+	h := Handler("", func(*http.Request) (Config, error) { return base, nil })
+	r := httptest.NewRequest("GET", "/traefik", nil)
+	r.Header.Set("Authorization", "Bearer ")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != 401 {
+		t.Fatalf("empty token must not open the endpoint: %d", w.Code)
+	}
+}
+
+func TestHandlerBuildErrorKeepsTraefikConfig(t *testing.T) {
+	h := Handler("t", func(*http.Request) (Config, error) { return Config{}, errors.New("db down") })
+	r := httptest.NewRequest("GET", "/traefik", nil)
+	r.Header.Set("Authorization", "Bearer t")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != 503 {
+		t.Fatalf("%d", w.Code)
 	}
 }

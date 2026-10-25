@@ -13,7 +13,7 @@ import (
 )
 
 func TestServerRequiresEnv(t *testing.T) {
-	for _, k := range []string{"FRIDGE_DATABASE_URL", "FRIDGE_SECRET_KEY", "FRIDGE_SERVER_IMAGE", "FRIDGE_JOB_IMAGE"} {
+	for _, k := range []string{"FRIDGE_DATABASE_URL", "FRIDGE_SECRET_KEY", "FRIDGE_SERVER_IMAGE", "FRIDGE_JOB_IMAGE", "FRIDGE_PROVIDER_TOKEN"} {
 		t.Setenv(k, "")
 	}
 	err := runServer()
@@ -23,6 +23,7 @@ func TestServerRequiresEnv(t *testing.T) {
 	t.Setenv("FRIDGE_DATABASE_URL", "postgres://x")
 	t.Setenv("FRIDGE_SERVER_IMAGE", "fridge:test")
 	t.Setenv("FRIDGE_JOB_IMAGE", "fridge-job:test")
+	t.Setenv("FRIDGE_PROVIDER_TOKEN", "tok")
 	t.Setenv("FRIDGE_SECRET_KEY", "short")
 	if err := runServer(); err == nil || !strings.Contains(err.Error(), "FRIDGE_SECRET_KEY") {
 		t.Fatalf("bad key: got %v", err)

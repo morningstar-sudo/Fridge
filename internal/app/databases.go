@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"fridge/internal/engine"
-	"fridge/internal/proxy"
 	"fridge/internal/store"
 	"fridge/internal/swarm"
 )
@@ -122,7 +121,7 @@ func (a *App) CreateDatabase(ctx context.Context, req CreateRequest) (store.Data
 }
 
 // provision starts the node (its overlay network, the pinned database service and the edge sidecar), then creates the
-// non-superuser app user owning the database through the sidecar, and publishes the TLS route.
+// non-superuser app user owning the database through the sidecar, and issues its TLS certificate (Traefik learns the route by polling ProxyConfig).
 // Passwords travel in the service environment (container init) and on the SQL connection, never in argv.
 func (a *App) provision(ctx context.Context, d *store.Database, eng engine.Engine, info engine.Info, pw, adminPW string) error {
 	p := nodeParams(*d)
@@ -145,19 +144,8 @@ func (a *App) provision(ctx context.Context, d *store.Database, eng engine.Engin
 	if err := a.execAsAdmin(actx, *d, eng, adminPW, eng.AppUserSQL(d.User, pw, d.Name)); err != nil {
 		return fmt.Errorf("create app user: %w", err)
 	}
-	certPEM, keyPEM, err := a.CA.Issue(d.Domain, 365*24*time.Hour)
-	if err != nil {
+	if _, _, err := a.issueCert(ctx, d.ID, d.Domain); err != nil {
 		return fmt.Errorf("issue cert: %w", err)
-	}
-	certFile, keyFile, err := proxy.WriteCert(a.TraefikDir, d.ID, certPEM, keyPEM)
-	if err != nil {
-		return fmt.Errorf("write cert: %w", err)
-	}
-	if err := proxy.WriteRoute(a.TraefikDir, proxy.Route{
-		ID: d.ID, EntryPoint: info.EntryPoint, Domain: d.Domain,
-		Backend: fmt.Sprintf("%s:%d", swarm.EdgeService(d.NodeKey), swarm.EdgePort), CertFile: certFile, KeyFile: keyFile,
-	}); err != nil {
-		return fmt.Errorf("write route: %w", err)
 	}
 	return nil
 }
@@ -235,12 +223,6 @@ func (a *App) removeNode(ctx context.Context, d store.Database) {
 		if err := a.RT.RemoveNode(ctx, swarm.NodeRef{Key: d.NodeKey, HostID: d.HostID, Volume: d.Volume}); err != nil {
 			log.Printf("removeNode %s: %v", d.Name, err)
 		}
-	}
-	if err := proxy.RemoveRoute(a.TraefikDir, d.ID); err != nil {
-		log.Printf("removeNode %s: remove route: %v", d.Name, err)
-	}
-	if err := proxy.RemoveCert(a.TraefikDir, d.ID); err != nil {
-		log.Printf("removeNode %s: remove cert: %v", d.Name, err)
 	}
 	if err := a.Store.SetDatabaseState(ctx, d.ID, "error", ""); err != nil {
 		log.Printf("removeNode %s: set state: %v", d.Name, err)

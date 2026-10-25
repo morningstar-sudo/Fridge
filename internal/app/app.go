@@ -15,7 +15,6 @@ import (
 	"fridge/internal/audit"
 	"fridge/internal/objstore"
 	"fridge/internal/pki"
-	"fridge/internal/proxy"
 	"fridge/internal/secret"
 	"fridge/internal/store"
 	"fridge/internal/swarm"
@@ -43,9 +42,8 @@ type App struct {
 	RT              Runtime
 	Admin           AdminConn // runs SQL as a node's superuser; nil = pgx through the node's edge sidecar
 	CA              *pki.CA
-	TraefikDir      string
-	WebCert, WebKey string // absolute paths, inside the Traefik container too, of the web UI certificate
-	APIBackend      string
+	WebCert, WebKey string // files holding the web UI certificate (Fridge serves them to Traefik)
+	APIBackend      string // URL Traefik reaches the Fridge API at
 	HealthTimeout   time.Duration
 	Alert           func(ctx context.Context, text string)
 	Audit           *audit.Logger                                                                       // nil = no audit trail
@@ -104,7 +102,7 @@ func (a *App) SetAllowlist(ctx context.Context, cidrs []string) error {
 	if err := a.Store.SetSetting(ctx, "allowlist", string(b)); err != nil {
 		return err
 	}
-	return a.WriteProxyBase(cidrs)
+	return nil // Traefik polls ProxyConfig
 }
 
 // ObjectStore is the S3 surface the app needs; *objstore.Store satisfies it.
@@ -128,10 +126,4 @@ func (a *App) Ready(ctx context.Context) error {
 		return err
 	}
 	return a.RT.Ping(ctx)
-}
-
-// WriteProxyBase writes Traefik's base config (allowlists, web/API router, web certificate).
-// Rewriting it also makes Traefik re-read a renewed web certificate.
-func (a *App) WriteProxyBase(cidrs []string) error {
-	return proxy.WriteBase(a.TraefikDir, cidrs, a.APIBackend, a.WebCert, a.WebKey)
 }

@@ -3,8 +3,6 @@ package app
 import (
 	"context"
 	"errors"
-	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -39,8 +37,15 @@ func TestCreateDatabaseHappyPath(t *testing.T) {
 	if pw == "" || strings.Contains(d.PasswordEnc, pw) {
 		t.Fatalf("password handling wrong: pw=%q enc=%q", pw, d.PasswordEnc)
 	}
-	if _, err := os.Stat(filepath.Join(a.TraefikDir, "dynamic", fmt.Sprintf("db-%d.yml", d.ID))); err != nil {
-		t.Fatal(err)
+	cfg, err := a.ProxyConfig(ctx)
+	if err != nil || len(cfg.DBs) != 1 {
+		t.Fatalf("proxy config: %+v, %v", cfg, err)
+	}
+	if r := cfg.DBs[0]; r.Domain != "abc.com" || r.Backend != "fridge-edge-"+d.NodeKey+":5432" || r.EntryPoint != "pg" || !strings.Contains(r.CertPEM, "CERTIFICATE") || !strings.Contains(r.KeyPEM, "PRIVATE KEY") {
+		t.Fatalf("route = %+v", r)
+	}
+	if enc, _ := a.Store.ListRoutes(ctx); len(enc) != 1 || strings.Contains(enc[0].KeyEnc, "PRIVATE KEY") {
+		t.Fatalf("the route key must be stored encrypted: %+v", enc)
 	}
 	cs, err := a.ConnString(d)
 	if err != nil || !strings.Contains(cs, "@abc.com:5432/root1_abc?sslmode=require") {
@@ -86,17 +91,11 @@ func TestCreateDatabaseRollbackOnUnhealthy(t *testing.T) {
 	if len(dbs) != 1 || dbs[0].Status != "error" {
 		t.Fatalf("dbs = %+v", dbs)
 	}
-	id := dbs[0].ID
 	if v := dbs[0].Volume; len(rt.removes) != 1 || rt.removes[0] != (removeCall{"ctr-" + v, v}) || !nodeNameRe.MatchString(v) {
 		t.Fatalf("removes = %+v", rt.removes)
 	}
-	for _, p := range []string{
-		filepath.Join(a.TraefikDir, "dynamic", fmt.Sprintf("db-%d.yml", id)),
-		filepath.Join(a.TraefikDir, "certs", fmt.Sprintf("db-%d.crt", id)),
-	} {
-		if _, err := os.Stat(p); !os.IsNotExist(err) {
-			t.Errorf("%s still exists (%v)", p, err)
-		}
+	if cfg, err := a.ProxyConfig(ctx); err != nil || len(cfg.DBs) != 0 {
+		t.Errorf("a failed node is still routed: %+v %v", cfg.DBs, err)
 	}
 	rt.healthErr = nil
 	if _, err := createDB(a, ctx, req); err != nil {
@@ -150,9 +149,8 @@ func TestSetAllowlist(t *testing.T) {
 	if err := a.SetAllowlist(ctx, []string{"203.0.113.0/24"}); err != nil {
 		t.Fatal(err)
 	}
-	b, err := os.ReadFile(filepath.Join(a.TraefikDir, "dynamic", "_base.yml"))
-	if err != nil || !strings.Contains(string(b), "203.0.113.0/24") {
-		t.Fatalf("base = %s, %v", b, err)
+	if cfg, err := a.ProxyConfig(ctx); err != nil || len(cfg.Allowlist) != 1 || cfg.Allowlist[0] != "203.0.113.0/24" {
+		t.Fatalf("proxy allowlist = %v, %v", cfg.Allowlist, err)
 	}
 	if got, _ := a.Allowlist(ctx); len(got) != 1 || got[0] != "203.0.113.0/24" {
 		t.Fatalf("got = %v", got)
@@ -173,22 +171,13 @@ func TestRemoveNodeCleansProvisionedDatabase(t *testing.T) {
 	if s, _ := a.Store.ListSchedules(ctx, d.ID); len(s) != 1 || len(a.Sched.c.Entries()) != 1 {
 		t.Fatalf("precondition: schedules %+v entries %d", s, len(a.Sched.c.Entries()))
 	}
-	files := []string{
-		filepath.Join(a.TraefikDir, "dynamic", fmt.Sprintf("db-%d.yml", d.ID)),
-		filepath.Join(a.TraefikDir, "certs", fmt.Sprintf("db-%d.crt", d.ID)),
-		filepath.Join(a.TraefikDir, "certs", fmt.Sprintf("db-%d.key", d.ID)),
-	}
-	for _, p := range files {
-		if _, err := os.Stat(p); err != nil {
-			t.Fatalf("precondition: %v", err)
-		}
+	if cfg, err := a.ProxyConfig(ctx); err != nil || len(cfg.DBs) != 1 {
+		t.Fatalf("precondition: %+v %v", cfg.DBs, err)
 	}
 	d, _ = a.Store.GetDatabase(ctx, d.ID)
 	a.removeNode(ctx, d)
-	for _, p := range files {
-		if _, err := os.Stat(p); !os.IsNotExist(err) {
-			t.Errorf("%s still exists (%v)", p, err)
-		}
+	if cfg, err := a.ProxyConfig(ctx); err != nil || len(cfg.DBs) != 0 {
+		t.Errorf("a removed node is still routed: %+v %v", cfg.DBs, err)
 	}
 	if len(rt.removes) != 1 || rt.removes[0] != (removeCall{"ctr-" + d.Volume, d.Volume}) {
 		t.Fatalf("removes = %+v", rt.removes)
@@ -284,18 +273,14 @@ func TestRecoverInterrupted(t *testing.T) {
 	}
 }
 
-func TestSetAllowlistKeepsWebCert(t *testing.T) {
+func TestProxyConfigServesWebCertificate(t *testing.T) {
 	a, _, _ := newTestApp(t)
-	a.WebCert, a.WebKey = "/traefik/certs/web.crt", "/traefik/certs/web.key"
-	if err := a.SetAllowlist(context.Background(), []string{"203.0.113.0/24"}); err != nil {
-		t.Fatal(err)
+	cfg, err := a.ProxyConfig(context.Background())
+	if err != nil || !strings.Contains(cfg.WebCertPEM, "CERTIFICATE") || !strings.Contains(cfg.WebKeyPEM, "PRIVATE KEY") || cfg.APIBackend != a.APIBackend {
+		t.Fatalf("cfg = %+v, %v", cfg, err)
 	}
-	b, err := os.ReadFile(filepath.Join(a.TraefikDir, "dynamic", "_base.yml"))
-	if err != nil || !strings.Contains(string(b), "defaultCertificate") || !strings.Contains(string(b), "/traefik/certs/web.crt") {
-		t.Fatalf("base = %s, %v", b, err)
-	}
-	a.WebCert = ""
-	if err := a.SetAllowlist(context.Background(), []string{"203.0.113.0/24"}); err == nil {
-		t.Fatal("wrote a base file without a web certificate")
+	a.WebCert = filepath.Join(t.TempDir(), "missing.crt")
+	if _, err := a.ProxyConfig(context.Background()); err == nil {
+		t.Fatal("served a config without a web certificate")
 	}
 }

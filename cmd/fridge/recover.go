@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"fridge/internal/app"
@@ -52,19 +51,7 @@ func (c *cli) recover(args []string) error {
 
 	switch sub {
 	case "allowlist":
-		dir := os.Getenv("FRIDGE_TRAEFIK_DIR")
-		if dir == "" {
-			dir = "/traefik"
-		}
-		if dir, err = filepath.Abs(dir); err != nil {
-			return err
-		}
-		backend := os.Getenv("FRIDGE_API_BACKEND")
-		if backend == "" {
-			backend = "http://fridge:8080"
-		}
-		a := &app.App{Store: st, TraefikDir: dir, APIBackend: backend,
-			WebCert: filepath.Join(dir, "certs", "web.crt"), WebKey: filepath.Join(dir, "certs", "web.key")}
+		a := &app.App{Store: st}
 		err = a.SetAllowlist(ctx, pos)
 		record("recover.allowlist", "setting", "allowlist", err, map[string]any{"cidrs": pos})
 		if err != nil {
