@@ -58,6 +58,7 @@ printf '%s\n' "$FRIDGE_TLS_SERVER_KEY" > "$d/server.key"
 printf '%s\n' "$FRIDGE_TLS_CLIENT_CA" > "$d/client-ca.crt"
 chown -R mysql:mysql "$d"
 chmod 600 "$d/server.key"
+ls -ldn "$d" "$d"/* >&2; id >&2 # ponytail: temporary, why mysqld got EACCES on the CI runner
 q() { printf '%s' "$1" | sed "s/\\\\/\\\\\\\\/g; s/'/''/g"; }
 mkdir -p /docker-entrypoint-initdb.d
 printf "` + create + `\nGRANT ALL PRIVILEGES ON *.* TO '%s'@'%%' WITH GRANT OPTION;\n" "$(q "$FRIDGE_ADMIN_USER")" "$(q "$FRIDGE_ADMIN_PASSWORD")" "$(q "$FRIDGE_ADMIN_USER")" > /docker-entrypoint-initdb.d/00-fridge.sql
