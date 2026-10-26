@@ -37,7 +37,8 @@ type fakeRT struct {
 	gate    chan struct{} // non-nil: every job waits until it is closed
 }
 
-func (f *fakeRT) Ping(context.Context) error { return f.pingErr }
+func (f *fakeRT) NodeLogs(context.Context, string) string { return "" }
+func (f *fakeRT) Ping(context.Context) error              { return f.pingErr }
 func (f *fakeRT) PickHost(context.Context) (swarm.Host, error) {
 	return swarm.Host{ID: "host1", Hostname: "n1"}, nil
 }

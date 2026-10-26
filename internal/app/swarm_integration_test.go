@@ -27,7 +27,18 @@ import (
 
 // Real swarm, real jobs, real S3. It must run inside the swarm (on the edge and egress networks, with the Docker
 // socket and FRIDGE_TEST_DATABASE_URL): scripts/swarm-test/gotest.sh builds this test into an image and runs it as a job.
-func TestSwarmNodeLifecycle(t *testing.T) {
+// swarmEnv is the real swarm the integration tests work in, with an app wired to it and an S3 destination.
+type swarmEnv struct {
+	a                        *App
+	rt                       *swarm.Client
+	dest                     store.Destination
+	objs                     ObjectStore
+	jobImg, egress, dbNet    string
+	endpoint, access, secret string
+}
+
+func newSwarmEnv(t *testing.T) *swarmEnv {
+	t.Helper()
 	serverImg, jobImg := os.Getenv("FRIDGE_SERVER_IMAGE"), os.Getenv("FRIDGE_JOB_IMAGE")
 	ep, ak, sk, bucket := os.Getenv("FRIDGE_IT_S3_ENDPOINT"), os.Getenv("FRIDGE_IT_S3_ACCESS"), os.Getenv("FRIDGE_IT_S3_SECRET"), os.Getenv("FRIDGE_IT_S3_BUCKET")
 	if serverImg == "" || jobImg == "" || ep == "" || bucket == "" {
@@ -46,7 +57,7 @@ func TestSwarmNodeLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rt.Close()
+	t.Cleanup(func() { rt.Close() })
 	if err := rt.Ping(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +92,7 @@ func TestSwarmNodeLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := &App{Store: storetest.New(t), Box: box, RT: rt, CA: ca, HealthTimeout: 4 * time.Minute,
-		JobImage: jobImg, EgressNetwork: egress, DBNetwork: dbNet, backupTimeout: 5 * time.Minute,
+		JobImage: jobImg, EgressNetwork: egress, DBNetwork: dbNet, backupTimeout: 8 * time.Minute,
 		Alert: func(ctx context.Context, text string) { t.Logf("alert: %s", text) }}
 	t.Cleanup(func() {
 		dbs, _ := a.Store.ListDatabases(ctx)
@@ -89,12 +100,25 @@ func TestSwarmNodeLifecycle(t *testing.T) {
 			a.removeNode(ctx, d)
 		}
 	})
-
 	adminID := own(t, a)
 	dest, err := a.CreateDestination(ctx, store.Destination{Name: "it", Endpoint: ep, Bucket: bucket, AccessKey: ak, PathStyle: true, OwnerID: &adminID}, sk)
 	if err != nil {
 		t.Fatal(err)
 	}
+	objs, err := objstore.New(dest, sk, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &swarmEnv{a: a, rt: rt, dest: dest, objs: objs, jobImg: jobImg, egress: egress, dbNet: dbNet, endpoint: ep, access: ak, secret: sk}
+}
+
+// Real swarm, real jobs, real S3. It must run inside the swarm (on the edge and egress networks, with the Docker
+// socket and FRIDGE_TEST_DATABASE_URL): scripts/swarm-test/gotest.sh builds this test into an image and runs it as a job.
+func TestSwarmNodeLifecycle(t *testing.T) {
+	e := newSwarmEnv(t)
+	a, rt, dest, jobImg, egress, dbNet := e.a, e.rt, e.dest, e.jobImg, e.egress, e.dbNet
+	sk := e.secret
+	ctx := context.Background()
 
 	// connect runs queries as a role of node d through its edge sidecar, the way Fridge itself does.
 	connect := func(d store.Database, user, pw string) (*pgx.Conn, error) {

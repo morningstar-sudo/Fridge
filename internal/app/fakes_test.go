@@ -98,6 +98,8 @@ func (f *fakeRuntime) RemoveNode(ctx context.Context, ref swarm.NodeRef) error {
 	return nil
 }
 
+func (f *fakeRuntime) NodeLogs(ctx context.Context, key string) string { return "" }
+
 func (f *fakeRuntime) ListNodes(ctx context.Context) ([]swarm.NodeState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

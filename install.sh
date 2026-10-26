@@ -288,7 +288,7 @@ fi
 say ""
 say "Fridge is running."
 say "  Web UI    https://$(getenv FRIDGE_PUBLIC_HOSTS | cut -d, -f1):8443   (the certificate is signed by Fridge's own CA: the CLI asks to trust it on first login)"
-say "  Databases clients connect to <the database's domain>:5432 on any server of the swarm (TLS required)"
+say "  Databases clients connect to <the database's domain> on any server of the swarm, TLS required: 5432 PostgreSQL, 3306 MySQL/MariaDB, 27017 MongoDB, 6379 Redis"
 if [ -n "$CREATED" ]; then
 	say "  Admin     $ADMIN   password: $PW   (shown once: change it in the web UI)"
 else
@@ -296,8 +296,8 @@ else
 fi
 say "  Config    $ENVF (keep FRIDGE_SECRET_KEY safe: without it the stored passwords are unreadable)"
 say ""
-say "Open ports on the server's firewall: 8443 for the web UI (limited by Settings > IP allowlist) and 5432 for databases."
-say "Port 5432 is not filtered by Fridge: the swarm routing mesh hides client addresses, so restrict it with the firewall."
+say "Open ports on the server's firewall: 8443 for the web UI (limited by Settings > IP allowlist) and the ports of the engines you use (5432, 3306, 27017, 6379)."
+say "The database ports are not filtered by Fridge: the swarm routing mesh hides client addresses, so restrict it with the firewall."
 say "To add a server (nothing but Docker is needed on it):"
 say "  sh $DIR/install.sh --add-node               # prints the one command to run on the new server"
 say "  sh $DIR/install.sh --add-node USER@HOST     # or does it over SSH; databases can be placed on it as soon as it joins"

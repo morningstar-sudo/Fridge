@@ -6,11 +6,12 @@
 # built into an image and run as one-shot services on the manager, like any other Fridge job.
 # Needs on the host daemon: go, docker, and the images fridge:dev, fridge-job:dev, postgres:17/18 and
 # cgr.dev/chainguard/minio (scripts/swarm-test/load.sh puts them into the nodes).
-# Usage: gotest.sh [app|api]     (default: both)
+# Usage: gotest.sh [app|api [test pattern]]     (default: both, all tests)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 WHICH=${1:-all}
+PATTERN=${2:-}
 M="docker exec fsw1 docker"
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"; $M service rm fridge-test-meta fridge-test-minio fridge-gotest >/dev/null 2>&1 || true' EXIT
@@ -56,10 +57,10 @@ run() {
 		-e FRIDGE_SERVER_IMAGE=fridge:dev -e FRIDGE_JOB_IMAGE=fridge-job:dev \
 		-e FRIDGE_TEST_DATABASE_URL='postgres://postgres:postgres@fridge-test-meta:5432/postgres?sslmode=disable' \
 		-e FRIDGE_IT_S3_ENDPOINT=http://fridge-test-minio:9000 -e FRIDGE_IT_S3_ACCESS=minioadmin -e FRIDGE_IT_S3_SECRET=minioadmin -e FRIDGE_IT_S3_BUCKET=fridge \
-		fridge-gotest:dev -test.v -test.run "$2" -test.timeout 25m >/dev/null
+		fridge-gotest:dev -test.v -test.run "$2" -test.timeout 70m >/dev/null
 	echo "running $1 $2 ..."
 	local st=""
-	for _ in $(seq 1 1400); do
+	for _ in $(seq 1 2200); do
 		st=$($M service ps fridge-gotest --format '{{.CurrentState}}' 2>/dev/null | head -1)
 		case "$st" in Complete*|Failed*|Rejected*) break ;; esac
 		sleep 2
@@ -69,6 +70,6 @@ run() {
 }
 
 rc=0
-case "$WHICH" in all|app) run /app.test TestSwarm || rc=1 ;; esac
-case "$WHICH" in all|api) run /api.test TestE2E || rc=1 ;; esac
+case "$WHICH" in all|app) run /app.test "${PATTERN:-TestSwarm}" || rc=1 ;; esac
+case "$WHICH" in all|api) run /api.test "${PATTERN:-TestE2E}" || rc=1 ;; esac
 exit $rc

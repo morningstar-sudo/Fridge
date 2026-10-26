@@ -561,3 +561,19 @@ func edgeArgs(db string, n NodeSpec) []string {
 	}
 	return args
 }
+
+// NodeLogs is the end of what a database's service (and its sidecar) printed, for the operator when a node will not start.
+func (c *Client) NodeLogs(ctx context.Context, key string) string {
+	var out strings.Builder
+	for _, svc := range []string{DBService(key), EdgeService(key)} {
+		rc, err := c.cli.ServiceLogs(ctx, svc, container.LogsOptions{ShowStdout: true, ShowStderr: true, Tail: "60"})
+		if err != nil {
+			continue
+		}
+		var o, e tail
+		stdcopy.StdCopy(&o, &e, rc)
+		rc.Close()
+		fmt.Fprintf(&out, "--- %s ---\n%s%s", svc, o.String(), e.String())
+	}
+	return out.String()
+}

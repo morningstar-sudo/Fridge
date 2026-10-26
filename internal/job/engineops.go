@@ -17,7 +17,7 @@ import (
 // execScript runs an admin script (create a user, change a password) on a node, as its superuser, for the engines that
 // have no Go driver in Fridge: it waits until the node accepts an authenticated connection, then feeds Script to the
 // engine's admin shell once. Waiting is separate from running so that a statement the server refuses is not retried.
-func execScript(ctx context.Context, s Spec, stderr io.Writer) error {
+func execScript(ctx context.Context, s Spec, stdout, stderr io.Writer) error {
 	eng, _, err := engine.Get(s.Engine)
 	if err != nil {
 		return err
@@ -48,6 +48,7 @@ func execScript(ctx context.Context, s Spec, stderr io.Writer) error {
 	if err := c.Run(); err != nil {
 		return fmt.Errorf("admin script failed: %w", err)
 	}
+	result(stdout, map[string]any{"output": truncate(out.String(), 4096)}) // what the shell printed: the answer of a query (nothing for a provisioning script)
 	if eng.AdminFailed(out.String()) {
 		return errors.New("admin script failed: the engine refused a command")
 	}
@@ -107,3 +108,20 @@ var chown = os.Chown
 
 // preloadRoot is where the node's data volume is mounted in a preload job.
 var preloadRoot = "/data"
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
+// pingOnce succeeds when the node accepts an authenticated admin connection right now (no waiting): how the tests, and
+// anything else, learn whether a certificate and a password are accepted.
+func pingOnce(ctx context.Context, s Spec, stderr io.Writer) error {
+	eng, _, err := engine.Get(s.Engine)
+	if err != nil {
+		return err
+	}
+	return command(ctx, s, eng.PingCmd(s.Params), stderr).Run()
+}

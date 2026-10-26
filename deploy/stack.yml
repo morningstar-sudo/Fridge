@@ -16,6 +16,8 @@ services:
       - --entrypoints.web.address=:8080
       - --entrypoints.websecure.address=:8443
       - --entrypoints.pg.address=:5432
+      - --entrypoints.redis.address=:6379
+      - --entrypoints.mongo.address=:27017
       - --entrypoints.ping.address=:8082
       - --ping.entrypoint=ping
       - --providers.http.endpoint=http://fridge:8081/traefik
@@ -23,6 +25,8 @@ services:
       - --providers.http.headers.Authorization=Bearer ${FRIDGE_PROVIDER_TOKEN:?run install.sh, or set FRIDGE_PROVIDER_TOKEN in .env}
     ports:
       - { target: 5432, published: 5432, protocol: tcp, mode: ingress }
+      - { target: 6379, published: 6379, protocol: tcp, mode: ingress }
+      - { target: 27017, published: 27017, protocol: tcp, mode: ingress }
       - { target: 8443, published: 8443, protocol: tcp, mode: host }
       - { target: 8080, published: 8080, protocol: tcp, mode: host }
     networks: [fridge_edge]
@@ -34,6 +38,22 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+
+  # MySQL and MariaDB speak before the client says anything, so Traefik cannot route them by name: this router reads the
+  # user from the client's handshake and sends the connection to that user's database (no password ever reaches it).
+  # Routes and certificates come from Fridge like Traefik's; one per server, 3306 on the routing mesh.
+  mysql-router:
+    image: ${FRIDGE_IMAGE:-ghcr.io/morningstar-sudo/fridge:latest}
+    entrypoint: ["/fridge"]
+    command: ["mysql-router", "--listen", ":3306", "--config-url", "http://fridge:8081/mysql"]
+    environment:
+      FRIDGE_PROVIDER_TOKEN: ${FRIDGE_PROVIDER_TOKEN}
+    ports:
+      - { target: 3306, published: 3306, protocol: tcp, mode: ingress }
+    networks: [fridge_edge, fridge_db]
+    deploy:
+      mode: global
+      restart_policy: { condition: any }
 
   fridge-meta:
     image: postgres:18

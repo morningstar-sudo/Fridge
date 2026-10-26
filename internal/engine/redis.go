@@ -81,9 +81,13 @@ func orPort(port, def int) int {
 
 func (redis) ClientEnv(p Params) []string { return []string{"REDISCLI_AUTH=" + p.AdminPassword} }
 
-func (r redis) DumpCmd(p Params) []string { return append(r.cli(p), "--rdb", "-") }
-func (redis) DumpExt() string             { return ".rdb" }
-func (redis) DumpGzip() bool              { return false }
+// DumpCmd goes through a temporary file: `redis-cli --rdb -` leaves the 40-byte end mark of a diskless transfer after the
+// RDB, which would make the stored file unloadable. The file is removed whatever happens.
+func (r redis) DumpCmd(p Params) []string {
+	return append([]string{"sh", "-c", `set -e; f=$(mktemp); trap 'rm -f "$f"' EXIT; "$@" --rdb "$f" >&2; cat "$f"`, "sh"}, r.cli(p)...)
+}
+func (redis) DumpExt() string { return ".rdb" }
+func (redis) DumpGzip() bool  { return false }
 
 // RestoreCmd accepts only an RDB file: it cannot be loaded into a running node, so the file is put into the data
 // volume before the node starts (Preload) and there is no restore tool to run.

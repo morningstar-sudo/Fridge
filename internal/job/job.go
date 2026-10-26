@@ -42,7 +42,7 @@ type Guard struct {
 }
 
 type Spec struct {
-	Op     string // "dump" | "restore" | "check" | "exec" | "preload"
+	Op     string // "dump" | "restore" | "check" | "exec" | "ping" | "preload"
 	Params engine.Params
 	Engine string
 	S3     S3
@@ -105,6 +105,7 @@ func Run(ctx context.Context, s Spec, stdout, stderr io.Writer) int {
 		}
 		defer os.RemoveAll(dir)
 		s.tlsDir = dir
+		s.Params.TLSDir = dir // the engines name the certificate files in their client arguments
 	}
 	var err error
 	switch s.Op {
@@ -112,8 +113,10 @@ func Run(ctx context.Context, s Spec, stdout, stderr io.Writer) int {
 		err = dump(ctx, s, stdout, stderr)
 	case "restore":
 		err = restore(ctx, s, stderr)
+	case "ping":
+		err = pingOnce(ctx, s, stderr)
 	case "exec":
-		err = execScript(ctx, s, stderr)
+		err = execScript(ctx, s, stdout, stderr)
 	case "preload":
 		err = preload(ctx, s, stderr)
 	case "check":

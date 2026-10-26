@@ -170,3 +170,19 @@ func TestCheckOther(t *testing.T) {
 		}
 	}
 }
+
+// The client tools learn where the node's certificate is from their arguments (redis-cli, mongo tools, mysql) or from
+// the environment (libpq): whichever the engine uses, the files must exist and be named.
+func TestClientArgumentsNameTheCertificateFiles(t *testing.T) {
+	log := tools(t, map[string]string{"redis-cli": `echo "ARGS $*" >> "$LOG"; case "$*" in *--cert*) for f in $(echo "$*" | tr ' ' '\n' | grep '^/'); do [ -s "$f" ] || echo "MISSING $f" >> "$LOG"; done;; esac; echo PONG`})
+	t.Setenv("LOG", log)
+	p := paramsFor("redis")
+	p.TLS = &engine.TLS{ClientCert: "CC", ClientKey: "CK", CA: "CA"}
+	if code, _, errs := run(t, Spec{Op: "ping", Engine: "redis", Params: p}); code != 0 {
+		t.Fatalf("exit %d: %s", code, errs)
+	}
+	got, _ := os.ReadFile(log)
+	if !strings.Contains(string(got), "--tls --cacert /") || !strings.Contains(string(got), "--cert /") || strings.Contains(string(got), "MISSING") {
+		t.Fatalf("redis-cli ran as %q", got)
+	}
+}

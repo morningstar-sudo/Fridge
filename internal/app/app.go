@@ -30,6 +30,7 @@ type Runtime interface {
 	NodeReady(ctx context.Context, key string, timeout time.Duration) error
 	RemoveNode(ctx context.Context, ref swarm.NodeRef) error
 	ListNodes(ctx context.Context) ([]swarm.NodeState, error)
+	NodeLogs(ctx context.Context, key string) string
 	RunJob(ctx context.Context, j swarm.JobSpec) (swarm.JobResult, error)
 	Subnets(ctx context.Context) ([]netip.Prefix, error)
 }

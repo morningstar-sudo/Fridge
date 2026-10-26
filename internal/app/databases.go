@@ -112,6 +112,9 @@ func (a *App) CreateDatabase(ctx context.Context, req CreateRequest) (store.Data
 	}
 
 	if err := a.provision(ctx, &d, eng, info, pw, adminPW, req.Preload); err != nil {
+		if logs := a.RT.NodeLogs(context.WithoutCancel(ctx), d.NodeKey); strings.TrimSpace(logs) != "" { // gone with the node: keep what it said
+			log.Printf("database %s failed to start: %v\n%s", d.Name, err, logs)
+		}
 		a.removeNode(ctx, d)
 		return store.Database{}, err
 	}

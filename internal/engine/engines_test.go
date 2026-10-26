@@ -75,7 +75,7 @@ func TestRedis(t *testing.T) {
 			t.Errorf("entrypoint lacks %q", want)
 		}
 	}
-	if got := strings.Join(e.DumpCmd(p), " "); got != "redis-cli --tls --cacert /tls/ca.crt --cert /tls/client.crt --key /tls/client.key -h fridge-db-k1 -p 6379 --user su_0123456789abcdef --no-auth-warning --rdb -" {
+	if got := strings.Join(e.DumpCmd(p), " "); !strings.HasPrefix(got, "sh -c set -e; f=$(mktemp);") || !strings.Contains(got, " sh redis-cli --tls --cacert /tls/ca.crt --cert /tls/client.crt --key /tls/client.key -h fridge-db-k1 -p 6379 --user su_0123456789abcdef --no-auth-warning") || !strings.Contains(got, "--rdb \"$f\"") {
 		t.Fatalf("dump = %q", got)
 	}
 	if env := e.ClientEnv(p); len(env) != 1 || env[0] != "REDISCLI_AUTH=adm1n-pw" {
