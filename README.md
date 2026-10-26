@@ -7,7 +7,7 @@ Everything is a swarm service. Adding a server is `docker swarm join`: nothing e
 
 ## Install
 
-On the server that becomes the swarm manager (needs Docker):
+On the server that becomes the swarm manager (needs Docker; every server must be x86_64, the images are not built for arm64):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/morningstar-sudo/Fridge/main/install.sh | sh -s -- --admin alice
@@ -197,5 +197,5 @@ bash scripts/ui-smoke/run.sh             # the whole web UI in a real browser (P
 bash scripts/swarm-test/down.sh
 ```
 
-`.github/workflows/ci.yml` runs the same, and publishes the two images (`linux/amd64`, `linux/arm64`) from `main` and
+`.github/workflows/ci.yml` runs the same, and publishes the two images (`linux/amd64` only) from `main` and
 `v*` tags.
