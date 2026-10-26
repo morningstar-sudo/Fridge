@@ -284,7 +284,7 @@ func (c *Client) RemoveNode(ctx context.Context, ref NodeRef) error {
 	c.waitNoTasks(ctx, ref.Key)
 	if ref.Volume != "" && ref.HostID != "" {
 		res, err := c.RunJob(ctx, JobSpec{Name: "rmvol", Image: c.cfg.ServerImage, Entrypoint: []string{"/fridge"}, Args: []string{"job", "rmvolume", ref.Volume},
-			NodeID: ref.HostID, Binds: []string{"/var/run/docker.sock:/var/run/docker.sock"}, Timeout: time.Minute})
+			NodeID: ref.HostID, Binds: []string{"/var/run/docker.sock:/var/run/docker.sock"}, Timeout: 90 * time.Second})
 		if err == nil && res.ExitCode != 0 {
 			err = fmt.Errorf("exit %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 		}

@@ -6,7 +6,9 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
@@ -67,7 +69,14 @@ func runJob(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		defer cli.Close()
-		if err := cli.VolumeRemove(ctx, args[1], true); err != nil && !errdefs.IsNotFound(err) {
+		// the container of the removed service goes a moment after its task does: "in use" passes
+		for deadline := time.Now().Add(45 * time.Second); ; time.Sleep(time.Second) {
+			err = cli.VolumeRemove(ctx, args[1], true)
+			if err == nil || errdefs.IsNotFound(err) || !strings.Contains(err.Error(), "in use") || time.Now().After(deadline) {
+				break
+			}
+		}
+		if err != nil && !errdefs.IsNotFound(err) {
 			fmt.Fprintln(stderr, "job rmvolume:", err)
 			return 1
 		}
