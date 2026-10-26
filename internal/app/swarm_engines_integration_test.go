@@ -74,7 +74,7 @@ func engineLifecycle(t *testing.T, e *swarmEnv, name, seed, query, want, refused
 	}
 
 	// ---- create: the node runs, the superuser and the app user exist ----
-	d1, err := createDB(a, ctx, CreateRequest{OwnerID: own(t, a), Engine: name, Name: "it1", Domain: "it1." + name + ".lan"})
+	d1, err := createDB(a, ctx, CreateRequest{OwnerID: own(t, a), Engine: name, Name: name + "1", Domain: "it1." + name + ".lan"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func engineLifecycle(t *testing.T, e *swarmEnv, name, seed, query, want, refused
 	}
 
 	r, err := startRestore(a, ctx, RestoreRequest{OwnerID: own(t, a), DestinationID: e.dest.ID, Key: bk.S3Key,
-		New: &CreateRequest{OwnerID: own(t, a), Name: "it2", Domain: "it2." + name + ".lan"}})
+		New: &CreateRequest{OwnerID: own(t, a), Name: name + "2", Domain: "it2." + name + ".lan"}})
 	if err != nil {
 		t.Fatal(err)
 	}

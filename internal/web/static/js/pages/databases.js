@@ -56,7 +56,7 @@ async function createDialog(ctx) {
     h("div", { class: "row" }, h("div", { class: "col-6" }, field("Engine", eng)), h("div", { class: "col-6" }, field("Version", ver))),
     creds.nodes[0],
     mine.length
-      ? field("Domain", dom, "Client kết nối bằng tên này (SNI). Chỉ chọn được domain bạn đã đăng ký.")
+      ? field("Domain", dom, "Client kết nối bằng tên này (PostgreSQL, Redis, MongoDB chọn database theo tên này; MySQL/MariaDB chọn theo user và dùng tên này trong chứng chỉ). Chỉ chọn được domain bạn đã đăng ký.")
       : h("div", { class: "alert alert-warning" }, "Bạn chưa đăng ký domain nào. ", h("a", { href: "#/domains", "data-bs-dismiss": "modal" }, "Đăng ký domain"), " trước khi tạo database."),
     creds.nodes.slice(1),
     err.el,

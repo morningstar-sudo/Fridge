@@ -122,7 +122,7 @@ await step("log out and log in again", async () => {
 // ---------------------------------------------------------------- Task 20: databases, restore, destinations, domains
 await step("register two domains", async () => {
   await admin.goto(BASE + "/#/domains");
-  for (const d of ["root1.lan", "copy.root1.lan"]) {
+  for (const d of ["root1.lan", "copy.root1.lan", "cache.root1.lan", "sql.root1.lan"]) {
     await admin.fill("input[name=domain]", d);
     await admin.getByRole("button", { name: "Đăng ký domain" }).click();
     await admin.locator("td", { hasText: d }).first().waitFor();
@@ -335,6 +335,29 @@ await step("images: pull postgres:15 on every node, update check reports a state
     if (!/mới nhất|New version|không kiểm tra được/.test(t)) throw new Error("no update state in: " + t);
   }
 });
+
+// the engines that are not PostgreSQL: one routed by server name (Redis), one by user (MariaDB)
+for (const [eng, ver, name, dom, scheme] of [["redis", "7.4", "cache", "cache.root1.lan", "rediss://"], ["mariadb", "11.4", "sqlx", "sql.root1.lan", "mysql://"]]) {
+  await step(`create a ${eng} database from the form and get its connection string and CA`, async () => {
+    await admin.goto(BASE + "/#/databases");
+    await admin.getByRole("button", { name: "Tạo database" }).first().click();
+    const m = modal(admin);
+    await m.locator("select[name=engine]").selectOption(eng);
+    await m.locator("select[name=version]").selectOption(ver);
+    await m.locator("input[name=db-name]").fill(name);
+    await m.locator("select[name=domain]").selectOption(dom);
+    const dice = m.locator('button[title="Ngẫu nhiên"]');
+    await dice.nth(0).click();
+    await dice.nth(1).click();
+    await m.getByRole("button", { name: "Tạo database" }).click();
+    await admin.waitForURL(new RegExp(`#/databases/root1_${name}$`), { timeout: 300000 }); // pulls the image on a server that has never seen it
+    await admin.locator(".status.running").first().waitFor({ timeout: 120000 });
+    await admin.getByRole("button", { name: "Hiện mật khẩu" }).first().click();
+    await admin.locator(".strip .value", { hasText: scheme }).first().waitFor();
+    const href = await admin.locator('a[download$="-ca.crt"]').first().getAttribute("href");
+    if (!href.endsWith(`/root1_${name}/ca`)) throw new Error("CA link: " + href);
+  });
+}
 
 await step("every page renders without console or CSP errors", async () => {
   for (const r of ["databases", "restore", "destinations", "domains", "audit", "settings", "users", "sessions", "images", "activity", "password"]) {

@@ -1,7 +1,7 @@
 # Fridge
 
-Creates Postgres nodes on Docker Swarm, reachable on one port (routed by TLS SNI), backs them up to S3 and restores
-them. A web UI and a CLI, with user accounts and per-user ownership, drive it.
+Creates PostgreSQL, MySQL, MariaDB, MongoDB and Redis nodes on Docker Swarm, each reachable on its engine's usual port,
+backs them up to S3 and restores them. A web UI and a CLI, with user accounts and per-user ownership, drive it.
 
 Everything is a swarm service. Adding a server is `docker swarm join`: nothing else is installed on it.
 
@@ -33,23 +33,27 @@ The password never leaves the browser (SCRAM-SHA-256 login).
 
 | Service | Where | What |
 |---|---|---|
-| `traefik` | every server (global) | database port 5432 on the swarm routing mesh, web/API port 8443 on the server itself; routes and certificates are fetched from Fridge, nothing is stored |
+| `traefik` | every server (global) | PostgreSQL (5432), Redis (6379) and MongoDB (27017) on the swarm routing mesh, routed by TLS server name; web/API port 8443 on the server itself; routes and certificates are fetched from Fridge, nothing is stored |
+| `mysql-router` | every server (global) | MySQL and MariaDB (3306) on the routing mesh: their protocol has no server name to route by, so the router reads the user from the client's handshake and sends the connection to that user's database |
 | `fridge` | the server labelled `fridge.control=true` | the API, the scheduler, the swarm client (needs a manager) |
 | `fridge-meta` | same server | metadata Postgres |
 | `fridge-db-<key>` | one server per database (any server unless labelled `fridge.db=false`), pinned, with a local volume | the database |
-| `fridge-edge-<key>` | next to its database | joins the shared edge network and the database network; relays to its database over TLS with that database's client certificate |
+| `fridge-edge-<key>` | next to its database (not for MySQL/MariaDB) | joins the shared edge network and the database network; relays to its database over TLS with that database's client certificate |
 
 All databases share one internal, encrypted overlay (`fridge_db`: no internet, nothing else on it). What keeps one
-database away from another is the database itself: its `pg_hba.conf` accepts only a TLS client presenting that
-database's own certificate (`hostssl … scram-sha-256 clientcert=verify-ca`, the certificate being the only trusted
-root) and then the password, and rejects everything else, so a compromised database can reach the port of another but
-not get past the TLS handshake. Only that database's edge sidecar and the jobs working on it are given its client key.
-The Fridge API and the metadata database are not on `fridge_db` at all. The database presents one certificate, naming
-both its public domain and its service: it is the same certificate Traefik presents to clients, which is what lets
-SCRAM channel binding (libpq's default) work through the proxy. Node certificates last five years; Fridge alerts 60
-days before one expires. Dump, restore and the deep check of a backup run as one-shot services
-(`fridge-job` image, PostgreSQL clients 13–18) that join `fridge_db` and the empty `fridge_egress` network (the check
-job only the latter) and talk to S3 themselves; nothing is streamed through Fridge.
+database away from another is the database itself: it accepts only a TLS client presenting that database's own
+certificate (its only trusted client root) and then the password, so a compromised database can reach the port of
+another but not get past the TLS handshake. Each engine states that its own way: PostgreSQL `pg_hba.conf`
+(`hostssl … clientcert=verify-ca`, everything else rejected), Redis `tls-auth-clients yes`, MongoDB `requireTLS` with
+`tlsCAFile`, MySQL/MariaDB `--ssl-ca` with every account `REQUIRE X509` and `require_secure_transport`. Only that
+database's edge sidecar (or the MySQL router) and the jobs working on it are given its client key. The Fridge API and
+the metadata database are not on `fridge_db` at all. Node certificates last five years; Fridge alerts 60 days before one
+expires. The database's server certificate names both its public domain and its service: it is the very certificate
+Traefik presents to clients, which is what lets PostgreSQL's SCRAM channel binding (libpq's default) work through the proxy.
+Administration of every engine but PostgreSQL (creating the app user, rotating the superuser) is a one-shot job that runs the
+engine's own shell on the database network. Dump, restore and the deep check of a backup are jobs too (`fridge-job` image:
+PostgreSQL clients 13–18, mysql, mariadb, mongosh and the MongoDB tools, redis-cli); they join `fridge_db` and the empty
+`fridge_egress` network (the check job only the latter) and talk to S3 themselves; nothing is streamed through Fridge.
 
 **Add a server** (nothing but Docker is needed on it; open 2377/tcp to the manager, 7946/tcp+udp, 4789/udp and ESP between
 servers). On the manager (the installer keeps a copy of itself next to `.env`):
@@ -67,8 +71,9 @@ databases off a server. A database lives on one server with its local volume; if
 is down until it returns (restore from S3 to move it). If the images are private, `docker login ghcr.io` on the new
 server.
 
-**Firewall.** Open 8443 (web UI/API) and 5432 (databases). The routing mesh hides client addresses, so Fridge cannot
-filter port 5432 by IP: restrict it with the host firewall or the cloud security group. The IP allowlist (Settings, default
+**Firewall.** Open 8443 (web UI/API) and the ports of the engines you use: 5432 PostgreSQL, 3306 MySQL/MariaDB, 27017 MongoDB,
+6379 Redis. The routing mesh hides client addresses, so Fridge cannot
+filter them by IP: restrict it with the host firewall or the cloud security group. The IP allowlist (Settings, default
 loopback and the private ranges) applies to the web UI and API, whose port is published on each server itself.
 
 ## Using it
@@ -86,7 +91,7 @@ export FRIDGE_URL=https://<server>:8443       # default https://localhost:8443
 ./fridge login --user alice                   # first time: shows the CA fingerprint and asks before trusting it
 ./fridge domains add shop.example.com         # a database needs a domain you registered
 ./fridge dest add local --endpoint https://s3.example.com --bucket fridge --access-key AK --secret-key SK
-./fridge create postgres shop --domain shop.example.com --version 16 --random-credentials   # creates alice_shop; prints the generated user and password once
+./fridge create postgres shop --domain shop.example.com --version 16 --random-credentials   # (also: mysql, mariadb, mongo, redis) creates alice_shop; prints the generated user and password once
 ./fridge show alice_shop --reveal             # connection string with the password (audited)
 ./fridge backup alice_shop --wait
 ./fridge check --from local:<key> --wait      # deep check of a backup file with a real pg_restore
@@ -109,12 +114,16 @@ If nobody can log in any more, three commands work on the metadata database from
 /fridge recover promote alice
 ```
 
-Clients connect on port 5432 with TLS; the hostname selects the database (SNI), on any server of the swarm. Without DNS,
-let `host` drive SNI and `hostaddr` pick the server:
+Every client connects with TLS, on any server of the swarm. PostgreSQL, Redis and MongoDB are chosen by the host name (TLS server
+name), so a client needs the database's domain; without DNS let `host` drive SNI and `hostaddr` pick the server. MySQL and
+MariaDB are chosen by the user name (the connection string says which), and TLS is required (`ssl-mode=REQUIRED` or stricter).
 
 ```sh
 psql "postgresql://abc_app:<pw>@abc.com:5432/abc?sslmode=require&hostaddr=203.0.113.10"
-./fridge ca --db alice_abc > abc-ca.crt   # then sslmode=verify-full&sslrootcert=abc-ca.crt
+redis-cli --tls -h abc.com --sni abc.com --user alice_abc --pass <pw>          # rediss://alice_abc:<pw>@abc.com:6379
+mongosh "mongodb://alice_abc:<pw>@abc.com:27017/alice_abc?tls=true"            # authSource is the database itself
+mysql -h abc.com -u alice_abc -p --ssl-mode=VERIFY_CA --ssl-ca=ca.crt alice_abc # MariaDB: mariadb -h … --ssl --ssl-ca=ca.crt
+./fridge ca --db alice_abc > abc-ca.crt   # then sslmode=verify-full&sslrootcert=abc-ca.crt (psql), --cacert (redis-cli), tlsCAFile (mongo)
 ```
 
 Plain `sslmode=require` encrypts but does not check who answers. To check, trust the database's CA: **every account has a
@@ -123,7 +132,22 @@ downloaded from the database's page in the web UI ("tải CA của database này
 `GET /api/databases/<name>/ca`; everyone who may see a database (members, admins) gets its owner's CA. A client that trusts
 it trusts that owner's databases and no one else's, and the instance CA (the web UI's, `fridge ca`) vouches for none of
 them. Databases made before tenant CAs existed keep their instance-CA certificate until recreated. The CA's private key
-never leaves the server (stored encrypted).
+never leaves the server (stored encrypted). MySQL and MariaDB are the exception: their protocol has no server name, so every
+client sees one certificate (it names every MySQL/MariaDB domain, signed by the instance CA) and `fridge ca --db` hands out
+the instance CA for them.
+
+## Engines
+
+| Engine | Versions | Port | Backup file | Notes |
+|---|---|---|---|---|
+| PostgreSQL | 13–18 (default 17) | 5432 | `.dump` (pg_dump custom format) | restore into the same or a newer version; plain `.sql`/`.sql.gz` also restore |
+| MySQL | 8.0, 8.4 | 3306 | `.sql.gz` (mysqldump, routines/triggers/events, hex blobs) | accounts use `mysql_native_password`; `DEFINER` clauses are dropped on restore |
+| MariaDB | 10.6, 10.11, 11.4, 11.8 | 3306 | `.sql.gz` (mariadb-dump) | same router as MySQL; user names are unique across both |
+| MongoDB | 6.0, 7.0, 8.0 | 27017 | `.archive.gz` (mongodump) | restore renames the database to the new node's |
+| Redis | 6.2, 7.2, 7.4, 8.0 | 6379 | `.rdb` | an instance, not a database: the app user is an ACL user without administrative commands; restore loads the file into the new node's volume before it starts |
+
+A restore always creates a new node of the file's engine (never overwrites). The deep check reads the whole file: the
+archive and the end marker for every engine, `pg_restore` for PostgreSQL custom dumps.
 
 Stopping `fridge` does not interrupt database traffic; Traefik keeps routing with the last config it fetched. A Traefik
 that starts while Fridge is down has no routes until Fridge is back. Fridge checks the swarm at boot and every five

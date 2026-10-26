@@ -179,3 +179,17 @@ func TestBuildALPNOnlyForEnginesThatNeedIt(t *testing.T) {
 		t.Errorf("entry point = %v", got)
 	}
 }
+
+// Traefik refuses a configuration whose tls.options is present but empty ("options cannot be a standalone element"):
+// a stack without PostgreSQL databases must not send one.
+func TestBuildOmitsEmptyTLSOptions(t *testing.T) {
+	doc := roundTrip(t, base)
+	if _, ok := doc["tls"].(map[string]any)["options"]; ok {
+		t.Error("tls.options is present although no engine needs an ALPN answer")
+	}
+	c := base
+	c.DBs = []DB{{ID: 1, EntryPoint: "redis", Domain: "r.com", Backend: "x:5432", CertPEM: "C", KeyPEM: "K"}}
+	if _, ok := roundTrip(t, c)["tls"].(map[string]any)["options"]; ok {
+		t.Error("tls.options is present for a Redis-only configuration")
+	}
+}

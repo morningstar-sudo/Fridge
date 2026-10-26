@@ -177,7 +177,7 @@ if [ "$UNINSTALL" = 1 ]; then
 		docker service rm fridge-purge >/dev/null 2>&1 || true
 		docker service create -d --name fridge-purge --mode global-job --restart-condition none \
 			--mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
-			docker:cli sh -c 'for v in $(docker volume ls -q | grep -E "^fridge-postgres-|^fridge_fridge-(meta|data)$"); do docker volume rm "$v"; done' >/dev/null
+			docker:cli sh -c 'for v in $(docker volume ls -q | grep -E "^fridge-(postgres|mysql|mariadb|mongo|redis)-|^fridge_fridge-(meta|data)$"); do docker volume rm "$v"; done' >/dev/null
 		wait_for 300 "the volume cleanup (it pulls docker:cli on every server)" purge_done
 		docker service rm fridge-purge >/dev/null 2>&1 || true
 		rm -rf "$DIR"

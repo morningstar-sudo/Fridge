@@ -49,9 +49,12 @@ func Build(c Config) map[string]any {
 		certs = append(certs, map[string]any{"certFile": d.CertPEM, "keyFile": d.KeyPEM})
 	}
 	tls := map[string]any{
-		"options": alpnOptions(c.DBs),
+
 		"stores": map[string]any{"default": map[string]any{
 			"defaultCertificate": map[string]any{"certFile": c.WebCertPEM, "keyFile": c.WebKeyPEM}}},
+	}
+	if opts := alpnOptions(c.DBs); len(opts) > 0 { // an empty "options" is a decode error for Traefik
+		tls["options"] = opts
 	}
 	if len(certs) > 0 {
 		tls["certificates"] = certs

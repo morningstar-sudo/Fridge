@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # End to end on the two-node test swarm (up.sh with fridge:dev fridge-job:dev postgres:17 postgres:18 traefik:v3.5):
-# installs the real stack with install.sh, then drives it with the CLI and psql the way users do:
+# installs the real stack with install.sh, then drives it with the CLI and the real clients (psql, redis-cli, mongosh, mysql,
+# mariadb) the way users do:
 #   - a database created through the CLI is reachable through the routing mesh on BOTH servers (SNI + TLS)
 #   - an unknown name and a plain-text client are refused
 #   - restarting Traefik loses nothing
 #   - a database pinned to the other server survives that server being drained and brought back, data intact
 #   - a vanished edge sidecar is recreated by the reconcile at boot
+#   - every engine works through its public port on both servers with the CA the user downloads, and refuses plain text
+#   - a server added with install.sh gets Traefik and databases
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -133,6 +136,50 @@ done
 $D service ls --format '{{.Name}}' | grep -qx "$EDGE" || fail "$EDGE was not recreated"
 echo "recreated $EDGE"
 
+
+step "every engine through its public port, on both servers, with the CA the user downloads"
+for _ in $(seq 1 40); do F ls >/dev/null 2>&1 && break; sleep 3; done # Fridge was just restarted by the reconcile step
+# C <engine-name> <ip> <cmd...>: a client container (the job image carries every client) on fsw1's network, where <name>.lan is <ip>
+C() {
+	local host=$1 ip=$2; shift 2
+	$D run --rm --network host --add-host "$host:$ip" -v /root/ca:/ca:ro --entrypoint sh fridge-job:dev -c "$*"
+}
+engine_check() { # <engine> <port> <client script using $HOST $USERNAME $PW $DB $CA, printing OK on success> <script that must fail: plain text>
+	local eng=$1 port=$2 good=$3 plain=$4
+	local name=e2e${eng} dom=${eng}1.lan
+	F domains add "$dom" >/dev/null
+	local conn user pw dbn
+	conn=$(F create "$eng" "$name" --domain "$dom" --reveal | tail -1)
+	user=$(echo "$conn" | sed -n 's|^[a-z]*://\([^:]*\):.*|\1|p')
+	pw=$(echo "$conn" | sed -n 's|^[a-z]*://[^:]*:\([^@]*\)@.*|\1|p')
+	dbn=e2eadm_$name
+	[ -n "$user" ] && [ -n "$pw" ] || fail "$eng: no credentials in: $conn"
+	docker exec fsw1 mkdir -p /root/ca
+	F ca --db "e2eadm_$name" | docker exec -i fsw1 sh -c "cat > /root/ca/$eng.crt"
+	for ip in "$IP1" "$IP2"; do
+		got=""
+		for _ in $(seq 1 25); do # Traefik and the router poll Fridge every 5s
+			got=$(C "$dom" "$ip" "HOST=$dom USERNAME='$user' PW='$pw' DB=$dbn CA=/ca/$eng.crt; $good" 2>&1 | tail -3 || true)
+			case "$got" in *OK*) break ;; esac
+			sleep 3
+		done
+		case "$got" in *OK*) ;; *) fail "$eng through $ip: $got" ;; esac
+		if C "$dom" "$ip" "HOST=$dom USERNAME='$user' PW='$pw' DB=$dbn; $plain" >/dev/null 2>&1; then fail "$eng: plain text was served through $ip"; fi
+	done
+	echo "$eng ok on $IP1 and $IP2"
+}
+engine_check redis 6379 \
+	'redis-cli --tls --cacert $CA -h $HOST --sni $HOST --user $USERNAME --pass $PW --no-auth-warning set k v | grep -q OK && redis-cli --tls --cacert $CA -h $HOST --sni $HOST --user $USERNAME --pass $PW --no-auth-warning get k | grep -q "^v$" && echo OK' \
+	'redis-cli -h $HOST --user $USERNAME --pass $PW --no-auth-warning ping | grep -q PONG'
+engine_check mongo 27017 \
+	'mongosh --quiet "mongodb://$USERNAME:$PW@$HOST:27017/$DB?tls=true&tlsCAFile=$CA" --eval "db.t.insertOne({a:1}).acknowledged" | grep -q true && echo OK' \
+	'mongosh --quiet "mongodb://$USERNAME:$PW@$HOST:27017/$DB?tls=false&serverSelectionTimeoutMS=4000" --eval "db.runCommand({ping:1}).ok" | grep -qx 1'
+engine_check mysql 3306 \
+	'export MYSQL_PWD=$PW; mysql -h $HOST -u $USERNAME --ssl-mode=VERIFY_CA --ssl-ca=$CA $DB -e "create table if not exists t(a int); insert into t values (1); select count(*) from t" | grep -q "^[1-9]" && echo OK' \
+	'export MYSQL_PWD=$PW; mysql -h $HOST -u $USERNAME --ssl-mode=DISABLED $DB -e "select 1" | grep -q 1'
+engine_check mariadb 3306 \
+	'export MYSQL_PWD=$PW; mariadb -h $HOST -u $USERNAME --ssl --ssl-ca=$CA --skip-ssl-verify-server-cert $DB -e "create table if not exists t(a int); insert into t values (1); select count(*) from t" | grep -q "^[1-9]" && echo OK' \
+	'export MYSQL_PWD=$PW; mariadb -h $HOST -u $USERNAME --skip-ssl $DB -e "select 1" | grep -q 1'
 
 step "adding a server: --add-node prints the command, then does it over SSH; the new server gets Traefik and databases"
 bash scripts/swarm-test/node.sh fsw3 fridge:dev fridge-job:dev postgres:17 postgres:18 traefik:v3.5 >/dev/null
