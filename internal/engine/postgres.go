@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"strconv"
@@ -17,6 +18,8 @@ func init() {
 		Default:    "17",
 		EntryPoint: "pg",
 		PublicPort: 5432,
+		Route:      "sni",
+		ALPN:       "postgresql",
 	})
 }
 
@@ -124,3 +127,24 @@ printf 'local all all trust\nhostssl all all all scram-sha-256 clientcert=verify
 chown -R postgres:postgres "$d"
 chmod 600 "$d/server.key"
 exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file="$d/server.crt" -c ssl_key_file="$d/server.key" -c ssl_ca_file="$d/client-ca.crt" -c hba_file="$d/pg_hba.conf" -c password_encryption=scram-sha-256`
+
+func (postgres) ClientEnv(p Params) []string {
+	env := []string{"PGPASSWORD=" + p.AdminPassword}
+	if p.TLSDir != "" { // the database takes only a client holding this node's certificate, and the client checks the server's name
+		env = append(env, "PGSSLMODE=verify-full", "PGSSLCERT="+p.TLSDir+"/client.crt", "PGSSLKEY="+p.TLSDir+"/client.key", "PGSSLROOTCERT="+p.TLSDir+"/ca.crt")
+	}
+	return env
+}
+
+func (postgres) DumpGzip() bool                           { return false }
+func (postgres) RestoreFilter() func(io.Reader) io.Reader { return nil }
+func (postgres) Preload(string) (string, int)             { return "", 0 }
+func (postgres) Upstream() string                         { return "pg" }
+
+// PingCmd is not used for Postgres (pgx retries its own connection); pg_isready also says "accepting connections" to a
+// client the node will then refuse, so it proves nothing about the certificate.
+func (postgres) PingCmd(p Params) []string {
+	return append([]string{"psql", "-U", p.AdminUser, "-d", p.Name, "-tAc", "select 1"}, hostArgs(p)...)
+}
+
+func (postgres) AdminFailed(string) bool { return false }

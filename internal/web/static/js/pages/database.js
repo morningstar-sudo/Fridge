@@ -8,6 +8,9 @@ const TABS = [
   ["members", "Người quản lý"],
 ];
 
+// How each engine's client is told to check the server certificate against a downloaded CA.
+const VERIFY = { postgres: "sslmode=verify-full", mysql: "--ssl-mode=VERIFY_CA --ssl-ca=<file>", mariadb: "--ssl --ssl-ca=<file>", mongo: "tlsCAFile=<file> (mongosh: --tlsCAFile)", redis: "--tls --cacert <file>" };
+
 export default async function database(ctx) {
   const name = ctx.params.name;
   let d = await api("GET", "/api/databases/" + encodeURIComponent(name));
@@ -96,9 +99,9 @@ export default async function database(ctx) {
         h(
           "p",
           { class: "hint mt-3 mb-0" },
-          "Kết nối bằng TLS; tên host chọn database (SNI). Muốn kiểm tra chứng chỉ, ",
+          (d.engine === "mysql" || d.engine === "mariadb" ? "Kết nối bằng TLS; user chọn database (giao thức MySQL không có SNI). " : "Kết nối bằng TLS; tên host chọn database (SNI). ") + "Muốn kiểm tra chứng chỉ, ",
           h("a", { href: `/api/databases/${encodeURIComponent(d.name)}/ca`, download: `${d.name}-ca.crt` }, "tải CA của database này"),
-          " và dùng sslmode=verify-full.",
+          " và dùng " + (VERIFY[d.engine] || "chế độ kiểm tra chứng chỉ của client") + ".",
         ),
       ),
     );

@@ -147,6 +147,10 @@ func firstField(s string) string {
 }
 
 func inspectSQL(head []byte, gz bool) (Header, error) {
+	return inspectSQLWith(head, gz, looksLikeSQL, "pg_dump")
+}
+
+func inspectSQLWith(head []byte, gz bool, looks func([]byte) bool, what string) (Header, error) {
 	h := Header{Format: "sql", Gzip: gz}
 	text := head
 	if gz {
@@ -169,8 +173,8 @@ func inspectSQL(head []byte, gz bool) (Header, error) {
 	if !validPrefix(text) {
 		return Header{}, errors.New("not a SQL text file (invalid UTF-8)")
 	}
-	if !looksLikeSQL(text) {
-		return Header{}, errors.New("not a pg_dump SQL file")
+	if !looks(text) {
+		return Header{}, fmt.Errorf("not a %s SQL file", what)
 	}
 	return h, nil
 }

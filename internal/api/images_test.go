@@ -58,7 +58,19 @@ func TestImagesAdminOnly(t *testing.T) {
 		UsedBy  []string `json:"used_by"`
 	}
 	json.Unmarshal(e.want(t, e.root, "GET", "/api/images", "", 200).Body.Bytes(), &rows)
-	if len(rows) != 6 || rows[3].Ref != "postgres:16" || !rows[3].Present || rows[3].Version != "16.4" || rows[3].UsedBy == nil {
+	var pg16 *struct {
+		Ref     string
+		Present bool
+		Version string
+		Size    int64
+		UsedBy  []string `json:"used_by"`
+	}
+	for i := range rows {
+		if rows[i].Ref == "postgres:16" {
+			pg16 = &rows[i]
+		}
+	}
+	if len(rows) != 19 || pg16 == nil || !pg16.Present || pg16.Version != "16.4" || pg16.UsedBy == nil { // every version of the five engines
 		t.Fatalf("%+v", rows)
 	}
 

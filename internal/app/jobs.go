@@ -73,13 +73,26 @@ func (a *App) jobParams(ctx context.Context, d store.Database) (engine.Params, e
 // runJob runs spec as a swarm job and returns its parsed result and the job's stderr tail.
 // A non-zero exit becomes an error carrying that tail.
 func (a *App) runJob(ctx context.Context, name string, spec job.Spec, networks []string, timeout time.Duration) (map[string]any, string, error) {
+	return a.runJobOn(ctx, name, spec, jobPlace{Networks: networks}, timeout)
+}
+
+// jobPlace is where and how a job runs, beyond its spec: its networks, the node it is pinned to, a data volume of that
+// node and the user it runs as.
+type jobPlace struct {
+	Networks []string
+	NodeID   string
+	Volumes  []string
+	User     string
+}
+
+func (a *App) runJobOn(ctx context.Context, name string, spec job.Spec, pl jobPlace, timeout time.Duration) (map[string]any, string, error) {
 	raw, err := json.Marshal(spec)
 	if err != nil {
 		return nil, "", err
 	}
 	res, err := a.RT.RunJob(ctx, swarm.JobSpec{
 		Name: name, Image: a.JobImage, Entrypoint: []string{"/fridge"}, Args: []string{"job", "run"},
-		Env: []string{job.EnvSpec + "=" + string(raw)}, Networks: networks, Timeout: timeout,
+		Env: []string{job.EnvSpec + "=" + string(raw)}, Networks: pl.Networks, NodeID: pl.NodeID, Volumes: pl.Volumes, User: pl.User, Timeout: timeout,
 	})
 	out := parseResult(res.Stdout)
 	if err != nil {
@@ -113,4 +126,19 @@ func resultInt(m map[string]any, k string) (int64, error) {
 		return 0, errors.New("the job reported no " + k)
 	}
 	return int64(f), nil
+}
+
+// preloadFile puts a backup file into the node's data volume before the node exists: a job pinned to the node's host
+// mounts the volume (Docker creates it there) and writes the file where the engine reads it at start.
+func (a *App) preloadFile(ctx context.Context, d store.Database, eng engine.Engine, pre *Preload) error {
+	s3, guard, err := a.s3Job(ctx, pre.DestinationID)
+	if err != nil {
+		return err
+	}
+	spec := job.Spec{Op: "preload", Engine: d.Engine, S3: s3, Guard: guard, Key: pre.Key}
+	_, stderr, err := a.runJobOn(ctx, "preload", spec, jobPlace{Networks: []string{a.EgressNetwork}, NodeID: d.HostID, Volumes: []string{d.Volume + ":/data"}, User: "0"}, backupTimeout)
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr))
+	}
+	return nil
 }

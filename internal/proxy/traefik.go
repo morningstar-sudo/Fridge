@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strings"
 )
 
 // DB is one database's TCP route. Backend is "host:port" of its edge sidecar; the PEMs are inline.
@@ -18,6 +17,7 @@ type DB struct {
 	Domain, Backend string
 	EntryPoint      string // the engine's Traefik entry point
 	CertPEM, KeyPEM string
+	ALPN            string // the application protocol the engine's clients offer and need answered ("" = none)
 }
 
 // Config is everything Traefik is told. The allowlist applies to the web UI and API only: a database's port is
@@ -30,8 +30,7 @@ type Config struct {
 }
 
 const (
-	alpnPG = "postgresql" // libpq 17 sends ALPN "postgresql" and fails without an answer
-	tlsPG  = "pg"
+	tlsPG = "pg"
 )
 
 // Build is the document Traefik's http provider expects.
@@ -44,13 +43,13 @@ func Build(c Config) map[string]any {
 			"entryPoints": []string{d.EntryPoint},
 			"rule":        fmt.Sprintf("HostSNI(`%s`)", d.Domain),
 			"service":     name,
-			"tls":         map[string]any{"options": tlsPG},
+			"tls":         routerTLS(d),
 		}
 		services[name] = map[string]any{"loadBalancer": map[string]any{"servers": []any{map[string]any{"address": d.Backend}}}}
 		certs = append(certs, map[string]any{"certFile": d.CertPEM, "keyFile": d.KeyPEM})
 	}
 	tls := map[string]any{
-		"options": map[string]any{tlsPG: map[string]any{"alpnProtocols": []string{alpnPG}}},
+		"options": alpnOptions(c.DBs),
 		"stores": map[string]any{"default": map[string]any{
 			"defaultCertificate": map[string]any{"certFile": c.WebCertPEM, "keyFile": c.WebKeyPEM}}},
 	}
@@ -90,9 +89,9 @@ func Build(c Config) map[string]any {
 	return doc
 }
 
-// Handler serves build() as JSON to callers that present the bearer token. The document carries private keys,
+// JSON serves build() as JSON to callers that present the bearer token. The document carries private keys,
 // so a wrong token gets nothing and an empty configured token means nothing is served at all.
-func Handler(token string, build func(r *http.Request) (Config, error)) http.Handler {
+func JSON(token string, build func(r *http.Request) (any, error)) http.Handler {
 	want := []byte("Bearer " + token)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got := []byte(r.Header.Get("Authorization"))
@@ -100,7 +99,7 @@ func Handler(token string, build func(r *http.Request) (Config, error)) http.Han
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		if r.Method != http.MethodGet || strings.TrimSuffix(r.URL.Path, "/") != "/traefik" {
+		if r.Method != http.MethodGet {
 			http.NotFound(w, r)
 			return
 		}
@@ -112,6 +111,37 @@ func Handler(token string, build func(r *http.Request) (Config, error)) http.Han
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
-		json.NewEncoder(w).Encode(Build(cfg))
+		json.NewEncoder(w).Encode(cfg)
+	})
+}
+
+// routerTLS is the TLS part of a database's router: the engine's ALPN option when it needs one (libpq 17 sends the
+// ALPN "postgresql" and fails without an answer; Redis and MongoDB clients offer none).
+func routerTLS(d DB) map[string]any {
+	if d.ALPN == "" {
+		return map[string]any{}
+	}
+	return map[string]any{"options": d.EntryPoint}
+}
+
+// alpnOptions defines one TLS option per entry point whose engine needs an ALPN answer.
+func alpnOptions(dbs []DB) map[string]any {
+	opts := map[string]any{}
+	for _, d := range dbs {
+		if d.ALPN != "" {
+			opts[d.EntryPoint] = map[string]any{"alpnProtocols": []string{d.ALPN}}
+		}
+	}
+	return opts
+}
+
+// Handler serves Traefik's dynamic configuration (see JSON).
+func Handler(token string, build func(r *http.Request) (Config, error)) http.Handler {
+	return JSON(token, func(r *http.Request) (any, error) {
+		c, err := build(r)
+		if err != nil {
+			return nil, err
+		}
+		return Build(c), nil
 	})
 }

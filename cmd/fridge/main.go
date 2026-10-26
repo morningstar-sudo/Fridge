@@ -191,9 +191,13 @@ func runServer() error {
 	a.Sched.Start()
 
 	srv := &http.Server{Addr: listen, Handler: api.New(a, au, api.Options{TrustedProxy: api.TrustCIDRs(prefixes), Web: web.Handler()}), ReadHeaderTimeout: 10 * time.Second}
-	// Traefik's configuration endpoint: only on the edge network, bearer token, carries the private keys of the routes.
-	prov := &http.Server{Addr: providerListen, ReadHeaderTimeout: 10 * time.Second,
-		Handler: proxy.Handler(os.Getenv("FRIDGE_PROVIDER_TOKEN"), func(r *http.Request) (proxy.Config, error) { return a.ProxyConfig(r.Context()) })}
+	// The configuration endpoints of Traefik (/traefik) and of the MySQL router (/mysql): only on the edge network, bearer token,
+	// and they carry private keys.
+	token := os.Getenv("FRIDGE_PROVIDER_TOKEN")
+	pm := http.NewServeMux()
+	pm.Handle("GET /traefik", proxy.Handler(token, func(r *http.Request) (proxy.Config, error) { return a.ProxyConfig(r.Context()) }))
+	pm.Handle("GET /mysql", proxy.JSON(token, func(r *http.Request) (any, error) { return a.MySQLRouterConfig(r.Context()) }))
+	prov := &http.Server{Addr: providerListen, ReadHeaderTimeout: 10 * time.Second, Handler: pm}
 	errc := make(chan error, 2)
 	go func() { errc <- srv.ListenAndServe() }()
 	go func() { errc <- prov.ListenAndServe() }()

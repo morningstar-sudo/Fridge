@@ -48,7 +48,7 @@ var base = Config{Allowlist: []string{"10.0.0.0/8", "203.0.113.0/24"}, APIBacken
 
 func TestBuildDatabaseRoute(t *testing.T) {
 	c := base
-	c.DBs = []DB{{ID: 7, EntryPoint: "pg", Domain: "abc.com", Backend: "fridge-edge-k1:5432", CertPEM: "CERT7", KeyPEM: "KEY7"}}
+	c.DBs = []DB{{ID: 7, EntryPoint: "pg", ALPN: "postgresql", Domain: "abc.com", Backend: "fridge-edge-k1:5432", CertPEM: "CERT7", KeyPEM: "KEY7"}}
 	doc := roundTrip(t, c)
 
 	if got := dig(t, doc, "tcp", "routers", "db-7", "rule"); got != "HostSNI(`abc.com`)" {
@@ -129,9 +129,6 @@ func TestHandlerAuth(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil || doc["http"] == nil {
 		t.Fatalf("body %s: %v", w.Body, err)
 	}
-	if w := get("/other", "Bearer s3cret-token"); w.Code != 404 {
-		t.Errorf("other path: %d", w.Code)
-	}
 }
 
 func TestHandlerWithoutTokenServesNothing(t *testing.T) {
@@ -153,5 +150,32 @@ func TestHandlerBuildErrorKeepsTraefikConfig(t *testing.T) {
 	h.ServeHTTP(w, r)
 	if w.Code != 503 {
 		t.Fatalf("%d", w.Code)
+	}
+}
+
+func TestBuildALPNOnlyForEnginesThatNeedIt(t *testing.T) {
+	c := base
+	c.DBs = []DB{
+		{ID: 1, EntryPoint: "pg", ALPN: "postgresql", Domain: "a.com", Backend: "x:5432", CertPEM: "C", KeyPEM: "K"},
+		{ID: 2, EntryPoint: "redis", Domain: "b.com", Backend: "y:5432", CertPEM: "C", KeyPEM: "K"},
+		{ID: 3, EntryPoint: "mongo", Domain: "c.com", Backend: "z:5432", CertPEM: "C", KeyPEM: "K"},
+	}
+	doc := roundTrip(t, c)
+	if got := dig(t, doc, "tcp", "routers", "db-1", "tls", "options"); got != "pg" {
+		t.Errorf("pg option = %v", got)
+	}
+	for _, id := range []string{"db-2", "db-3"} {
+		if _, ok := dig(t, doc, "tcp", "routers", id, "tls").(map[string]any)["options"]; ok {
+			t.Errorf("%s has a TLS option: its clients offer no ALPN", id)
+		}
+	}
+	if got := dig(t, doc, "tls", "options", "pg", "alpnProtocols", 0); got != "postgresql" {
+		t.Errorf("alpn = %v", got)
+	}
+	if opts := dig(t, doc, "tls", "options").(map[string]any); len(opts) != 1 {
+		t.Errorf("options = %v", opts)
+	}
+	if got := dig(t, doc, "tcp", "routers", "db-2", "entryPoints", 0); got != "redis" {
+		t.Errorf("entry point = %v", got)
 	}
 }

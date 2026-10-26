@@ -16,8 +16,11 @@ func TestResolveVersion(t *testing.T) {
 	if _, err := ResolveVersion("postgres", "99"); err == nil {
 		t.Fatal(`ResolveVersion("postgres","99") want error`)
 	}
-	if _, err := ResolveVersion("mysql", "8.4"); err == nil {
-		t.Fatal(`ResolveVersion("mysql","8.4") want error (not registered)`)
+	if _, err := ResolveVersion("oracle", "19"); err == nil {
+		t.Fatal(`ResolveVersion("oracle","19") want error (not registered)`)
+	}
+	if v, err := ResolveVersion("mysql", "8.4"); err != nil || v != "8.4" {
+		t.Fatalf(`ResolveVersion("mysql","8.4") = %q, %v`, v, err)
 	}
 }
 

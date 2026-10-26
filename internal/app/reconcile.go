@@ -54,7 +54,7 @@ func (a *App) Reconcile(ctx context.Context) error {
 			switch {
 			case !has || !st.DB:
 				problems[fmt.Sprintf("database %s has no service in the swarm", d.Name)] = true
-			case !st.Edge:
+			case !st.Edge && engineHasSidecar(d.Engine):
 				eng, _, err := engine.Get(d.Engine)
 				if err != nil {
 					continue
@@ -65,7 +65,7 @@ func (a *App) Reconcile(ctx context.Context) error {
 					problems[fmt.Sprintf("database %s has no edge sidecar and cannot get one: %v", d.Name, err)] = true
 					continue
 				}
-				err = a.RT.CreateNode(ctx, swarm.NodeSpec{Key: d.NodeKey, DBID: d.ID, HostID: d.HostID, Port: eng.Spec(p).Port, EdgeEnv: edgeEnv(tlsm), TLS: true})
+				err = a.RT.CreateNode(ctx, swarm.NodeSpec{Key: d.NodeKey, DBID: d.ID, HostID: d.HostID, Port: eng.Spec(p).Port, EdgeEnv: edgeEnv(tlsm), Upstream: eng.Upstream()})
 				if err != nil {
 					problems[fmt.Sprintf("database %s: repairing its edge sidecar failed: %v", d.Name, err)] = true
 					continue
@@ -112,4 +112,10 @@ func (a *App) Reconcile(ctx context.Context) error {
 		a.alertf(ctx, "%s", p)
 	}
 	return nil
+}
+
+// engineHasSidecar: every engine but the ones with their own router (MySQL, MariaDB) is reached through an edge sidecar.
+func engineHasSidecar(name string) bool {
+	eng, _, err := engine.Get(name)
+	return err == nil && eng.Upstream() != "none"
 }

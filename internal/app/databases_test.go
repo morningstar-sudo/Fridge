@@ -67,7 +67,7 @@ func TestCreateDatabaseValidation(t *testing.T) {
 		"domain dot": func(r *CreateRequest) { r.Domain = "a..com" },
 		"acme":       func(r *CreateRequest) { r.TLSMode = "acme" },
 		"tls":        func(r *CreateRequest) { r.TLSMode = "weird" },
-		"engine":     func(r *CreateRequest) { r.Engine = "mysql" },
+		"engine":     func(r *CreateRequest) { r.Engine = "oracle" },
 	}
 	for name, mut := range cases {
 		r := ok
@@ -304,7 +304,7 @@ func TestProvisionGivesEachNodeItsOwnCertificates(t *testing.T) {
 		t.Fatalf("runs = %d", len(rt.runs))
 	}
 	n1, n2 := rt.runs[0].Spec, rt.runs[1].Spec
-	if !n1.TLS || len(n1.Command) != 3 || n1.Command[0] != "sh" {
+	if n1.Upstream != "pg" || len(n1.Command) != 3 || n1.Command[0] != "sh" {
 		t.Fatalf("node 1 spec: %+v", n1)
 	}
 	envOf := func(env []string, k string) string {

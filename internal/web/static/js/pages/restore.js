@@ -2,15 +2,23 @@ import { api } from "../api.js";
 import { h, pageHead, btn, table, empty, status, fmtTime, fmtBytes, field, input, errorBox, withBusy, errToast } from "../ui.js";
 import { credentialFields } from "./creds.js";
 
-// The version in a key like "fridge/postgres-17/db/db-2026….dump", as a hint for the new node.
-const sourceVersion = (key) => /(?:^|\/)postgres-(\d+)(?:\/|$)/.exec(key)?.[1] || "";
+// The engine and version in a key like "fridge/postgres-17/db/db-2026….dump" (the "<engine>-<version>" path segment, else the
+// file extension): the node of a restore is built for them.
+const detect = (key) => {
+  const m = /(?:^|\/)(postgres|mysql|mariadb|mongo|redis)-(\d+(?:\.\d+)*)(?:\/|$)/.exec(key);
+  if (m) return { engine: m[1], version: m[2] };
+  if (key.endsWith(".dump")) return { engine: "postgres", version: "" };
+  if (key.endsWith(".rdb")) return { engine: "redis", version: "" };
+  if (key.endsWith(".archive.gz")) return { engine: "mongo", version: "" };
+  return { engine: "", version: "" }; // a plain .sql file: which engine is the user's to say
+};
 
 export default async function restore(ctx) {
   const timers = [];
   ctx.onCleanup(() => timers.forEach(clearTimeout));
   const [dests, engines, domains] = await Promise.all([api("GET", "/api/destinations"), api("GET", "/api/engines"), api("GET", "/api/domains")]);
   const mine = domains.filter((d) => d.owner === ctx.me.username);
-  const versions = engines.find((e) => e.name === "postgres")?.versions || [];
+  const versionsOf = (name) => engines.find((e) => e.name === name)?.versions || [];
 
   const destSel = h("select", { class: "form-select", name: "destination" }, h("option", { value: "" }, "Chọn destination…"), dests.map((d) => h("option", { value: String(d.id) }, d.name + (d.shared ? " (dùng chung)" : ""))));
   const q = input({ name: "q", placeholder: "Tìm theo tên file" });
@@ -60,7 +68,12 @@ export default async function restore(ctx) {
   function pick(key) {
     chosen = { dest: Number(destSel.value), key };
     const creds = credentialFields(ctx.me.username);
-    const ver = h("select", { class: "form-select", name: "version" }, h("option", { value: "" }, "Theo version của file"), versions.map((v) => h("option", { value: v, selected: v === sourceVersion(key) }, v)));
+    const src = detect(key);
+    const engSel = h("select", { class: "form-select", name: "engine" }, ["postgres", "mysql", "mariadb"].map((e) => h("option", { value: e }, e)));
+    const ver = h("select", { class: "form-select", name: "version" });
+    const fillVersions = () => ver.replaceChildren(h("option", { value: "" }, "Theo version của file"), versionsOf(src.engine || engSel.value).map((v) => h("option", { value: v, selected: v === src.version || (src.version && v.startsWith(src.version + ".") && src.engine !== "postgres") }, v)));
+    fillVersions();
+    engSel.addEventListener("change", fillVersions);
     const dom = h("select", { class: "form-select", name: "domain" }, mine.map((d) => h("option", { value: d.name }, d.name)));
     const err = errorBox();
     const go = h("button", { type: "submit", class: "btn btn-primary" }, "Restore");
@@ -71,6 +84,7 @@ export default async function restore(ctx) {
       "form",
       { novalidate: true },
       h("p", { class: "mb-3" }, "File: ", h("span", { class: "mono" }, key)),
+      h("p", { class: "mb-3" }, "Loại database: ", src.engine ? h("strong", {}, src.engine) : ["không đoán được từ tên file — chọn: ", field("Engine", engSel)]),
       h("div", { class: "row" }, h("div", { class: "col-md-6" }, creds.nodes[0]), h("div", { class: "col-md-3" }, field("Domain", dom)), h("div", { class: "col-md-3" }, field("Version", ver))),
       mine.length ? null : h("div", { class: "alert alert-warning" }, "Bạn chưa đăng ký domain nào. ", h("a", { href: "#/domains" }, "Đăng ký domain"), " trước."),
       creds.nodes.slice(1),
@@ -93,7 +107,9 @@ export default async function restore(ctx) {
         if (v.db_user) nw.db_user = v.db_user;
         if (v.db_password) nw.db_password = v.db_password;
         try {
-          const r = await api("POST", "/api/restores", { destination_id: chosen.dest, key: chosen.key, new: nw });
+          const body = { destination_id: chosen.dest, key: chosen.key, new: nw };
+          if (!src.engine) body.engine = engSel.value;
+          const r = await api("POST", "/api/restores", body);
           watchRestore(status_, r.id);
         } catch (e2) {
           err.set(e2.message.replace(/^invalid: /, ""));
@@ -106,7 +122,7 @@ export default async function restore(ctx) {
     await withBusy(button, async () => {
       try {
         const c = await api("POST", "/api/dump-checks", { destination_id: chosen.dest, key: chosen.key });
-        out.replaceChildren(h("div", {}, status("running", { pulse: true }), " đang kiểm tra bằng pg_restore…"));
+        out.replaceChildren(h("div", {}, status("running", { pulse: true }), " đang kiểm tra file…"));
         const poll = async () => {
           const r = await api("GET", "/api/dump-checks/" + c.id);
           if (!ctx.alive()) return;

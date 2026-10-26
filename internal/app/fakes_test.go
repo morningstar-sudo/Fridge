@@ -41,6 +41,8 @@ type jobCall struct {
 	Spec     job.Spec
 	Networks []string
 	NodeID   string
+	Volumes  []string
+	User     string
 }
 
 // fakeRuntime is a swarm that only keeps notes. Jobs succeed and, for a dump, leave a small object in objs,
@@ -124,7 +126,7 @@ func (f *fakeRuntime) RunJob(ctx context.Context, j swarm.JobSpec) (swarm.JobRes
 		}
 	}
 	f.mu.Lock()
-	f.jobs = append(f.jobs, jobCall{Name: j.Name, Spec: spec, Networks: j.Networks, NodeID: j.NodeID})
+	f.jobs = append(f.jobs, jobCall{Name: j.Name, Spec: spec, Networks: j.Networks, NodeID: j.NodeID, Volumes: j.Volumes, User: j.User})
 	fn := f.jobFn
 	f.mu.Unlock()
 	if fn != nil {

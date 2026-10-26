@@ -184,7 +184,7 @@ func TestForwardTLSNeedsMaterial(t *testing.T) {
 	t.Setenv("FRIDGE_TLS_KEY", "")
 	t.Setenv("FRIDGE_TLS_CA", "")
 	var b bytes.Buffer
-	if code := runForward([]string{"--listen", "127.0.0.1:0", "--to", "db:5432", "--tls"}, &b); code != 2 || !strings.Contains(b.String(), "certificate") {
+	if code := runForward([]string{"--listen", "127.0.0.1:0", "--to", "db:5432", "--upstream", "pg"}, &b); code != 2 || !strings.Contains(b.String(), "certificate") {
 		t.Fatalf("%d %q", code, b.String())
 	}
 }

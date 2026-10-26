@@ -112,24 +112,27 @@ func (a *App) StartRestore(ctx context.Context, req RestoreRequest) (store.Resto
 		return store.Restore{}, invalid("%v", err)
 	}
 	var hdr dumpcheck.Header
-	if srcEng == "postgres" { // vet the file's first bytes before any node is built for it
-		head, err := objs.ReadHead(ctx, req.Key, dumpcheck.HeadSize)
-		if err != nil {
-			return store.Restore{}, err
-		}
-		if hdr, err = dumpcheck.Inspect(req.Key, head); err != nil {
-			return store.Restore{}, invalid("%v", err)
-		}
-		if hdr.ServerVersion != "" { // the file's own word beats the key and the metadata
-			srcVer = hdr.ServerVersion
-		}
+	head, err := objs.ReadHead(ctx, req.Key, dumpcheck.HeadSize) // vet the file's first bytes before any node is built for it
+	if err != nil {
+		return store.Restore{}, err
+	}
+	if srcEng == "postgres" {
+		hdr, err = dumpcheck.Inspect(req.Key, head)
+	} else {
+		hdr, err = dumpcheck.InspectOther(srcEng, req.Key, head)
+	}
+	if err != nil {
+		return store.Restore{}, invalid("%v", err)
+	}
+	if hdr.ServerVersion != "" { // the file's own word beats the key and the metadata
+		srcVer = hdr.ServerVersion
 	}
 	nr.Engine = srcEng
+	if rel, _ := eng.Preload(req.Key); rel != "" { // loaded into the volume before the node starts, not into a running one
+		nr.Preload = &Preload{DestinationID: req.DestinationID, Key: req.Key}
+	}
 	if nr.Version == "" && srcVer != "" {
-		want := srcVer
-		if hdr.ServerVersion != "" { // the catalog lists Postgres majors only
-			want = strconv.Itoa(dumpcheck.Major(srcVer))
-		}
+		want := catalogVersion(srcEng, srcVer)
 		if v, err := engine.ResolveVersion(srcEng, want); err == nil {
 			nr.Version = v
 		}
@@ -174,12 +177,12 @@ func (a *App) StartRestore(ctx context.Context, req RestoreRequest) (store.Resto
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		a.runRestore(r, nr, r.Log)
+		a.runRestore(r, nr, r.Log, meta["fridge-db"])
 	}()
 	return r, nil
 }
 
-func (a *App) runRestore(r store.Restore, nr CreateRequest, prefixLog string) {
+func (a *App) runRestore(r store.Restore, nr CreateRequest, prefixLog, srcDB string) {
 	ctx := context.Background() // outlives the request
 	timeout := a.backupTimeout
 	if timeout == 0 {
@@ -199,7 +202,11 @@ func (a *App) runRestore(r store.Restore, nr CreateRequest, prefixLog string) {
 		if err := a.Store.SetRestoreTarget(ctx, r.ID, d.ID); err != nil {
 			return err
 		}
+		if nr.Preload != nil { // the node already started with the file in its volume
+			return nil
+		}
 		params, err := a.jobParams(runCtx, d)
+		params.SourceDB = srcDB
 		if err != nil {
 			return err
 		}
@@ -232,4 +239,21 @@ func (a *App) runRestore(r store.Restore, nr CreateRequest, prefixLog string) {
 	if a.Alert != nil {
 		a.Alert(ctx, fmt.Sprintf("restore failed: %s: %v", r.S3Key, err))
 	}
+}
+
+// catalogVersion is the catalog version a dump made by srcVer belongs to: the major for PostgreSQL ("17.2" is "17"),
+// major.minor for the others ("8.4.0" is "8.4", "11.4.2-MariaDB" is "11.4").
+func catalogVersion(eng, srcVer string) string {
+	if eng == "postgres" {
+		return strconv.Itoa(dumpcheck.Major(srcVer))
+	}
+	parts := strings.SplitN(srcVer, ".", 3)
+	if len(parts) < 2 {
+		return srcVer
+	}
+	minor := parts[1]
+	if i := strings.IndexFunc(minor, func(r rune) bool { return r < '0' || r > '9' }); i >= 0 {
+		minor = minor[:i]
+	}
+	return parts[0] + "." + minor
 }

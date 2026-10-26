@@ -17,8 +17,8 @@ import (
 // StartDumpCheck begins the deep check ("Kiểm tra kỹ") of a backup file in the background.
 // The caller has already decided that the user may touch key.
 func (a *App) StartDumpCheck(ctx context.Context, destID int64, key string, startedBy int64) (store.DumpCheck, error) {
-	if !strings.HasSuffix(key, ".dump") && !strings.HasSuffix(key, ".sql") && !strings.HasSuffix(key, ".sql.gz") {
-		return store.DumpCheck{}, invalid("unsupported file type (want .dump, .sql or .sql.gz)")
+	if !restorableKey(key) {
+		return store.DumpCheck{}, invalid("unsupported file type (want %s)", strings.Join(backupExts, ", "))
 	}
 	objs, _, err := a.objects(ctx, destID)
 	if err != nil {
@@ -75,11 +75,16 @@ func (a *App) checkFile(ctx context.Context, c store.DumpCheck, timeout time.Dur
 	if err != nil {
 		return nil, "", err
 	}
-	_, info, err := engine.Get("postgres")
+	eng, _ := DetectSource(nil, c.S3Key) // from the key: "<engine>-<version>" path segment or file extension
+	if eng == "" {
+		eng = "postgres" // plain .sql and everything undecided are looked at as before: a pg_dump file
+	}
+	_, info, err := engine.Get(eng)
 	if err != nil {
 		return nil, "", err
 	}
-	spec := job.Spec{Op: "check", Engine: "postgres", Params: engine.Params{Version: info.Versions[len(info.Versions)-1]}, S3: s3, Guard: guard, Key: c.S3Key}
+	// the newest client reads every older archive; the job needs only S3, never the database network
+	spec := job.Spec{Op: "check", Engine: eng, Params: engine.Params{Version: info.Versions[len(info.Versions)-1]}, S3: s3, Guard: guard, Key: c.S3Key}
 	return a.runJob(ctx, "check", spec, []string{a.EgressNetwork}, timeout)
 }
 
@@ -92,4 +97,16 @@ func reason(stderr string, err error) string {
 		}
 	}
 	return err.Error()
+}
+
+// backupExts are the file types Fridge can check and restore: Postgres, MySQL/MariaDB, MongoDB and Redis dumps.
+var backupExts = []string{".dump", ".sql", ".sql.gz", ".archive.gz", ".rdb"}
+
+func restorableKey(key string) bool {
+	for _, e := range backupExts {
+		if strings.HasSuffix(key, e) {
+			return true
+		}
+	}
+	return false
 }

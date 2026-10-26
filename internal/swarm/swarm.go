@@ -156,7 +156,7 @@ type NodeSpec struct {
 	Healthcheck []string
 	Command     []string // replaces the image's entrypoint (nil keeps it)
 	EdgeEnv     []string // the sidecar's environment: its client certificate and the CA (with TLS)
-	TLS         bool     // the sidecar speaks TLS with a client certificate to the database
+	Upstream    string   // how the sidecar speaks to the database: "pg", "tls" or "none" (no sidecar at all)
 }
 
 type NodeRef struct {
@@ -204,6 +204,9 @@ func (c *Client) CreateNode(ctx context.Context, n NodeSpec) error {
 	}
 	if err := c.createService(ctx, spec); err != nil {
 		return fmt.Errorf("create database service: %w", err)
+	}
+	if n.Upstream == "none" { // the engine has its own router (MySQL/MariaDB): no sidecar
+		return nil
 	}
 	edge := EdgeService(n.Key)
 	espec := swarm.ServiceSpec{
@@ -393,6 +396,8 @@ type JobSpec struct {
 	Networks   []string
 	NodeID     string   // "" = any node
 	Binds      []string // "host:container"
+	Volumes    []string // "name:container": a local volume of the host the job is pinned to
+	User       string   // run as this user ("" = the image's)
 	Labels     map[string]string
 	Timeout    time.Duration
 }
@@ -427,6 +432,11 @@ func (c *Client) RunJob(ctx context.Context, j JobSpec) (JobResult, error) {
 	if j.NodeID != "" {
 		spec.TaskTemplate.Placement = pin(j.NodeID)
 	}
+	for _, v := range j.Volumes {
+		src, dst, _ := strings.Cut(v, ":")
+		spec.TaskTemplate.ContainerSpec.Mounts = append(spec.TaskTemplate.ContainerSpec.Mounts, mount.Mount{Type: mount.TypeVolume, Source: src, Target: dst})
+	}
+	spec.TaskTemplate.ContainerSpec.User = j.User
 	for _, b := range j.Binds {
 		src, dst, _ := strings.Cut(b, ":")
 		spec.TaskTemplate.ContainerSpec.Mounts = append(spec.TaskTemplate.ContainerSpec.Mounts, mount.Mount{Type: mount.TypeBind, Source: src, Target: dst})
@@ -546,8 +556,8 @@ func (c *Client) EdgeNetwork() string { return c.cfg.EdgeNetwork }
 
 func edgeArgs(db string, n NodeSpec) []string {
 	args := []string{"forward", "--listen", fmt.Sprintf(":%d", EdgePort), "--to", fmt.Sprintf("%s:%d", db, n.Port)}
-	if n.TLS {
-		args = append(args, "--tls", "--server-name", db)
+	if n.Upstream == "pg" || n.Upstream == "tls" {
+		args = append(args, "--upstream", n.Upstream, "--server-name", db)
 	}
 	return args
 }

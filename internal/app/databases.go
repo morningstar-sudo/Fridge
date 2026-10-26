@@ -18,10 +18,17 @@ import (
 	"fridge/internal/swarm"
 )
 
+// Preload is a backup file to put in the data volume of a node before it starts (see engine.Engine.Preload).
+type Preload struct {
+	DestinationID int64
+	Key           string
+}
+
 type CreateRequest struct {
 	Engine, Name, Domain, Version, TLSMode string
-	OwnerID                                int64  // required, > 0
-	DBUser, DBPassword                     string // user-chosen suffix / password; empty = derived / random
+	OwnerID                                int64    // required, > 0
+	DBUser, DBPassword                     string   // user-chosen suffix / password; empty = derived / random
+	Preload                                *Preload // restore into a new node: a file the node must start with (Redis)
 }
 
 var (
@@ -104,7 +111,7 @@ func (a *App) CreateDatabase(ctx context.Context, req CreateRequest) (store.Data
 		return store.Database{}, err
 	}
 
-	if err := a.provision(ctx, &d, eng, info, pw, adminPW); err != nil {
+	if err := a.provision(ctx, &d, eng, info, pw, adminPW, req.Preload); err != nil {
 		a.removeNode(ctx, d)
 		return store.Database{}, err
 	}
@@ -123,7 +130,7 @@ func (a *App) CreateDatabase(ctx context.Context, req CreateRequest) (store.Data
 // provision starts the node (its overlay network, the pinned database service and the edge sidecar), then creates the
 // non-superuser app user owning the database through the sidecar, (its TLS material is issued first; Traefik learns the route by polling ProxyConfig).
 // Passwords travel in the service environment (container init) and on the SQL connection, never in argv.
-func (a *App) provision(ctx context.Context, d *store.Database, eng engine.Engine, info engine.Info, pw, adminPW string) error {
+func (a *App) provision(ctx context.Context, d *store.Database, eng engine.Engine, info engine.Info, pw, adminPW string, pre *Preload) error {
 	p := nodeParams(*d)
 	p.Password, p.AdminPassword = pw, adminPW
 	if err := a.issueNodeTLS(ctx, *d); err != nil {
@@ -135,10 +142,15 @@ func (a *App) provision(ctx context.Context, d *store.Database, eng engine.Engin
 	}
 	p.TLS = tlsm
 	spec := eng.Spec(p)
+	if pre != nil {
+		if err := a.preloadFile(ctx, *d, eng, pre); err != nil {
+			return fmt.Errorf("load the backup into the volume: %w", err)
+		}
+	}
 	err = a.RT.CreateNode(ctx, swarm.NodeSpec{
 		Key: d.NodeKey, DBID: d.ID, HostID: d.HostID, Image: spec.Image, Env: spec.Env,
 		VolumeName: d.Volume, VolumePath: spec.VolumePath, Port: spec.Port, Healthcheck: spec.Healthcheck,
-		Command: spec.Command, EdgeEnv: edgeEnv(tlsm), TLS: true,
+		Command: spec.Command, EdgeEnv: edgeEnv(tlsm), Upstream: eng.Upstream(),
 	})
 	if err != nil {
 		return fmt.Errorf("create node: %w", err)

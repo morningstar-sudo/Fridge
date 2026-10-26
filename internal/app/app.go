@@ -63,6 +63,7 @@ type App struct {
 	Registry Registry // nil: remote versions are not looked up
 	pulls    pulls
 	rec      reconciler
+	front    mysqlFront
 }
 
 // auditSystem records an action taken by Fridge itself (scheduler, retention).

@@ -137,3 +137,49 @@ func TestTextChecker(t *testing.T) {
 		t.Error("invalid UTF-8 accepted")
 	}
 }
+
+func gzipBytes(t *testing.T, b []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	zw.Write(b)
+	zw.Close()
+	return buf.Bytes()
+}
+
+func TestInspectOther(t *testing.T) {
+	mysqlDump := []byte("-- MySQL dump 10.13  Distrib 8.4.0, for Linux (x86_64)\n--\n-- Host: db    Database: shop\n-- ------------------------------------------------------\n-- Server version\t8.4.0\n\n/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;\nCREATE TABLE t (a int);\n")
+	archive := gzipBytes(t, append(ArchiveMagic[:], make([]byte, 64)...))
+	cases := []struct {
+		name, eng, key string
+		head           []byte
+		wantErr        string
+		wantVer        string
+	}{
+		{"rdb", "redis", "x.rdb", []byte("REDIS0011\xfa\x09redis-ver"), "", ""},
+		{"rdb with another signature", "redis", "x.rdb", []byte("PGDMP\x01\x0e"), "missing REDIS", ""},
+		{"rdb with another extension", "redis", "x.dump", []byte("REDIS0011"), "unsupported file type", ""},
+		{"mongo archive", "mongo", "a.archive.gz", archive, "", ""},
+		{"mongo: gzip of something else", "mongo", "a.archive.gz", gzipBytes(t, []byte("not an archive at all")), "archive magic", ""},
+		{"mongo: not gzip", "mongo", "a.archive.gz", []byte("plain"), "not a gzip", ""},
+		{"mysql gz", "mysql", "a.sql.gz", gzipBytes(t, mysqlDump), "", "8.4.0"},
+		{"mysql plain", "mysql", "a.sql", mysqlDump, "", "8.4.0"},
+		{"mariadb", "mariadb", "a.sql.gz", gzipBytes(t, []byte("/*M!999999 enable the sandbox mode */\n-- MariaDB dump 10.19  Distrib 11.4.2-MariaDB\n-- Server version\t11.4.2-MariaDB\nCREATE TABLE t(a int);\n")), "", "11.4.2-MariaDB"},
+		{"mysql: a pg_dump file", "mysql", "a.sql", []byte("-- PostgreSQL database dump\nSET statement_timeout = 0;\n"), "not a mysqldump", ""},
+		{"mysql: binary", "mysql", "a.sql", []byte("-- MySQL dump\n\x00\x01"), "NUL", ""},
+		{"empty", "redis", "x.rdb", nil, "empty", ""},
+		{"unknown engine", "oracle", "x.dmp", []byte("x"), "no file checks", ""},
+	}
+	for _, c := range cases {
+		h, err := InspectOther(c.eng, c.key, c.head)
+		if c.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("%s: err = %v, want %q", c.name, err, c.wantErr)
+			}
+			continue
+		}
+		if err != nil || h.ServerVersion != c.wantVer {
+			t.Errorf("%s: %+v %v", c.name, h, err)
+		}
+	}
+}

@@ -25,8 +25,8 @@ func runForward(args []string, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	listen := fs.String("listen", ":5432", "address to listen on")
 	to := fs.String("to", "", "host:port to relay to (required)")
-	useTLS := fs.Bool("tls", false, "speak PostgreSQL's SSLRequest + TLS to the target with the client certificate in $FRIDGE_TLS_CERT/$FRIDGE_TLS_KEY, trusting $FRIDGE_TLS_CA")
-	name := fs.String("server-name", "", "with --tls: the name the target's certificate must carry (default: the host of --to)")
+	mode := fs.String("upstream", "plain", "how to speak to the target: plain, pg (PostgreSQL's SSLRequest, then TLS) or tls (TLS at once); the TLS modes present the client certificate in $FRIDGE_TLS_CERT/$FRIDGE_TLS_KEY and trust $FRIDGE_TLS_CA")
+	name := fs.String("server-name", "", "with a TLS upstream: the name the target's certificate must carry (default: the host of --to)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -35,7 +35,11 @@ func runForward(args []string, stderr io.Writer) int {
 		return 2
 	}
 	up := plainUpstream(*to)
-	if *useTLS {
+	if *mode != "plain" && *mode != "pg" && *mode != "tls" {
+		fmt.Fprintf(stderr, "forward: --upstream %q is not plain, pg or tls\n", *mode)
+		return 2
+	}
+	if *mode != "plain" {
 		host, _, err := net.SplitHostPort(*to)
 		if err != nil {
 			fmt.Fprintln(stderr, "forward: --to:", err)
@@ -49,7 +53,11 @@ func runForward(args []string, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "forward:", err)
 			return 2
 		}
-		up = pgTLSUpstream(*to, cfg)
+		if *mode == "pg" {
+			up = pgTLSUpstream(*to, cfg)
+		} else {
+			up = tlsUpstream(*to, cfg)
+		}
 	}
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
@@ -110,6 +118,24 @@ type upstream func() (net.Conn, error)
 
 func plainUpstream(to string) upstream {
 	return func() (net.Conn, error) { return net.DialTimeout("tcp", to, 5*time.Second) }
+}
+
+// tlsUpstream connects with TLS from the first byte (Redis, MongoDB): plain TCP in, TLS with the client certificate out.
+func tlsUpstream(to string, cfg *tls.Config) upstream {
+	return func() (net.Conn, error) {
+		c, err := (&net.Dialer{Timeout: 5 * time.Second}).Dial("tcp", to)
+		if err != nil {
+			return nil, err
+		}
+		tc := tls.Client(c, cfg)
+		c.SetDeadline(time.Now().Add(10 * time.Second))
+		if err := tc.Handshake(); err != nil {
+			c.Close()
+			return nil, err
+		}
+		c.SetDeadline(time.Time{})
+		return tc, nil
+	}
 }
 
 // pgSSLRequest is the 8-byte message that asks a PostgreSQL server to switch to TLS.

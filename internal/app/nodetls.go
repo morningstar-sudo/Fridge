@@ -125,6 +125,9 @@ func (a *App) signingCA(ctx context.Context, d store.Database) (*pki.CA, error) 
 
 // DatabaseCA is the CA certificate (PEM) a client trusts to verify d's server certificate.
 func (a *App) DatabaseCA(ctx context.Context, d store.Database) (string, error) {
+	if _, info, err := engine.Get(d.Engine); err == nil && info.Route == "mysql" {
+		return string(a.CA.CertPEM()), nil // MySQL has no SNI: every client sees the one frontend certificate, signed by the instance CA
+	}
 	t, err := a.Store.GetDBTLS(ctx, d.ID)
 	if errors.Is(err, store.ErrNotFound) {
 		return string(a.CA.CertPEM()), nil // a node without node TLS is served by the instance CA's route certificate

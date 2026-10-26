@@ -42,13 +42,14 @@ type Guard struct {
 }
 
 type Spec struct {
-	Op     string // "dump" | "restore" | "check"
+	Op     string // "dump" | "restore" | "check" | "exec" | "preload"
 	Params engine.Params
 	Engine string
 	S3     S3
 	Key    string
 	Meta   map[string]string // dump: metadata stored with the object
 	Guard  *Guard
+	Script string // exec: what the admin shell reads on stdin (it holds passwords: it travels in the spec like the rest)
 
 	tlsDir string // where Run put the node's client certificate (not part of the spec)
 }
@@ -111,6 +112,10 @@ func Run(ctx context.Context, s Spec, stdout, stderr io.Writer) int {
 		err = dump(ctx, s, stdout, stderr)
 	case "restore":
 		err = restore(ctx, s, stderr)
+	case "exec":
+		err = execScript(ctx, s, stderr)
+	case "preload":
+		err = preload(ctx, s, stderr)
 	case "check":
 		err = check(ctx, s, stdout, stderr)
 	default:
@@ -138,10 +143,10 @@ func pgBin(version, name string) string {
 
 func command(ctx context.Context, s Spec, argv []string, stderr io.Writer) *exec.Cmd {
 	c := exec.CommandContext(ctx, pgBin(s.Params.Version, argv[0]), argv[1:]...)
-	c.Env = append(os.Environ(), "PGPASSWORD="+s.Params.AdminPassword)
-	if s.tlsDir != "" { // the database takes only a client holding this node's certificate, and the client checks the server's name
-		c.Env = append(c.Env, "PGSSLMODE=verify-full", "PGSSLCERT="+filepath.Join(s.tlsDir, "client.crt"),
-			"PGSSLKEY="+filepath.Join(s.tlsDir, "client.key"), "PGSSLROOTCERT="+filepath.Join(s.tlsDir, "ca.crt"))
+	p := s.Params
+	p.TLSDir = s.tlsDir
+	if eng, _, err := engine.Get(s.Engine); err == nil {
+		c.Env = append(os.Environ(), eng.ClientEnv(p)...)
 	}
 	c.Stderr = stderr
 	return c
@@ -158,10 +163,21 @@ func dump(ctx context.Context, s Spec, stdout, stderr io.Writer) error {
 	}
 	c := command(ctx, s, eng.DumpCmd(s.Params), stderr)
 	pr, pw := io.Pipe()
-	c.Stdout = pw
+	var sink io.Writer = pw
+	var gz *gzip.Writer
+	if eng.DumpGzip() { // the tool writes plain text; the object is compressed
+		gz = gzip.NewWriter(pw)
+		sink = gz
+	}
+	c.Stdout = sink
 	done := make(chan error, 1)
 	go func() {
 		err := c.Run()
+		if gz != nil {
+			if cerr := gz.Close(); err == nil {
+				err = cerr
+			}
+		}
 		if err != nil {
 			err = fmt.Errorf("dump failed: %w", err)
 		}
@@ -211,6 +227,9 @@ func restore(ctx context.Context, s Spec, stderr io.Writer) error {
 	if setRole { // objects of a plain SQL file must belong to the app user, not the superuser
 		in = io.MultiReader(strings.NewReader("SET ROLE "+engine.QuoteIdent(s.Params.User)+";\n"), in)
 	}
+	if f := eng.RestoreFilter(); f != nil {
+		in = f(in)
+	}
 	c := command(ctx, s, argv, stderr)
 	c.Stdin = in
 	if err := c.Run(); err != nil {
@@ -241,6 +260,9 @@ func check(ctx context.Context, s Spec, stdout, stderr io.Writer) (err error) {
 	head, err := objs.ReadHead(ctx, s.Key, dumpcheck.HeadSize)
 	if err != nil {
 		return fmt.Errorf("read head: %w", err)
+	}
+	if s.Engine != "" && s.Engine != "postgres" {
+		return checkOther(ctx, s, objs, head, res)
 	}
 	hdr, err := dumpcheck.Inspect(s.Key, head)
 	if err != nil {
@@ -342,7 +364,7 @@ func writeTLS(t *engine.TLS) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for name, content := range map[string]string{"client.crt": t.ClientCert, "client.key": t.ClientKey, "ca.crt": t.CA} {
+	for name, content := range map[string]string{"client.crt": t.ClientCert, "client.key": t.ClientKey, "client.pem": t.ClientCert + t.ClientKey, "ca.crt": t.CA} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
 			os.RemoveAll(dir)
 			return "", err
