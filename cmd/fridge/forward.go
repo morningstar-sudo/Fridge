@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,12 +25,31 @@ func runForward(args []string, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	listen := fs.String("listen", ":5432", "address to listen on")
 	to := fs.String("to", "", "host:port to relay to (required)")
+	useTLS := fs.Bool("tls", false, "speak PostgreSQL's SSLRequest + TLS to the target with the client certificate in $FRIDGE_TLS_CERT/$FRIDGE_TLS_KEY, trusting $FRIDGE_TLS_CA")
+	name := fs.String("server-name", "", "with --tls: the name the target's certificate must carry (default: the host of --to)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *to == "" {
 		fmt.Fprintln(stderr, "forward: --to is required")
 		return 2
+	}
+	up := plainUpstream(*to)
+	if *useTLS {
+		host, _, err := net.SplitHostPort(*to)
+		if err != nil {
+			fmt.Fprintln(stderr, "forward: --to:", err)
+			return 2
+		}
+		if *name == "" {
+			*name = host
+		}
+		cfg, err := clientTLS(os.Getenv("FRIDGE_TLS_CERT"), os.Getenv("FRIDGE_TLS_KEY"), os.Getenv("FRIDGE_TLS_CA"), *name)
+		if err != nil {
+			fmt.Fprintln(stderr, "forward:", err)
+			return 2
+		}
+		up = pgTLSUpstream(*to, cfg)
 	}
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
@@ -38,7 +59,7 @@ func runForward(args []string, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	log.Printf("forward %s -> %s", ln.Addr(), *to)
-	if err := serveForward(ctx, ln, *to); err != nil {
+	if err := serveForward(ctx, ln, up); err != nil {
 		fmt.Fprintln(stderr, "forward:", err)
 		return 1
 	}
@@ -46,7 +67,7 @@ func runForward(args []string, stderr io.Writer) int {
 }
 
 // serveForward relays until ctx ends; open connections are cut then.
-func serveForward(ctx context.Context, ln net.Listener, to string) error {
+func serveForward(ctx context.Context, ln net.Listener, up upstream) error {
 	var wg sync.WaitGroup
 	conns := map[net.Conn]struct{}{}
 	var mu sync.Mutex
@@ -79,16 +100,66 @@ func serveForward(ctx context.Context, ln net.Listener, to string) error {
 				delete(conns, c)
 				mu.Unlock()
 			}()
-			relay(c, to)
+			relay(c, up)
 		}()
 	}
 }
 
-func relay(c net.Conn, to string) {
-	defer c.Close()
-	up, err := net.DialTimeout("tcp", to, 5*time.Second)
+// upstream opens the connection to the database for one client.
+type upstream func() (net.Conn, error)
+
+func plainUpstream(to string) upstream {
+	return func() (net.Conn, error) { return net.DialTimeout("tcp", to, 5*time.Second) }
+}
+
+// pgSSLRequest is the 8-byte message that asks a PostgreSQL server to switch to TLS.
+var pgSSLRequest = []byte{0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f}
+
+// pgTLSUpstream connects the way libpq does for sslmode=verify-full with a client certificate. The client's own
+// bytes (already out of TLS: the proxy terminated it) are relayed through the encrypted connection afterwards.
+func pgTLSUpstream(to string, cfg *tls.Config) upstream {
+	return func() (net.Conn, error) {
+		c, err := net.DialTimeout("tcp", to, 5*time.Second)
+		if err != nil {
+			return nil, err
+		}
+		c.SetDeadline(time.Now().Add(10 * time.Second))
+		if _, err := c.Write(pgSSLRequest); err != nil {
+			c.Close()
+			return nil, err
+		}
+		var b [1]byte
+		if _, err := io.ReadFull(c, b[:]); err != nil || b[0] != 'S' {
+			c.Close()
+			return nil, fmt.Errorf("the database refused TLS (answer %q, %v)", b[0], err)
+		}
+		tc := tls.Client(c, cfg)
+		if err := tc.Handshake(); err != nil {
+			c.Close()
+			return nil, err
+		}
+		c.SetDeadline(time.Time{})
+		return tc, nil
+	}
+}
+
+func clientTLS(certPEM, keyPEM, caPEM, serverName string) (*tls.Config, error) {
+	pair, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
 	if err != nil {
-		log.Printf("forward: dial %s: %v", to, err) // the database may still be starting; the client just sees a reset
+		return nil, fmt.Errorf("client certificate: %w", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM([]byte(caPEM)) {
+		return nil, errors.New("FRIDGE_TLS_CA holds no certificate")
+	}
+	return &tls.Config{Certificates: []tls.Certificate{pair}, RootCAs: roots, ServerName: serverName, MinVersion: tls.VersionTLS12}, nil
+}
+
+func relay(c net.Conn, open upstream) {
+	defer c.Close()
+	up, err := open()
+	if err != nil {
+		log.Printf("forward: upstream: %v", err) // the database may still be starting; the client just sees a reset
 		return
 	}
 	defer up.Close()

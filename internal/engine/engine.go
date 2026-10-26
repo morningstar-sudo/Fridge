@@ -14,6 +14,16 @@ type Params struct {
 	Name, User, Password, Version, AdminUser, AdminPassword string
 	Host                                                    string // when set the client tools connect over TCP to Host:Port (jobs); otherwise over the local socket
 	Port                                                    int
+	TLS                                                     *TLS // the node's private TLS material; nil = a node without it (tests)
+}
+
+// TLS is what makes a node accept only its own sidecar and jobs: the database presents ServerCert/ServerKey and trusts
+// no client but the holder of ClientKey (ClientCert is its only trusted root). Clients verify the server against CA.
+type TLS struct {
+	ServerCert, ServerKey string
+	ClientCert, ClientKey string
+	CA                    string // PEM of the Fridge CA that signed ServerCert
+	ServerName            string // the name in ServerCert
 }
 
 // Spec describes the container an engine runs.
@@ -23,6 +33,7 @@ type Spec struct {
 	VolumePath  string
 	Port        int
 	Healthcheck []string
+	Command     []string // replaces the image's default command; nil keeps it
 }
 
 // Engine builds container specs, backup/restore commands and connection strings.

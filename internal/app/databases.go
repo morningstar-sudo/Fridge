@@ -121,15 +121,24 @@ func (a *App) CreateDatabase(ctx context.Context, req CreateRequest) (store.Data
 }
 
 // provision starts the node (its overlay network, the pinned database service and the edge sidecar), then creates the
-// non-superuser app user owning the database through the sidecar, and issues its TLS certificate (Traefik learns the route by polling ProxyConfig).
+// non-superuser app user owning the database through the sidecar, (its TLS material is issued first; Traefik learns the route by polling ProxyConfig).
 // Passwords travel in the service environment (container init) and on the SQL connection, never in argv.
 func (a *App) provision(ctx context.Context, d *store.Database, eng engine.Engine, info engine.Info, pw, adminPW string) error {
 	p := nodeParams(*d)
 	p.Password, p.AdminPassword = pw, adminPW
+	if err := a.issueNodeTLS(ctx, *d); err != nil {
+		return fmt.Errorf("issue node certificate: %w", err)
+	}
+	tlsm, err := a.nodeTLS(ctx, *d)
+	if err != nil {
+		return err
+	}
+	p.TLS = tlsm
 	spec := eng.Spec(p)
-	err := a.RT.CreateNode(ctx, swarm.NodeSpec{
+	err = a.RT.CreateNode(ctx, swarm.NodeSpec{
 		Key: d.NodeKey, DBID: d.ID, HostID: d.HostID, Image: spec.Image, Env: spec.Env,
 		VolumeName: d.Volume, VolumePath: spec.VolumePath, Port: spec.Port, Healthcheck: spec.Healthcheck,
+		Command: spec.Command, EdgeEnv: edgeEnv(tlsm), TLS: true,
 	})
 	if err != nil {
 		return fmt.Errorf("create node: %w", err)
@@ -143,9 +152,6 @@ func (a *App) provision(ctx context.Context, d *store.Database, eng engine.Engin
 	// Errors are not wrapped with the SQL: it carries the app user's password.
 	if err := a.execAsAdmin(actx, *d, eng, adminPW, eng.AppUserSQL(d.User, pw, d.Name)); err != nil {
 		return fmt.Errorf("create app user: %w", err)
-	}
-	if _, _, err := a.issueCert(ctx, d.ID, d.Domain); err != nil {
-		return fmt.Errorf("issue cert: %w", err)
 	}
 	return nil
 }

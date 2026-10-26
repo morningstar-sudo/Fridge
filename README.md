@@ -37,12 +37,19 @@ The password never leaves the browser (SCRAM-SHA-256 login).
 | `fridge` | the server labelled `fridge.control=true` | the API, the scheduler, the swarm client (needs a manager) |
 | `fridge-meta` | same server | metadata Postgres |
 | `fridge-db-<key>` | one server per database (`fridge.db=true`), pinned, with a local volume | the database |
-| `fridge-edge-<key>` | next to its database | forwards the shared edge network to the database's private network |
+| `fridge-edge-<key>` | next to its database | joins the shared edge network and the database network; relays to its database over TLS with that database's client certificate |
 
-Each database has its own encrypted overlay network that only its sidecar joins, so nodes cannot reach one another, the
-metadata database or the Fridge API. Dump, restore and the deep check of a backup run as one-shot services
-(`fridge-job` image, PostgreSQL clients 13–18) that join the database's network and the empty `fridge_egress` network,
-and talk to S3 themselves; nothing is streamed through Fridge.
+All databases share one internal, encrypted overlay (`fridge_db`: no internet, nothing else on it). What keeps one
+database away from another is the database itself: its `pg_hba.conf` accepts only a TLS client presenting that
+database's own certificate (`hostssl … scram-sha-256 clientcert=verify-ca`, the certificate being the only trusted
+root) and then the password, and rejects everything else, so a compromised database can reach the port of another but
+not get past the TLS handshake. Only that database's edge sidecar and the jobs working on it are given its client key.
+The Fridge API and the metadata database are not on `fridge_db` at all. The database presents one certificate, naming
+both its public domain and its service: it is the same certificate Traefik presents to clients, which is what lets
+SCRAM channel binding (libpq's default) work through the proxy. Node certificates last five years; Fridge alerts 60
+days before one expires. Dump, restore and the deep check of a backup run as one-shot services
+(`fridge-job` image, PostgreSQL clients 13–18) that join `fridge_db` and the empty `fridge_egress` network (the check
+job only the latter) and talk to S3 themselves; nothing is streamed through Fridge.
 
 **Add a server:** `docker swarm join …` on it, then on the manager `docker node update --label-add fridge.db=true <node>`
 so it may hold databases. New databases go to the labelled server holding the fewest. A database lives on one server with
@@ -121,7 +128,7 @@ versions in the registry. There is no Prune: nothing runs on the other servers t
 | `FRIDGE_LISTEN` | `:8080` | plain-HTTP API address inside the container (Traefik terminates TLS in front of it) |
 | `FRIDGE_PROVIDER_LISTEN` | `:8081` | Traefik's configuration endpoint (edge network only, token required) |
 | `FRIDGE_DATA` | `/data` | holds the internal CA (`<data>/ca`) and the web certificate (`<data>/web`) |
-| `FRIDGE_EDGE_NETWORK` / `FRIDGE_EGRESS_NETWORK` | `fridge_edge` / `fridge_egress` | shared overlays (Traefik, Fridge, sidecars / empty, open to the internet, for jobs) |
+| `FRIDGE_EDGE_NETWORK` / `FRIDGE_EGRESS_NETWORK` / `FRIDGE_DB_NETWORK` | `fridge_edge` / `fridge_egress` / `fridge_db` | shared overlays: Traefik, Fridge and sidecars / empty and open to the internet, for jobs / every database (internal) |
 | `FRIDGE_API_BACKEND` | `http://fridge:8080` | URL Traefik uses to reach the API |
 | `FRIDGE_ALERT_WEBHOOK` | empty (log only) | receives `POST {"text": "..."}` on failed backups/restores and swarm problems |
 | `TZ` | `UTC` | time zone the backup schedules' cron expressions run in |

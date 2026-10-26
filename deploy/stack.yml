@@ -68,6 +68,7 @@ services:
       FRIDGE_JOB_IMAGE: ${FRIDGE_JOB_IMAGE:-ghcr.io/morningstar-sudo/fridge-job:latest} # dump, restore, check
       FRIDGE_EDGE_NETWORK: fridge_edge
       FRIDGE_EGRESS_NETWORK: fridge_egress
+      FRIDGE_DB_NETWORK: fridge_db
       FRIDGE_LISTEN: ":8080"
       FRIDGE_PROVIDER_LISTEN: ":8081"
       FRIDGE_DATA: /data
@@ -110,4 +111,12 @@ networks:
   fridge_meta:
     driver: overlay
     internal: true
+    driver_opts: { encrypted: "" }
+  # Every database, its edge sidecar and the jobs that work on a database. No internet, nothing else on it. Isolation
+  # between databases is cryptographic: a database accepts only a client holding its own certificate.
+  fridge_db:
+    name: fridge_db
+    driver: overlay
+    internal: true
+    attachable: true
     driver_opts: { encrypted: "" }

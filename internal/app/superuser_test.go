@@ -85,7 +85,7 @@ func TestTwoUsersPerNode(t *testing.T) {
 		if !ok || j.Spec.Params.AdminUser != "su_"+key || j.Spec.Params.Name != "alice_"+n || j.Spec.Params.Host != swarm.DBService(key) || j.Spec.Params.AdminPassword != adminPW {
 			t.Fatalf("dump job = %+v", j)
 		}
-		if strings.Join(j.Networks, ",") != swarm.Network(key)+",fridge_egress" {
+		if strings.Join(j.Networks, ",") != "fridge_db,fridge_egress" {
 			t.Fatalf("dump job networks = %v", j.Networks)
 		}
 	}
@@ -248,7 +248,7 @@ func TestRestoreJobTargetsTheNewNode(t *testing.T) {
 			j.Spec.Params.Host != swarm.DBService(node) || j.Spec.S3.Bucket != "b" || j.Spec.S3.SecretKey != "sk" {
 			t.Fatalf("restore job = %+v", j)
 		}
-		if strings.Join(j.Networks, ",") != swarm.Network(node)+",fridge_egress" {
+		if strings.Join(j.Networks, ",") != "fridge_db,fridge_egress" {
 			t.Fatalf("restore job networks = %v", j.Networks)
 		}
 	}

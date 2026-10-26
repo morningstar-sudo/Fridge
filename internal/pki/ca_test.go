@@ -1,6 +1,7 @@
 package pki
 
 import (
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"os"
@@ -147,5 +148,44 @@ func TestIssueNames(t *testing.T) {
 		if _, _, err := ca.IssueNames(bad, time.Hour); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
+	}
+}
+
+func TestSelfSignedClientIsItsOwnAnchor(t *testing.T) {
+	certPEM, keyPEM, err := SelfSignedClient("edge-k1", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, _ := x509.ParseCertificate(pair.Certificate[0])
+	roots := x509.NewCertPool()
+	roots.AppendCertsFromPEM(certPEM)
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		t.Fatalf("does not verify against itself: %v", err)
+	}
+	other, _, _ := SelfSignedClient("edge-k2", time.Hour)
+	otherRoots := x509.NewCertPool()
+	otherRoots.AppendCertsFromPEM(other)
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: otherRoots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err == nil {
+		t.Fatal("verifies against another database's certificate")
+	}
+}
+
+func TestRemainingStopsAtTheCA(t *testing.T) {
+	ca, err := LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ca.Remaining(time.Hour); got != time.Hour {
+		t.Fatalf("short request: %v", got)
+	}
+	if got := ca.Remaining(100 * 365 * 24 * time.Hour); got >= caValidFor || got < caValidFor-48*time.Hour {
+		t.Fatalf("long request must stop just before the CA expires: %v", got)
+	}
+	if _, _, err := ca.IssueNames([]string{"x"}, ca.Remaining(100*365*24*time.Hour)); err != nil {
+		t.Fatalf("the longest allowed leaf is refused: %v", err)
 	}
 }

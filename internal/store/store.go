@@ -132,6 +132,7 @@ var migrations = []string{
 	`CREATE UNIQUE INDEX backups_s3_key ON backups(s3_key);`,
 	migration4,
 	migration5,
+	migration6,
 }
 
 func (s *Store) migrate(ctx context.Context) error { return s.migrateTo(ctx, len(migrations)) }

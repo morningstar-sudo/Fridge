@@ -14,7 +14,6 @@ import (
 	"fridge/internal/engine"
 	"fridge/internal/job"
 	"fridge/internal/store"
-	"fridge/internal/swarm"
 )
 
 var segRe = regexp.MustCompile(`^(postgres|mysql|mariadb|mongo|redis)-(\d+(?:\.\d+)*)$`)
@@ -208,9 +207,9 @@ func (a *App) runRestore(r store.Restore, nr CreateRequest, prefixLog string) {
 		if err != nil {
 			return err
 		}
-		// The job reads the file from S3 and loads it into the node over the node's own network.
+		// The job reads the file from S3 and loads it into the node over the shared database network, presenting the node's certificate.
 		_, stderr, err = a.runJob(runCtx, "restore", job.Spec{Op: "restore", Params: params, Engine: r.SourceEngine, S3: s3, Guard: guard, Key: r.S3Key},
-			[]string{swarm.Network(d.NodeKey), a.EgressNetwork}, timeout)
+			[]string{a.DBNetwork, a.EgressNetwork}, timeout)
 		if err != nil {
 			return fmt.Errorf("restore failed: %w", err)
 		}

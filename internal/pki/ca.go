@@ -210,3 +210,48 @@ func writeNew(path string, data []byte, perm os.FileMode) error {
 	}
 	return f.Close()
 }
+
+// Remaining is max, or less when the CA itself expires sooner: the longest a leaf can live (a day of margin).
+func (c *CA) Remaining(max time.Duration) time.Duration {
+	left := time.Until(c.cert.NotAfter) - 24*time.Hour
+	if left < max {
+		return left
+	}
+	return max
+}
+
+// SelfSignedClient makes a certificate that signs itself and is also its own trust anchor: a server whose client CA
+// file holds only this certificate accepts exactly the holder of its key and nobody else.
+func SelfSignedClient(commonName string, validFor time.Duration) (certPEM, keyPEM []byte, err error) {
+	if commonName == "" || validFor <= 0 {
+		return nil, nil, errors.New("pki: bad self-signed request")
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+	serial, err := randomSerial()
+	if err != nil {
+		return nil, nil, err
+	}
+	now := time.Now()
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: commonName},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(validFor),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), nil
+}

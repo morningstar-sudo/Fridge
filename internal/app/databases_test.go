@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"path/filepath"
 	"regexp"
@@ -282,5 +284,94 @@ func TestProxyConfigServesWebCertificate(t *testing.T) {
 	a.WebCert = filepath.Join(t.TempDir(), "missing.crt")
 	if _, err := a.ProxyConfig(context.Background()); err == nil {
 		t.Fatal("served a config without a web certificate")
+	}
+}
+
+// A node accepts only its own certificate: the database gets the server pair and the client certificate as its only
+// trusted root, the sidecar gets the client pair, and the client key never reaches the database service.
+func TestProvisionGivesEachNodeItsOwnCertificates(t *testing.T) {
+	a, rt, _ := newTestApp(t)
+	ctx := context.Background()
+	d1, err := createDB(a, ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "one", Domain: "one.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d2, err := createDB(a, ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "two", Domain: "two.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rt.runs) != 2 {
+		t.Fatalf("runs = %d", len(rt.runs))
+	}
+	n1, n2 := rt.runs[0].Spec, rt.runs[1].Spec
+	if !n1.TLS || len(n1.Command) != 3 || n1.Command[0] != "sh" {
+		t.Fatalf("node 1 spec: %+v", n1)
+	}
+	envOf := func(env []string, k string) string {
+		for _, e := range env {
+			if v, ok := strings.CutPrefix(e, k+"="); ok {
+				return v
+			}
+		}
+		return ""
+	}
+	t1, err := a.nodeTLS(ctx, d1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t2, _ := a.nodeTLS(ctx, d2)
+	if t1.ClientCert == t2.ClientCert || t1.ServerCert == t2.ServerCert || t1.ClientKey == t2.ClientKey {
+		t.Fatal("two nodes share TLS material")
+	}
+	if got := envOf(n1.Env, "FRIDGE_TLS_CLIENT_CA"); got != t1.ClientCert || got == t2.ClientCert {
+		t.Fatalf("the database trusts %q: want exactly its own client certificate", got)
+	}
+	if got := envOf(n1.Env, "FRIDGE_TLS_SERVER_KEY"); got != t1.ServerKey {
+		t.Fatal("the database does not get its server key")
+	}
+	for _, e := range n1.Env {
+		if strings.Contains(e, t1.ClientKey) {
+			t.Fatalf("the client's private key is in the database service's environment: %s", e[:30])
+		}
+	}
+	if envOf(n1.EdgeEnv, "FRIDGE_TLS_CERT") != t1.ClientCert || envOf(n1.EdgeEnv, "FRIDGE_TLS_KEY") != t1.ClientKey || envOf(n1.EdgeEnv, "FRIDGE_TLS_CA") != string(a.CA.CertPEM()) {
+		t.Fatalf("sidecar env: %v", n1.EdgeEnv)
+	}
+	if n1.EdgeEnv[1] == n2.EdgeEnv[1] {
+		t.Fatal("two sidecars share a client key")
+	}
+	st, err := a.Store.GetDBTLS(ctx, d1.ID)
+	if err != nil || strings.Contains(st.ServerKeyEnc, "PRIVATE KEY") || strings.Contains(st.ClientKeyEnc, "PRIVATE KEY") {
+		t.Fatalf("keys must be stored encrypted: %+v %v", st, err)
+	}
+}
+
+// SCRAM channel binding makes the client compare the certificate it saw (Traefik's) with the database's: they must
+// be the very same certificate, and it must name both the public domain and the node's service.
+func TestRouteCertificateIsTheDatabasesOwn(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	ctx := context.Background()
+	d, err := createDB(a, ctx, CreateRequest{OwnerID: own(t, a), Engine: "postgres", Name: "abc", Domain: "abc.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := a.ProxyConfig(ctx)
+	if err != nil || len(cfg.DBs) != 1 {
+		t.Fatalf("%+v %v", cfg, err)
+	}
+	tlsm, _ := a.nodeTLS(ctx, d)
+	if cfg.DBs[0].CertPEM != tlsm.ServerCert || cfg.DBs[0].KeyPEM != tlsm.ServerKey {
+		t.Fatal("Traefik presents a different certificate from the database's")
+	}
+	b, _ := pem.Decode([]byte(tlsm.ServerCert))
+	leaf, err := x509.ParseCertificate(b.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := leaf.VerifyHostname("abc.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := leaf.VerifyHostname("fridge-db-" + d.NodeKey); err != nil {
+		t.Fatal(err)
 	}
 }

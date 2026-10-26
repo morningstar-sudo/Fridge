@@ -49,6 +49,8 @@ type Spec struct {
 	Key    string
 	Meta   map[string]string // dump: metadata stored with the object
 	Guard  *Guard
+
+	tlsDir string // where Run put the node's client certificate (not part of the spec)
 }
 
 // Objects is the part of an S3 bucket a job uses; *objstore.Store satisfies it.
@@ -94,6 +96,15 @@ func result(stdout io.Writer, v any) {
 
 // Run executes the job and returns the process exit code. Progress and errors go to stderr, the result to stdout.
 func Run(ctx context.Context, s Spec, stdout, stderr io.Writer) int {
+	if t := s.Params.TLS; t != nil && t.ClientCert != "" {
+		dir, err := writeTLS(t)
+		if err != nil {
+			fmt.Fprintln(stderr, "job failed:", err)
+			return 1
+		}
+		defer os.RemoveAll(dir)
+		s.tlsDir = dir
+	}
 	var err error
 	switch s.Op {
 	case "dump":
@@ -128,6 +139,10 @@ func pgBin(version, name string) string {
 func command(ctx context.Context, s Spec, argv []string, stderr io.Writer) *exec.Cmd {
 	c := exec.CommandContext(ctx, pgBin(s.Params.Version, argv[0]), argv[1:]...)
 	c.Env = append(os.Environ(), "PGPASSWORD="+s.Params.AdminPassword)
+	if s.tlsDir != "" { // the database takes only a client holding this node's certificate, and the client checks the server's name
+		c.Env = append(c.Env, "PGSSLMODE=verify-full", "PGSSLCERT="+filepath.Join(s.tlsDir, "client.crt"),
+			"PGSSLKEY="+filepath.Join(s.tlsDir, "client.key"), "PGSSLROOTCERT="+filepath.Join(s.tlsDir, "ca.crt"))
+	}
 	c.Stderr = stderr
 	return c
 }
@@ -318,4 +333,20 @@ func isTOCLine(l []byte) bool {
 		}
 	}
 	return false
+}
+
+// writeTLS puts the node's client certificate, key and the CA that signed the server certificate in a private temp
+// directory (libpq reads them from files) and returns it.
+func writeTLS(t *engine.TLS) (string, error) {
+	dir, err := os.MkdirTemp("", "fridge-tls")
+	if err != nil {
+		return "", err
+	}
+	for name, content := range map[string]string{"client.crt": t.ClientCert, "client.key": t.ClientKey, "ca.crt": t.CA} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			os.RemoveAll(dir)
+			return "", err
+		}
+	}
+	return dir, nil
 }

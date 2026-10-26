@@ -72,7 +72,7 @@ func runServer() error {
 		return fmt.Errorf("FRIDGE_SECRET_KEY: %w", err)
 	}
 	listen, dataDir, providerListen := env("FRIDGE_LISTEN", ":8080"), env("FRIDGE_DATA", "/data"), env("FRIDGE_PROVIDER_LISTEN", ":8081")
-	edgeNet, egressNet, apiBackend := env("FRIDGE_EDGE_NETWORK", "fridge_edge"), env("FRIDGE_EGRESS_NETWORK", "fridge_egress"), env("FRIDGE_API_BACKEND", "http://fridge:8080")
+	edgeNet, egressNet, dbNet, apiBackend := env("FRIDGE_EDGE_NETWORK", "fridge_edge"), env("FRIDGE_EGRESS_NETWORK", "fridge_egress"), env("FRIDGE_DB_NETWORK", "fridge_db"), env("FRIDGE_API_BACKEND", "http://fridge:8080")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -87,7 +87,7 @@ func runServer() error {
 	} else if n > 0 {
 		log.Printf("marked %d interrupted job(s) failed", n)
 	}
-	rt, err := swarm.New(swarm.Config{EdgeNetwork: edgeNet, EgressNetwork: egressNet, ServerImage: os.Getenv("FRIDGE_SERVER_IMAGE")})
+	rt, err := swarm.New(swarm.Config{EdgeNetwork: edgeNet, EgressNetwork: egressNet, DBNetwork: dbNet, ServerImage: os.Getenv("FRIDGE_SERVER_IMAGE")})
 	if err != nil {
 		return err
 	}
@@ -106,7 +106,7 @@ func runServer() error {
 	a := &app.App{
 		Store: st, Box: box, RT: rt, CA: ca, APIBackend: apiBackend,
 		HealthTimeout: 120 * time.Second, Alert: alert.Webhook(os.Getenv("FRIDGE_ALERT_WEBHOOK")),
-		JobImage: os.Getenv("FRIDGE_JOB_IMAGE"), EgressNetwork: egressNet, Img: rt,
+		JobImage: os.Getenv("FRIDGE_JOB_IMAGE"), EgressNetwork: egressNet, DBNetwork: dbNet, Img: rt,
 		Audit: &audit.Logger{Store: st}, Registry: &registry.Client{},
 	}
 	if err := a.RecoverInterrupted(ctx); err != nil { // after FailRunning, before the scheduler loads

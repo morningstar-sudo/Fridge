@@ -37,6 +37,9 @@ func fixture(t *testing.T, a *App) (store.Database, store.Destination) {
 	if err := a.Store.CreateDatabase(ctx, &d); err != nil {
 		t.Fatal(err)
 	}
+	if err := a.issueNodeTLS(ctx, d); err != nil {
+		t.Fatal(err)
+	}
 	dest, err := a.CreateDestination(ctx, store.Destination{Name: "s3", Endpoint: "http://localhost:9000", Bucket: "b", AccessKey: "ak"}, "sk")
 	if err != nil {
 		t.Fatal(err)

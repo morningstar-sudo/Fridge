@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,7 +41,8 @@ func TestSwarmNodeLifecycle(t *testing.T) {
 		return def
 	}
 	egress := env("FRIDGE_EGRESS_NETWORK", "fridge_egress")
-	rt, err := swarm.New(swarm.Config{EdgeNetwork: env("FRIDGE_EDGE_NETWORK", "fridge_edge"), EgressNetwork: egress, ServerImage: serverImg})
+	dbNet := env("FRIDGE_DB_NETWORK", "fridge_db")
+	rt, err := swarm.New(swarm.Config{EdgeNetwork: env("FRIDGE_EDGE_NETWORK", "fridge_edge"), EgressNetwork: egress, DBNetwork: dbNet, ServerImage: serverImg})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +81,7 @@ func TestSwarmNodeLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := &App{Store: storetest.New(t), Box: box, RT: rt, CA: ca, HealthTimeout: 4 * time.Minute,
-		JobImage: jobImg, EgressNetwork: egress, backupTimeout: 5 * time.Minute,
+		JobImage: jobImg, EgressNetwork: egress, DBNetwork: dbNet, backupTimeout: 5 * time.Minute,
 		Alert: func(ctx context.Context, text string) { t.Logf("alert: %s", text) }}
 	t.Cleanup(func() {
 		dbs, _ := a.Store.ListDatabases(ctx)
@@ -111,15 +113,16 @@ func TestSwarmNodeLifecycle(t *testing.T) {
 		}
 		return s
 	}
-	isReady := func(from, target string) int {
+	// attempt runs psql from a job on the given networks and says whether it got in (and what it was told).
+	attempt := func(networks []string, conninfo string) (bool, string) {
 		t.Helper()
-		res, err := rt.RunJob(ctx, swarm.JobSpec{Name: "isready", Image: jobImg, Entrypoint: []string{"/usr/lib/postgresql/17/bin/pg_isready"},
-			Args: []string{"-h", target, "-U", "x", "-t", "3"}, Networks: []string{from}, Timeout: 2 * time.Minute})
+		res, err := rt.RunJob(ctx, swarm.JobSpec{Name: "probe", Image: jobImg, Entrypoint: []string{"/usr/lib/postgresql/17/bin/psql"},
+			Args: []string{conninfo, "-tAc", "select 1"}, Env: []string{"PGPASSWORD=x"}, Networks: networks, Timeout: 2 * time.Minute})
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("pg_isready %s from %s: exit %d %q %q", target, from, res.ExitCode, res.Stdout, res.Stderr)
-		return res.ExitCode
+		t.Logf("psql %s from %v: exit %d %q", conninfo, networks, res.ExitCode, res.Stderr)
+		return res.ExitCode == 0, res.Stderr
 	}
 
 	// ---- create: services, network, host, the two users ----
@@ -130,7 +133,7 @@ func TestSwarmNodeLifecycle(t *testing.T) {
 	if d1.Status != "running" || d1.HostID == "" || d1.NodeKey == "" {
 		t.Fatalf("node: %+v", d1)
 	}
-	if st := nodeState(t, rt, d1.NodeKey); !st.DB || !st.Edge || !st.HasNetwork || st.HostID != d1.HostID {
+	if st := nodeState(t, rt, d1.NodeKey); !st.DB || !st.Edge || st.HostID != d1.HostID {
 		t.Fatalf("swarm state %+v", st)
 	}
 	c, err := connect(d1, d1.User, appPassword(t, a, d1))
@@ -213,15 +216,18 @@ func TestSwarmNodeLifecycle(t *testing.T) {
 	}
 	c2.Close(ctx)
 
-	// ---- isolation ----
-	if isReady(swarm.Network(d1.NodeKey), swarm.DBService(d1.NodeKey)) != 0 {
-		t.Fatal("a job cannot reach its own node")
+	// ---- isolation: one network for every database, so the databases themselves keep each other out ----
+	for _, other := range []store.Database{d1, d2} { // even a job on the database network cannot get past TLS to any node without that node's certificate
+		host := swarm.DBService(other.NodeKey)
+		if ok, msg := attempt([]string{dbNet}, "host="+host+" user=x dbname=x sslmode=require connect_timeout=8"); ok || !strings.Contains(msg, "certificate") || strings.Contains(msg, "password") {
+			t.Fatalf("a client without the node certificate reached %s's authentication: ok=%v %q", host, ok, msg)
+		}
+		if ok, msg := attempt([]string{dbNet}, "host="+host+" user=x dbname=x sslmode=disable connect_timeout=8"); ok || !strings.Contains(msg, "pg_hba.conf") {
+			t.Fatalf("plain text was not refused by %s: ok=%v %q", host, ok, msg)
+		}
 	}
-	if isReady(swarm.Network(d1.NodeKey), swarm.DBService(d2.NodeKey)) == 0 {
-		t.Fatal("node 1's network reached node 2")
-	}
-	if isReady(egress, swarm.EdgeService(d1.NodeKey)) == 0 {
-		t.Fatal("the egress network reached a sidecar")
+	if ok, _ := attempt([]string{egress}, "host="+swarm.DBService(d1.NodeKey)+" user=x dbname=x sslmode=require connect_timeout=5"); ok {
+		t.Fatal("the egress network reached a database")
 	}
 
 	// ---- rotating the superuser ----
@@ -256,7 +262,7 @@ func TestSwarmNodeLifecycle(t *testing.T) {
 			t.Fatalf("node 2 left behind: %+v", n)
 		}
 	}
-	if st := nodeState(t, rt, d1.NodeKey); !st.DB || !st.Edge || !st.HasNetwork {
+	if st := nodeState(t, rt, d1.NodeKey); !st.DB || !st.Edge {
 		t.Fatalf("node 1 was disturbed: %+v", st)
 	}
 }

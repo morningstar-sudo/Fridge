@@ -25,6 +25,24 @@ Measured:
   new server) but it is an agent in everything but name, and the start-up window above can only be narrowed by making the
   database refuse connections until the agent has set the flag.
 
-Decision: not adopted. One overlay per database stays the isolation mechanism (plain Docker configuration, no privileged
-component, no window). Revisit when the number of databases per swarm approaches several hundred; the cheaper levers first
-are a smaller `--default-addr-pool-mask-length` at `swarm init`, then Unix sockets in a volume shared with the sidecar.
+Decision on the bridge flag: not adopted (a privileged agent per host and a start-up window, for isolation that the database can
+enforce itself, see below).
+
+## What was adopted instead (same day)
+
+One internal overlay (`fridge_db`) for every database, and isolation by the database itself: the Postgres entrypoint starts
+with `ssl=on`, `ssl_ca_file` holding only the node's own client certificate and a `pg_hba.conf` of
+`hostssl all all all scram-sha-256 clientcert=verify-ca` / `host all all all reject`. The edge sidecar (`fridge forward --tls`)
+sends PostgreSQL's SSLRequest, does the TLS handshake with that client certificate and verifies the server certificate; jobs
+get the same material in their spec. No privileged agent, no start-up window (the rules live in the database's own config),
+no per-database network.
+
+Found while building it:
+- libpq's default `channel_binding=prefer` made every client fail with "SCRAM channel binding check failed": the client
+  binds to the certificate Traefik showed it, the database to its own. The fix is that they are the same certificate: the
+  node's server certificate names both the public domain and `fridge-db-<key>`, and Traefik serves exactly it
+  (`db_certs` was dropped for `db_tls`). `e2e.sh` runs a client with `channel_binding=require` to keep it so.
+- `pg_isready` no longer proves anything about isolation (a rejected connection still counts as "accepting connections"),
+  so the integration tests use psql and look for "requires a valid client certificate" / "pg_hba.conf rejects connection".
+- Node certificates are valid five years (less if the CA expires first); Postgres reads them at start, so renewal means
+  recreating the node. Reconcile alerts 60 days ahead.

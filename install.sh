@@ -109,7 +109,7 @@ if [ "$UNINSTALL" = 1 ]; then
 		say "Removing database nodes ..."
 		for s in $(docker service ls --format '{{.Name}}' | grep -E '^fridge-(db|edge)-' || true); do docker service rm "$s" >/dev/null; done
 		sleep 5
-		for n in $(docker network ls --format '{{.Name}}' | grep -E '^fridge-node-|^fridge_edge$|^fridge_egress$|^fridge_meta$' || true); do
+		for n in $(docker network ls --format '{{.Name}}' | grep -E '^fridge_edge$|^fridge_egress$|^fridge_db$|^fridge_meta$' || true); do
 			docker network rm "$n" >/dev/null 2>&1 || true
 		done
 		say "Removing volumes on every server ..."

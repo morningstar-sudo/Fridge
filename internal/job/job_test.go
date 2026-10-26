@@ -271,3 +271,22 @@ func TestFromEnv(t *testing.T) {
 		t.Fatalf("%+v %v", s, err)
 	}
 }
+
+func TestDumpPresentsTheNodeCertificate(t *testing.T) {
+	log := tools(t, map[string]string{"pg_dump": `echo "SSL=$PGSSLMODE crt=$(cat "$PGSSLCERT") key=$(cat "$PGSSLKEY") ca=$(cat "$PGSSLROOTCERT") mode=$(stat -c %a "$PGSSLKEY" 2>/dev/null || stat -f %Lp "$PGSSLKEY")" >> "` + "$LOGFILE" + `"; echo "$PGSSLCERT" > "` + "$LOGFILE" + `.path"; printf X`})
+	t.Setenv("LOGFILE", log)
+	bucket(t)
+	p := params()
+	p.TLS = &engine.TLS{ClientCert: "CLIENTCERT", ClientKey: "CLIENTKEY", CA: "THECA", ServerName: p.Host}
+	if code, _, errs := run(t, Spec{Op: "dump", Engine: "postgres", Params: p, Key: "k.dump"}); code != 0 {
+		t.Fatalf("exit %d: %s", code, errs)
+	}
+	got, _ := os.ReadFile(log)
+	if !strings.Contains(string(got), "SSL=verify-full crt=CLIENTCERT key=CLIENTKEY ca=THECA mode=600") {
+		t.Fatalf("the tool did not see the node's certificate:\n%s", got)
+	}
+	path, _ := os.ReadFile(log + ".path")
+	if _, err := os.Stat(strings.TrimSpace(string(path))); !os.IsNotExist(err) {
+		t.Fatalf("the key material outlived the job: %v", err)
+	}
+}

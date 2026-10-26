@@ -27,21 +27,20 @@ import (
 )
 
 const (
-	LabelRole  = "fridge.role"     // "db" | "edge" | "job"
-	LabelKey   = "fridge.node_key" // ties a database's services and network together
-	LabelDB    = "fridge.db_id"
-	NodeLabel  = "fridge.db" // swarm node label: "true" = databases may be placed here
-	NodeNetPfx = "fridge-node-"
-	EdgePort   = 5432
+	LabelRole = "fridge.role"     // "db" | "edge" | "job"
+	LabelKey  = "fridge.node_key" // ties a database's services and network together
+	LabelDB   = "fridge.db_id"
+	NodeLabel = "fridge.db" // swarm node label: "true" = databases may be placed here
+	EdgePort  = 5432
 )
 
 // Names derived from a node key. Docker DNS resolves them inside the overlays.
 func DBService(key string) string   { return "fridge-db-" + key }
 func EdgeService(key string) string { return "fridge-edge-" + key }
-func Network(key string) string     { return NodeNetPfx + key }
 
 type Config struct {
 	EdgeNetwork   string // shared by the proxy, Fridge and every sidecar
+	DBNetwork     string // internal: every database, its sidecar and the jobs that work on it; databases accept only their own certificate
 	EgressNetwork string // non-internal and otherwise empty: gives jobs internet without exposing anything
 	ServerImage   string // the Fridge image: runs the sidecars and the small maintenance jobs
 }
@@ -75,13 +74,13 @@ func (c *Client) Ping(ctx context.Context) error {
 
 // EnsureNetworks creates the shared overlays when they are missing (the stack normally does).
 func (c *Client) EnsureNetworks(ctx context.Context) error {
-	for _, n := range []string{c.cfg.EdgeNetwork, c.cfg.EgressNetwork} {
+	for _, n := range []string{c.cfg.EdgeNetwork, c.cfg.EgressNetwork, c.cfg.DBNetwork} {
 		if ok, err := c.networkExists(ctx, n); err != nil {
 			return err
 		} else if ok {
 			continue
 		}
-		_, err := c.cli.NetworkCreate(ctx, n, network.CreateOptions{Driver: "overlay", Attachable: true, Options: map[string]string{"encrypted": ""}})
+		_, err := c.cli.NetworkCreate(ctx, n, network.CreateOptions{Driver: "overlay", Attachable: true, Internal: n == c.cfg.DBNetwork, Options: map[string]string{"encrypted": ""}})
 		if err != nil && !errdefs.IsConflict(err) {
 			return fmt.Errorf("create network %s: %w", n, err)
 		}
@@ -154,6 +153,9 @@ type NodeSpec struct {
 	VolumePath  string
 	Port        int
 	Healthcheck []string
+	Command     []string // replaces the image's entrypoint (nil keeps it)
+	EdgeEnv     []string // the sidecar's environment: its client certificate and the CA (with TLS)
+	TLS         bool     // the sidecar speaks TLS with a client certificate to the database
 }
 
 type NodeRef struct {
@@ -178,30 +180,18 @@ func (c *Client) serviceExists(ctx context.Context, name string) (bool, error) {
 	return err == nil, err
 }
 
-// CreateNode builds the private network, the database service and its edge sidecar. Safe to repeat.
+// CreateNode builds the database service and its edge sidecar on the shared database network. Safe to repeat.
 func (c *Client) CreateNode(ctx context.Context, n NodeSpec) error {
-	net := Network(n.Key)
-	if ok, err := c.networkExists(ctx, net); err != nil {
-		return err
-	} else if !ok {
-		_, err := c.cli.NetworkCreate(ctx, net, network.CreateOptions{
-			Driver: "overlay", Internal: true, Labels: map[string]string{LabelKey: n.Key},
-			Options: map[string]string{"encrypted": ""},
-		})
-		if err != nil && !errdefs.IsConflict(err) {
-			return fmt.Errorf("create network: %w", err)
-		}
-	}
 	db := DBService(n.Key)
 	spec := swarm.ServiceSpec{
 		Annotations: swarm.Annotations{Name: db, Labels: labels("db", n.Key, n.DBID)},
 		TaskTemplate: swarm.TaskSpec{
 			ContainerSpec: &swarm.ContainerSpec{
-				Image: n.Image, Env: n.Env, Labels: labels("db", n.Key, n.DBID), StopGracePeriod: ptr(60 * time.Second),
+				Image: n.Image, Command: n.Command, Env: n.Env, Labels: labels("db", n.Key, n.DBID), StopGracePeriod: ptr(60 * time.Second),
 				Mounts: []mount.Mount{{Type: mount.TypeVolume, Source: n.VolumeName, Target: n.VolumePath, VolumeOptions: &mount.VolumeOptions{Labels: labels("db", n.Key, n.DBID)}}},
 			},
 			Placement:     pin(n.HostID),
-			Networks:      []swarm.NetworkAttachmentConfig{{Target: net, Aliases: []string{db}}},
+			Networks:      []swarm.NetworkAttachmentConfig{{Target: c.cfg.DBNetwork, Aliases: []string{db}}},
 			RestartPolicy: &swarm.RestartPolicy{Condition: swarm.RestartPolicyConditionAny, Delay: ptr(5 * time.Second)},
 		},
 		Mode:         swarm.ServiceMode{Replicated: &swarm.ReplicatedService{Replicas: one()}},
@@ -220,13 +210,14 @@ func (c *Client) CreateNode(ctx context.Context, n NodeSpec) error {
 		TaskTemplate: swarm.TaskSpec{
 			ContainerSpec: &swarm.ContainerSpec{
 				Image: c.cfg.ServerImage, Command: []string{"/fridge"},
-				Args:   []string{"forward", "--listen", fmt.Sprintf(":%d", EdgePort), "--to", fmt.Sprintf("%s:%d", db, n.Port)},
+				Args:   edgeArgs(db, n),
+				Env:    n.EdgeEnv,
 				Labels: labels("edge", n.Key, n.DBID),
 			},
 			Placement: pin(n.HostID), // next to the database: the second leg never crosses hosts
 			Networks: []swarm.NetworkAttachmentConfig{
 				{Target: c.cfg.EdgeNetwork, Aliases: []string{edge}},
-				{Target: net},
+				{Target: c.cfg.DBNetwork},
 			},
 			RestartPolicy: &swarm.RestartPolicy{Condition: swarm.RestartPolicyConditionAny, Delay: ptr(2 * time.Second)},
 		},
@@ -287,9 +278,6 @@ func (c *Client) RemoveNode(ctx context.Context, ref NodeRef) error {
 		}
 	}
 	c.waitNoTasks(ctx, ref.Key)
-	if err := c.removeNetwork(ctx, Network(ref.Key)); err != nil {
-		errs = append(errs, err)
-	}
 	if ref.Volume != "" && ref.HostID != "" {
 		res, err := c.RunJob(ctx, JobSpec{Name: "rmvol", Image: c.cfg.ServerImage, Entrypoint: []string{"/fridge"}, Args: []string{"job", "rmvolume", ref.Volume},
 			NodeID: ref.HostID, Binds: []string{"/var/run/docker.sock:/var/run/docker.sock"}, Timeout: time.Minute})
@@ -324,31 +312,15 @@ func (c *Client) waitNoTasks(ctx context.Context, key string) {
 	}
 }
 
-func (c *Client) removeNetwork(ctx context.Context, name string) error {
-	var err error
-	for i := 0; i < 20; i++ {
-		if err = c.cli.NetworkRemove(ctx, name); err == nil || errdefs.IsNotFound(err) {
-			return nil
-		}
-		select { // endpoints of just-removed tasks linger for a moment
-		case <-ctx.Done():
-			return err
-		case <-time.After(time.Second):
-		}
-	}
-	return fmt.Errorf("remove network %s: %w", name, err)
-}
-
 // NodeState is what exists in the swarm for one database key.
 type NodeState struct {
-	Key        string
-	DBID       string
-	HostID     string
-	DB, Edge   bool
-	HasNetwork bool
+	Key      string
+	DBID     string
+	HostID   string
+	DB, Edge bool
 }
 
-// ListNodes reports the services and networks that carry a node key.
+// ListNodes reports the services that carry a node key.
 func (c *Client) ListNodes(ctx context.Context) ([]NodeState, error) {
 	svcs, err := c.cli.ServiceList(ctx, swarm.ServiceListOptions{Filters: filters.NewArgs(filters.Arg("label", LabelKey))})
 	if err != nil {
@@ -377,13 +349,6 @@ func (c *Client) ListNodes(ctx context.Context) ([]NodeState, error) {
 		case "edge":
 			st.Edge = true
 		}
-	}
-	nets, err := c.cli.NetworkList(ctx, network.ListOptions{Filters: filters.NewArgs(filters.Arg("label", LabelKey))})
-	if err != nil {
-		return nil, err
-	}
-	for _, n := range nets {
-		get(n.Labels[LabelKey]).HasNetwork = true
 	}
 	out := make([]NodeState, 0, len(by))
 	for _, st := range by {
@@ -577,3 +542,11 @@ func (c *Client) SubnetsOf(ctx context.Context, names ...string) ([]netip.Prefix
 
 // EdgeNetwork is the shared network's name (the proxy sits on it).
 func (c *Client) EdgeNetwork() string { return c.cfg.EdgeNetwork }
+
+func edgeArgs(db string, n NodeSpec) []string {
+	args := []string{"forward", "--listen", fmt.Sprintf(":%d", EdgePort), "--to", fmt.Sprintf("%s:%d", db, n.Port)}
+	if n.TLS {
+		args = append(args, "--tls", "--server-name", db)
+	}
+	return args
+}

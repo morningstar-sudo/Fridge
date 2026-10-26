@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 
 	"fridge/internal/app"
 	"fridge/internal/audit"
@@ -38,7 +40,7 @@ func TestE2EOwnershipFlow(t *testing.T) {
 	}
 	ctx := context.Background()
 	egress := "fridge_egress"
-	rt, err := swarm.New(swarm.Config{EdgeNetwork: "fridge_edge", EgressNetwork: egress, ServerImage: serverImg})
+	rt, err := swarm.New(swarm.Config{EdgeNetwork: "fridge_edge", EgressNetwork: egress, DBNetwork: "fridge_db", ServerImage: serverImg})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,6 +50,22 @@ func TestE2EOwnershipFlow(t *testing.T) {
 	}
 	if err := rt.EnsureNetworks(ctx); err != nil {
 		t.Fatal(err)
+	}
+
+	mu, err := url.Parse(ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mc, err := minio.New(mu.Host, &minio.Options{Creds: credentials.NewStaticV4(ak, sk, ""), Secure: mu.Scheme == "https"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := mc.BucketExists(ctx, bucket); err != nil {
+		t.Fatal(err)
+	} else if !ok {
+		if err := mc.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	key := make([]byte, 32)
@@ -61,7 +79,7 @@ func TestE2EOwnershipFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := storetest.New(t)
-	a := &app.App{Store: st, Box: box, RT: rt, CA: ca, HealthTimeout: 4 * time.Minute, JobImage: jobImg, EgressNetwork: egress,
+	a := &app.App{Store: st, Box: box, RT: rt, CA: ca, HealthTimeout: 4 * time.Minute, JobImage: jobImg, EgressNetwork: egress, DBNetwork: "fridge_db",
 		Alert: func(ctx context.Context, text string) { t.Logf("alert: %s", text) }, Audit: &audit.Logger{Store: st}}
 	au, err := auth.New(st, key, "setup-tok")
 	if err != nil {
@@ -166,6 +184,10 @@ func TestE2EOwnershipFlow(t *testing.T) {
 	json.Unmarshal(e.want(t, e.alice, "POST", "/api/databases/alice_app/backups", jb(map[string]any{"destination_id": mustAtoi(t, dAlice)}), 202).Body.Bytes(), &bk)
 	a.Wait()
 	if v := e.list(t, e.alice)["alice_app"]; v.LastBackup == nil || v.LastBackup.Status != "ok" {
+		bs, _ := st.ListBackups(ctx, aliceApp.ID)
+		for _, b := range bs {
+			t.Logf("backup %d: %s %s | %s", b.ID, b.Status, b.Error, b.Log)
+		}
 		t.Fatalf("alice's backup: %+v", v.LastBackup)
 	}
 	t.Cleanup(func() {
@@ -277,26 +299,23 @@ func TestE2EOwnershipFlow(t *testing.T) {
 	}
 	e.want(t, e.bob, "POST", "/api/databases/alice_shop/superuser/reveal", "", 404)
 
-	// ---- network isolation: each node has its own overlay; a job on one cannot see the other ----
-	if swarm.Network(aliceShop.NodeKey) == swarm.Network(bobShop.NodeKey) {
-		t.Fatal("two nodes share a network")
-	}
-	ready := func(from string, target string) int {
-		res, err := rt.RunJob(ctx, swarm.JobSpec{Name: "isready", Image: jobImg, Entrypoint: []string{"/usr/lib/postgresql/17/bin/pg_isready"},
-			Args: []string{"-h", target, "-U", "x", "-t", "3"}, Networks: []string{from}, Timeout: 2 * time.Minute})
+	// ---- isolation: every database shares one network, so each refuses anyone without its own certificate ----
+	attempt := func(networks []string, conninfo string) (bool, string) {
+		res, err := rt.RunJob(ctx, swarm.JobSpec{Name: "probe", Image: jobImg, Entrypoint: []string{"/usr/lib/postgresql/17/bin/psql"},
+			Args: []string{conninfo, "-tAc", "select 1"}, Env: []string{"PGPASSWORD=x"}, Networks: networks, Timeout: 2 * time.Minute})
 		if err != nil {
 			t.Fatal(err)
 		}
-		return res.ExitCode
+		return res.ExitCode == 0, res.Stderr
 	}
-	if ready(swarm.Network(aliceShop.NodeKey), swarm.DBService(bobShop.NodeKey)) == 0 {
-		t.Fatal("alice_shop's network reached bob_shop")
+	for _, d := range []store.Database{aliceShop, bobShop} {
+		host := swarm.DBService(d.NodeKey)
+		if ok, msg := attempt([]string{"fridge_db"}, "host="+host+" user=x dbname=x sslmode=require connect_timeout=8"); ok || !strings.Contains(msg, "certificate") || strings.Contains(msg, "password") {
+			t.Fatalf("a client without %s's certificate got to its authentication: ok=%v %q", d.Name, ok, msg)
+		}
 	}
-	if ready(swarm.Network(aliceShop.NodeKey), swarm.DBService(aliceShop.NodeKey)) != 0 {
-		t.Fatal("alice_shop's own network does not reach it")
-	}
-	if ready(swarm.Network(aliceShop.NodeKey), swarm.EdgeService(bobShop.NodeKey)) == 0 {
-		t.Fatal("alice_shop's network reached bob_shop's sidecar")
+	if ok, _ := attempt([]string{egress}, "host="+swarm.DBService(aliceShop.NodeKey)+" user=x dbname=x sslmode=require connect_timeout=5"); ok {
+		t.Fatal("the egress network reached a database")
 	}
 }
 

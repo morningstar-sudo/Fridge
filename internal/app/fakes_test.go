@@ -273,7 +273,7 @@ func newTestApp(t *testing.T) (*App, *fakeRuntime, *fakeObjects) {
 	a := &App{
 		Store: storetest.New(t), Box: box, RT: rt, CA: ca,
 		HealthTimeout: time.Second, APIBackend: "http://fridge:8080",
-		Admin: &fakeAdmin{}, JobImage: "fridge-job:test", EgressNetwork: "fridge_egress",
+		Admin: &fakeAdmin{}, JobImage: "fridge-job:test", EgressNetwork: "fridge_egress", DBNetwork: "fridge_db",
 	}
 	a.WebCert, a.WebKey = writeWebCert(t, ca)
 	a.Alert = func(ctx context.Context, text string) {

@@ -52,6 +52,10 @@ for ip in "$IP1" "$IP2"; do
 done
 R PSQL "$DBPW" "$IP1" "" -c "insert into t values (1)" >/dev/null
 echo "ok on $IP1 and $IP2"
+# SCRAM channel binding compares the certificate the client saw (Traefik's) with the database's own: they must be one
+got=$(R PSQL "$DBPW" "$IP1" "channel_binding=require" -c "select count(*) from t" | tail -1)
+[ "$got" = 1 ] || fail "channel_binding=require: got '$got'"
+echo "channel binding ok"
 
 step "unknown name and plain text are refused"
 if $D run --rm --network host -e PGPASSWORD="$DBPW" --entrypoint /usr/lib/postgresql/17/bin/psql fridge-job:dev \

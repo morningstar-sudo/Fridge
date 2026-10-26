@@ -14,7 +14,6 @@ import (
 	"fridge/internal/engine"
 	"fridge/internal/job"
 	"fridge/internal/store"
-	"fridge/internal/swarm"
 )
 
 // BackupKey is <prefix>/<engine>-<version>/<db>/<db>-<YYYYMMDD-HHMMSS><ext> (UTC).
@@ -130,7 +129,7 @@ func (a *App) runBackup(objs ObjectStore, db store.Database, b store.Backup, spe
 	defer cancel()
 
 	// The job dumps straight into S3 from inside the node's network: nothing large passes through Fridge.
-	res, stderr, jerr := a.runJob(runCtx, "dump", spec, []string{swarm.Network(db.NodeKey), a.EgressNetwork}, timeout)
+	res, stderr, jerr := a.runJob(runCtx, "dump", spec, []string{a.DBNetwork, a.EgressNetwork}, timeout)
 	size, serr := int64(0), error(nil)
 	if jerr == nil {
 		size, serr = resultInt(res, "size")

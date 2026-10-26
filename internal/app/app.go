@@ -53,8 +53,9 @@ type App struct {
 	backupTimeout   time.Duration                                                                       // test override; 0 = backupTimeout
 	wg              sync.WaitGroup
 
-	// JobImage runs dump/restore/check jobs; EgressNetwork is the empty overlay that gives them internet.
-	JobImage, EgressNetwork string
+	// JobImage runs dump/restore/check jobs; EgressNetwork is the empty overlay that gives them internet; DBNetwork is the
+	// internal overlay every database lives on (a job joins it to reach its database, and holds that database's certificate).
+	JobImage, EgressNetwork, DBNetwork string
 
 	suLocks sync.Map // db id -> *sync.Mutex: one superuser rotation per node at a time
 

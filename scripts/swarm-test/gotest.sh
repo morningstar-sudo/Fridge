@@ -29,6 +29,7 @@ for n in fsw1 fsw2; do docker save fridge-gotest:dev | docker exec -i $n docker 
 for net in fridge_edge fridge_egress; do
 	$M network inspect $net >/dev/null 2>&1 || $M network create -d overlay --attachable --opt encrypted $net >/dev/null
 done
+$M network inspect fridge_db >/dev/null 2>&1 || $M network create -d overlay --internal --attachable --opt encrypted fridge_db >/dev/null
 $M service rm fridge-test-meta fridge-test-minio fridge-gotest >/dev/null 2>&1 || true
 
 $M service create -d --name fridge-test-meta --network fridge_edge --constraint node.role==manager \

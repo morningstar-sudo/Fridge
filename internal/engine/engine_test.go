@@ -132,3 +132,30 @@ func TestPostgresTwoUserSpec(t *testing.T) {
 		t.Fatalf("conn user = %q", u.User.Username())
 	}
 }
+
+func TestSpecWithTLSRequiresTheNodeCertificate(t *testing.T) {
+	eng, _, _ := Get("postgres")
+	plain := eng.Spec(Params{Name: "d", AdminUser: "su", AdminPassword: "pw", Version: "17"})
+	if plain.Command != nil {
+		t.Fatalf("a node without TLS keeps the image's command: %v", plain.Command)
+	}
+	s := eng.Spec(Params{Name: "d", AdminUser: "su", AdminPassword: "pw", Version: "17",
+		TLS: &TLS{ServerCert: "SC", ServerKey: "SK", ClientCert: "CC", ClientKey: "CK"}})
+	env := strings.Join(s.Env, "\n")
+	for _, want := range []string{"FRIDGE_TLS_SERVER_CERT=SC", "FRIDGE_TLS_SERVER_KEY=SK", "FRIDGE_TLS_CLIENT_CA=CC"} {
+		if !strings.Contains(env, want) {
+			t.Errorf("env lacks %s", want)
+		}
+	}
+	if strings.Contains(env, "CK") {
+		t.Error("the client's private key must never reach the database container")
+	}
+	if len(s.Command) != 3 || s.Command[0] != "sh" || s.Command[1] != "-c" {
+		t.Fatalf("command = %v", s.Command)
+	}
+	for _, want := range []string{"hostssl all all all scram-sha-256 clientcert=verify-ca", "host all all all reject", "ssl=on", "hba_file", "ssl_ca_file", "chmod 600"} {
+		if !strings.Contains(s.Command[2], want) {
+			t.Errorf("entrypoint lacks %q", want)
+		}
+	}
+}

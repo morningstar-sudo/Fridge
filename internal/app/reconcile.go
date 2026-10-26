@@ -6,6 +6,7 @@ import (
 	"log"
 	"sort"
 	"sync"
+	"time"
 
 	"fridge/internal/engine"
 	"fridge/internal/swarm"
@@ -19,7 +20,7 @@ type reconciler struct {
 
 // Reconcile compares the databases that should be running with what the swarm has and repairs what is safe to
 // repair without losing data:
-//   - a running database whose edge sidecar or private network is gone gets them back (CreateNode is idempotent);
+//   - a running database whose edge sidecar is gone gets it back (CreateNode is idempotent);
 //   - the services, network and volume of a failed or removed database are cleaned up;
 //   - a missing database service is only reported: recreating it could start an empty database over a lost volume;
 //   - swarm resources that match no database row are only reported: Fridge cannot tell what their volume holds.
@@ -43,23 +44,33 @@ func (a *App) Reconcile(ctx context.Context) error {
 		}
 		st, has := byKey[d.NodeKey]
 		delete(byKey, d.NodeKey)
+		if d.Status == "running" && has {
+			if t, err := a.Store.GetDBTLS(ctx, d.ID); err == nil && time.Until(t.NotAfter) < 60*24*time.Hour {
+				problems[fmt.Sprintf("database %s: its node certificate expires on %s; recreate the database or restore it into a new one before then", d.Name, t.NotAfter.Format("2006-01-02"))] = true
+			}
+		}
 		switch d.Status {
 		case "running":
 			switch {
 			case !has || !st.DB:
 				problems[fmt.Sprintf("database %s has no service in the swarm", d.Name)] = true
-			case !st.Edge || !st.HasNetwork:
+			case !st.Edge:
 				eng, _, err := engine.Get(d.Engine)
 				if err != nil {
 					continue
 				}
 				p := nodeParams(d)
-				err = a.RT.CreateNode(ctx, swarm.NodeSpec{Key: d.NodeKey, DBID: d.ID, HostID: d.HostID, Port: eng.Spec(p).Port})
+				tlsm, err := a.nodeTLS(ctx, d)
+				if err != nil {
+					problems[fmt.Sprintf("database %s has no edge sidecar and cannot get one: %v", d.Name, err)] = true
+					continue
+				}
+				err = a.RT.CreateNode(ctx, swarm.NodeSpec{Key: d.NodeKey, DBID: d.ID, HostID: d.HostID, Port: eng.Spec(p).Port, EdgeEnv: edgeEnv(tlsm), TLS: true})
 				if err != nil {
 					problems[fmt.Sprintf("database %s: repairing its edge sidecar failed: %v", d.Name, err)] = true
 					continue
 				}
-				log.Printf("reconcile: restored the edge sidecar/network of %s", d.Name)
+				log.Printf("reconcile: restored the edge sidecar of %s", d.Name)
 				a.alertf(ctx, "database %s: its edge sidecar was missing and has been recreated", d.Name)
 			}
 		case "error", "deleted":

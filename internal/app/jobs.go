@@ -62,6 +62,11 @@ func (a *App) jobParams(ctx context.Context, d store.Database) (engine.Params, e
 	p.AdminPassword = pw
 	p.Host = swarm.DBService(d.NodeKey)
 	p.Port = eng.Spec(p).Port
+	t, err := a.nodeTLS(ctx, d)
+	if err != nil {
+		return engine.Params{}, err
+	}
+	p.TLS = t
 	return p, nil
 }
 

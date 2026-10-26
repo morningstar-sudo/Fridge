@@ -50,6 +50,9 @@ func mkDB(t *testing.T, a *App, name string, owner int64) store.Database {
 	if err := a.Store.CreateDatabase(context.Background(), &d); err != nil {
 		t.Fatal(err)
 	}
+	if err := a.issueNodeTLS(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
 	return d
 }
 

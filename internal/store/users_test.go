@@ -37,7 +37,7 @@ func TestMetaPostgres18(t *testing.T) {
 func TestMigration4Applied(t *testing.T) {
 	s := storetest.New(t)
 	var n int
-	if err := s.Pool().QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&n); err != nil || n != 5 {
+	if err := s.Pool().QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&n); err != nil || n != 6 {
 		t.Fatalf("schema_migrations = %d, %v", n, err)
 	}
 	for _, c := range [][2]string{{"databases", "owner_id"}, {"destinations", "shared"}, {"backups", "started_by_id"}} {

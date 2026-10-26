@@ -27,7 +27,7 @@ func (postgres) Spec(p Params) Spec {
 	if major, _ := strconv.Atoi(strings.SplitN(p.Version, ".", 2)[0]); major >= 18 {
 		volume = "/var/lib/postgresql"
 	}
-	return Spec{
+	s := Spec{
 		Image: "postgres:" + p.Version,
 		Env: []string{
 			"POSTGRES_USER=" + p.AdminUser,
@@ -38,6 +38,11 @@ func (postgres) Spec(p Params) Spec {
 		Port:        5432,
 		Healthcheck: []string{"CMD-SHELL", fmt.Sprintf("pg_isready -h 127.0.0.1 -U %s -d %s", p.AdminUser, p.Name)},
 	}
+	if p.TLS != nil {
+		s.Env = append(s.Env, "FRIDGE_TLS_SERVER_CERT="+p.TLS.ServerCert, "FRIDGE_TLS_SERVER_KEY="+p.TLS.ServerKey, "FRIDGE_TLS_CLIENT_CA="+p.TLS.ClientCert)
+		s.Command = []string{"sh", "-c", tlsEntrypoint}
+	}
+	return s
 }
 
 // hostArgs are the connection flags of the client tools: none for the local socket, -h/-p for a job.
@@ -104,3 +109,18 @@ func QuoteIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`)
 
 // quoteLit single-quotes a SQL literal (standard_conforming_strings, the default since 9.1).
 func quoteLit(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+
+// tlsEntrypoint starts the stock entrypoint with TLS required and a pg_hba.conf that lets in only a client presenting
+// the node's own client certificate (the one certificate in ssl_ca_file) AND the right password. The files are written
+// from the environment on every start, so nothing sensitive sits in the image or the volume. Local (socket) access stays
+// trusted for the entrypoint's own init scripts and the healthcheck.
+const tlsEntrypoint = `set -e
+d=/var/lib/fridge-tls
+mkdir -p "$d"
+printf '%s\n' "$FRIDGE_TLS_SERVER_CERT" > "$d/server.crt"
+printf '%s\n' "$FRIDGE_TLS_SERVER_KEY" > "$d/server.key"
+printf '%s\n' "$FRIDGE_TLS_CLIENT_CA" > "$d/client-ca.crt"
+printf 'local all all trust\nhostssl all all all scram-sha-256 clientcert=verify-ca\nhost all all all reject\n' > "$d/pg_hba.conf"
+chown -R postgres:postgres "$d"
+chmod 600 "$d/server.key"
+exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file="$d/server.crt" -c ssl_key_file="$d/server.key" -c ssl_ca_file="$d/client-ca.crt" -c hba_file="$d/pg_hba.conf" -c password_encryption=scram-sha-256`
