@@ -334,7 +334,7 @@ func TestProvisionGivesEachNodeItsOwnCertificates(t *testing.T) {
 			t.Fatalf("the client's private key is in the database service's environment: %s", e[:30])
 		}
 	}
-	if envOf(n1.EdgeEnv, "FRIDGE_TLS_CERT") != t1.ClientCert || envOf(n1.EdgeEnv, "FRIDGE_TLS_KEY") != t1.ClientKey || envOf(n1.EdgeEnv, "FRIDGE_TLS_CA") != string(a.CA.CertPEM()) {
+	if envOf(n1.EdgeEnv, "FRIDGE_TLS_CERT") != t1.ClientCert || envOf(n1.EdgeEnv, "FRIDGE_TLS_KEY") != t1.ClientKey || envOf(n1.EdgeEnv, "FRIDGE_TLS_CA") != t1.CA || t1.CA == string(a.CA.CertPEM()) {
 		t.Fatalf("sidecar env: %v", n1.EdgeEnv)
 	}
 	if n1.EdgeEnv[1] == n2.EdgeEnv[1] {
@@ -373,5 +373,65 @@ func TestRouteCertificateIsTheDatabasesOwn(t *testing.T) {
 	}
 	if err := leaf.VerifyHostname("fridge-db-" + d.NodeKey); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Each tenant has a CA of their own: it signs only their databases, the CA a user downloads vouches for those and for
+// no one else's, and one tenant's databases share it.
+func TestEachTenantHasItsOwnCA(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	ctx := context.Background()
+	alice, bob := mkUser(t, a, "alice", "user"), mkUser(t, a, "bob", "user")
+	regDomain(a, alice, "a1.com")
+	regDomain(a, alice, "a2.com")
+	regDomain(a, bob, "b1.com")
+	a1, err := createDB(a, ctx, CreateRequest{OwnerID: alice, Engine: "postgres", Name: "one", Domain: "a1.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a2, _ := createDB(a, ctx, CreateRequest{OwnerID: alice, Engine: "postgres", Name: "two", Domain: "a2.com"})
+	b1, err := createDB(a, ctx, CreateRequest{OwnerID: bob, Engine: "postgres", Name: "one", Domain: "b1.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	caOf := func(d store.Database) string {
+		pemCA, err := a.DatabaseCA(ctx, d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pemCA
+	}
+	if caOf(a1) != caOf(a2) {
+		t.Fatal("one tenant's databases are signed by different CAs")
+	}
+	if caOf(a1) == caOf(b1) || caOf(a1) == string(a.CA.CertPEM()) {
+		t.Fatal("tenants share a CA with each other or with the instance")
+	}
+	verifies := func(d store.Database, caPEM string) error {
+		tl, _ := a.nodeTLS(ctx, d)
+		b, _ := pem.Decode([]byte(tl.ServerCert))
+		leaf, err := x509.ParseCertificate(b.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots := x509.NewCertPool()
+		roots.AppendCertsFromPEM([]byte(caPEM))
+		_, err = leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: d.Domain})
+		return err
+	}
+	if err := verifies(a1, caOf(a1)); err != nil {
+		t.Fatalf("alice's CA does not vouch for her database: %v", err)
+	}
+	if err := verifies(a1, caOf(b1)); err == nil {
+		t.Fatal("bob's CA vouches for alice's database")
+	}
+	if err := verifies(a1, string(a.CA.CertPEM())); err == nil {
+		t.Fatal("the instance CA vouches for a tenant's database")
+	}
+	if tl, _ := a.nodeTLS(ctx, b1); tl.CA != caOf(b1) {
+		t.Fatal("the sidecar and jobs of a node must trust the CA that signed it")
+	}
+	if n, _ := a.Store.GetTenantCA(ctx, alice); strings.Contains(n.KeyEnc, "PRIVATE KEY") {
+		t.Fatal("the tenant CA key is stored in the clear")
 	}
 }

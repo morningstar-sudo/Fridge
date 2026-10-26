@@ -61,6 +61,8 @@ func fakeServer(t *testing.T, ca *pki.CA) (*httptest.Server, *apiLog) {
 		switch r.URL.Path {
 		case "/api/ca":
 			w.Write(ca.CertPEM())
+		case "/api/databases/alice_shop/ca":
+			w.Write([]byte("TENANT-CA\n"))
 		case "/api/setup/status":
 			w.Write([]byte(fmt.Sprintf(`{"needed":%v}`, log.setupNeeded.Load())))
 		case "/api/auth/scram/start":
@@ -401,5 +403,24 @@ func TestLoginBeforeSetupSaysSetupNeeded(t *testing.T) {
 	}
 	if _, ok := log.last("/api/auth/scram/start"); ok {
 		t.Fatal("a SCRAM round was started against a server with no accounts")
+	}
+}
+
+func TestCAOfADatabase(t *testing.T) {
+	ca := newTestCA(t)
+	srv, log := fakeServer(t, ca)
+	cliEnv(t, srv.URL)
+	if code, _, errs := runWith(t, testPass+"\n", "login", "--user", testUser, "--password-stdin", "--yes"); code != 0 {
+		t.Fatalf("login: %q", errs)
+	}
+	if code, out, errs := runWith(t, "", "ca"); code != 0 || out != string(ca.CertPEM()) {
+		t.Fatalf("instance CA: %d %q %q", code, out, errs)
+	}
+	code, out, errs := runWith(t, "", "ca", "--db", "alice_shop")
+	if code != 0 || out != "TENANT-CA\n" {
+		t.Fatalf("database CA: %d %q %q", code, out, errs)
+	}
+	if r, ok := log.last("/api/databases/alice_shop/ca"); !ok || r.auth != "Bearer SESSION-1" {
+		t.Fatalf("the request: %+v %v", r, ok)
 	}
 }

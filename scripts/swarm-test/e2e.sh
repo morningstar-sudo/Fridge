@@ -57,6 +57,17 @@ got=$(R PSQL "$DBPW" "$IP1" "channel_binding=require" -c "select count(*) from t
 [ "$got" = 1 ] || fail "channel_binding=require: got '$got'"
 echo "channel binding ok"
 
+step "each tenant has its own CA: verify-full works with the tenant's CA and not with the instance CA"
+F ca --db e2eadm_e1 | docker exec -i fsw1 sh -c 'cat > /root/e1-ca.crt'
+F ca | docker exec -i fsw1 sh -c 'cat > /root/instance-ca.crt'
+VF() { # <ca file in fsw1>
+	$D run --rm --network host -e PGPASSWORD="$DBPW" -v "$1:/ca.crt:ro" --entrypoint /usr/lib/postgresql/17/bin/psql fridge-job:dev \
+		"host=db1.lan hostaddr=$IP1 port=5432 dbname=$DBNAME user=$DBNAME sslmode=verify-full sslrootcert=/ca.crt connect_timeout=8" -tAc "select 1"
+}
+[ "$(R VF /root/e1-ca.crt | tail -1)" = 1 ] || fail "verify-full with the tenant CA failed"
+if VF /root/instance-ca.crt >/dev/null 2>&1; then fail "the instance CA vouched for a tenant's database"; fi
+echo "tenant CA ok"
+
 step "unknown name and plain text are refused"
 if $D run --rm --network host -e PGPASSWORD="$DBPW" --entrypoint /usr/lib/postgresql/17/bin/psql fridge-job:dev \
 	"host=nope.lan hostaddr=$IP1 port=5432 dbname=$DBNAME user=$DBNAME sslmode=require connect_timeout=5" -tAc "select 1" >/dev/null 2>&1; then fail "an unknown name was served"; fi

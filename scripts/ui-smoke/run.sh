@@ -22,6 +22,10 @@ if ! $D service inspect minio >/dev/null 2>&1; then
 	sleep 8
 	$D service create -d --name minio-init --network fridge_egress --restart-condition none --mode replicated-job \
 		-e MC_HOST_local=http://minioadmin:minioadmin@minio:9000 cgr.dev/chainguard/minio-client:latest mb -p local/fridge >/dev/null 2>&1 || true
+	for _ in $(seq 1 60); do # the bucket must exist before the first test of the destination
+		[ "$($D service ps minio-init --format '{{.CurrentState}}' 2>/dev/null | head -1 | cut -c1-8)" = Complete ] && break
+		sleep 2
+	done
 fi
 
 echo "waiting for https://fsw1:8443 ..."

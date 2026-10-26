@@ -102,8 +102,16 @@ let `host` drive SNI and `hostaddr` pick the server:
 
 ```sh
 psql "postgresql://abc_app:<pw>@abc.com:5432/abc?sslmode=require&hostaddr=203.0.113.10"
-./fridge ca > fridge-ca.crt   # then sslmode=verify-full&sslrootcert=fridge-ca.crt
+./fridge ca --db alice_abc > abc-ca.crt   # then sslmode=verify-full&sslrootcert=abc-ca.crt
 ```
+
+Plain `sslmode=require` encrypts but does not check who answers. To check, trust the database's CA: **every account has a
+CA of its own**, created the first time they get a database, and signs the certificates of their databases only. It is
+downloaded from the database's page in the web UI ("tải CA của database này"), with `fridge ca --db <name>`, or from
+`GET /api/databases/<name>/ca`; everyone who may see a database (members, admins) gets its owner's CA. A client that trusts
+it trusts that owner's databases and no one else's, and the instance CA (the web UI's, `fridge ca`) vouches for none of
+them. Databases made before tenant CAs existed keep their instance-CA certificate until recreated. The CA's private key
+never leaves the server (stored encrypted).
 
 Stopping `fridge` does not interrupt database traffic; Traefik keeps routing with the last config it fetched. A Traefik
 that starts while Fridge is down has no routes until Fridge is back. Fridge checks the swarm at boot and every five

@@ -29,3 +29,31 @@ func TestDBTLSRoundTrip(t *testing.T) {
 		t.Fatalf("%+v %v", got, err)
 	}
 }
+
+func TestTenantCAIsCreatedOnce(t *testing.T) {
+	s := storetest.New(t)
+	u := mustUser(t, s, "alice", "user")
+	if _, err := s.GetTenantCA(ctx, u.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("no CA yet: %v", err)
+	}
+	first, err := s.CreateTenantCA(ctx, store.TenantCA{UserID: u.ID, CertPEM: "c1", KeyEnc: "k1"})
+	if err != nil || first.CertPEM != "c1" {
+		t.Fatalf("%+v %v", first, err)
+	}
+	second, err := s.CreateTenantCA(ctx, store.TenantCA{UserID: u.ID, CertPEM: "c2", KeyEnc: "k2"}) // a racing request
+	if err != nil || second.CertPEM != "c1" || second.KeyEnc != "k1" {
+		t.Fatalf("the first CA must win: %+v %v", second, err)
+	}
+}
+
+func TestDBTLSRemembersWhichCASigned(t *testing.T) {
+	s := storetest.New(t)
+	owner := mustUser(t, s, "bob", "user")
+	d := mkDB(t, s, "b", owner, "running")
+	if err := s.SetDBTLS(ctx, d.ID, store.DBTLS{ServerCertPEM: "s", ServerKeyEnc: "sk", ClientCertPEM: "c", ClientKeyEnc: "ck", CACertPEM: "THECA", NotAfter: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.GetDBTLS(ctx, d.ID); err != nil || got.CACertPEM != "THECA" {
+		t.Fatalf("%+v %v", got, err)
+	}
+}

@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -408,4 +410,39 @@ func TestSuperuserAccess(t *testing.T) {
 	if after.User != su.User || after.Password == su.Password {
 		t.Fatal(su, after)
 	}
+}
+
+// The CA of a database is public to whoever may see the database (so a member can verify it too) and to nobody else,
+// and it is the tenant's own CA, not the instance's.
+func TestDatabaseCADownload(t *testing.T) {
+	e := newTenants(t)
+	own := e.want(t, e.alice, "GET", "/api/databases/alice_app/ca", "", 200)
+	if !strings.Contains(own.Body.String(), "BEGIN CERTIFICATE") || !strings.Contains(own.Header().Get("Content-Disposition"), "alice_app-ca.crt") {
+		t.Fatalf("%q %v", own.Body.String(), own.Header())
+	}
+	if own.Body.String() == string(e.a.CA.CertPEM()) {
+		t.Fatal("a tenant's database is vouched for by the instance CA")
+	}
+	if cn := certCN(t, own.Body.String()); cn != "Fridge CA - alice" {
+		t.Fatalf("CA is %q", cn)
+	}
+	e.want(t, e.bob, "GET", "/api/databases/alice_app/ca", "", 404) // a stranger learns nothing, not even that it exists
+	e.want(t, "", "GET", "/api/databases/alice_app/ca", "", 401)
+	e.want(t, e.alice, "POST", "/api/databases/alice_app/members", `{"username":"bob"}`, 204)
+	if m := e.want(t, e.bob, "GET", "/api/databases/alice_app/ca", "", 200); m.Body.String() != own.Body.String() {
+		t.Fatal("a member must get the owner's CA")
+	}
+	if w := e.want(t, e.root, "GET", "/api/databases/alice_app/ca", "", 200); w.Body.String() != own.Body.String() {
+		t.Fatal("an admin must get the owner's CA")
+	}
+}
+
+func certCN(t *testing.T, pemText string) string {
+	t.Helper()
+	b, _ := pem.Decode([]byte(pemText))
+	c, err := x509.ParseCertificate(b.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c.Subject.CommonName
 }

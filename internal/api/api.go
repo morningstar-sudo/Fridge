@@ -51,6 +51,7 @@ func New(a *app.App, au *auth.Service, o Options) http.Handler {
 	api.HandleFunc("GET /api/databases", s.listDBs)
 	api.HandleFunc("GET /api/databases/{db}", s.getDB)
 	api.HandleFunc("GET /api/databases/{db}/connection", s.connection)
+	api.HandleFunc("GET /api/databases/{db}/ca", s.databaseCA)
 	api.HandleFunc("GET /api/destinations", s.listDests)
 	api.HandleFunc("POST /api/destinations", s.createDest)
 	api.HandleFunc("PUT /api/destinations/{id}", s.updateDest)
@@ -905,4 +906,21 @@ func (s *server) putEndpointAllow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string][]string{"hosts": h})
+}
+
+// databaseCA serves the CA certificate that vouches for this database's server certificate: its owner's own CA, so a
+// client that trusts it trusts that owner's databases and nobody else's. Anyone who may see the database may have it.
+func (s *server) databaseCA(w http.ResponseWriter, r *http.Request) {
+	d, ok := s.dbOf(w, r)
+	if !ok {
+		return
+	}
+	pemCA, err := s.a.DatabaseCA(r.Context(), d)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+d.Name+`-ca.crt"`)
+	io.WriteString(w, pemCA)
 }

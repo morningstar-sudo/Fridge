@@ -143,7 +143,12 @@ await step("add a MinIO destination and test it", async () => {
   const row = admin.locator("tr", { hasText: "minio" });
   await row.waitFor();
   await row.getByRole("button", { name: "Test" }).click();
-  await toast(admin, "kết nối được", 90000);
+  // a failed test shows an error toast for a few seconds: report what it said instead of timing out
+  const res = await Promise.race([
+    toast(admin, "kết nối được", 60000).then(() => "ok"),
+    admin.locator(".toast-msg.err").first().waitFor({ timeout: 60000 }).then(async () => "error toast: " + (await admin.locator(".toast-msg.err").first().textContent())),
+  ]);
+  if (res !== "ok") throw new Error(res);
 });
 
 let dbUser, dbPass;
@@ -169,6 +174,9 @@ await step("database becomes running and the connection string shows the generat
   await admin.getByRole("button", { name: "Hiện mật khẩu" }).first().click();
   const want = `root1_${dbUser}:${dbPass}@`;
   await admin.locator(".strip .value", { hasText: want }).first().waitFor();
+  // the CA that vouches for this database (its owner's own) is one click away
+  const caHref = await admin.locator("a[download$=\"-ca.crt\"]").first().getAttribute("href");
+  if (!/^\/api\/databases\/root1_[^/]+\/ca$/.test(caHref)) throw new Error("CA link: " + caHref);
 });
 
 await step("Backup now produces an ok backup row and the list shows it", async () => {
@@ -298,7 +306,9 @@ await step("audit log lists the password reveal, filters, and exports CSV", asyn
   await admin.fill("input[name=actor]", "root1");
   await admin.getByRole("button", { name: "Lọc", exact: true }).click();
   await admin.locator("td", { hasText: "db.reveal_password" }).first().waitFor();
-  if ((await admin.locator("tbody td", { hasText: /^bob$/ }).count()) !== 0) throw new Error("filter by root1 still shows bob");
+  const bobRows = () => admin.locator("tbody td", { hasText: /^bob$/ }).count();
+  for (let i = 0; i < 40 && (await bobRows()) > 0; i++) await admin.waitForTimeout(250); // the table is replaced when the filtered answer arrives
+  if ((await bobRows()) !== 0) throw new Error("filter by root1 still shows bob");
   const [dl] = await Promise.all([admin.waitForEvent("download"), admin.getByRole("button", { name: "Xuất CSV" }).click()]);
   if (!dl.suggestedFilename().endsWith(".csv")) throw new Error("download " + dl.suggestedFilename());
 });

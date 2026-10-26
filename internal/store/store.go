@@ -133,6 +133,7 @@ var migrations = []string{
 	migration4,
 	migration5,
 	migration6,
+	migration7,
 }
 
 func (s *Store) migrate(ctx context.Context) error { return s.migrateTo(ctx, len(migrations)) }

@@ -124,35 +124,10 @@ func (c *CA) IssueNames(names []string, validFor time.Duration) (certPEM, keyPEM
 }
 
 func create(dir string) (*CA, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	crtPEM, keyPEM, err := NewCA("Fridge Internal CA")
 	if err != nil {
 		return nil, err
 	}
-	serial, err := randomSerial()
-	if err != nil {
-		return nil, err
-	}
-	now := time.Now()
-	tmpl := &x509.Certificate{
-		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "Fridge Internal CA"},
-		NotBefore:             now.Add(-time.Hour),
-		NotAfter:              now.Add(caValidFor),
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		return nil, err
-	}
-	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
-		return nil, err
-	}
-	crtPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
-
 	// O_EXCL: never overwrite a file that appeared since we checked.
 	if err := writeNew(filepath.Join(dir, caKeyFile), keyPEM, 0o600); err != nil {
 		return nil, err
@@ -162,6 +137,41 @@ func create(dir string) (*CA, error) {
 	}
 	return parse(crtPEM, keyPEM)
 }
+
+// NewCA generates a CA (ECDSA P-256, valid ten years) and returns its certificate and PKCS#8 key as PEM.
+// Nothing is written anywhere: the caller stores them, and Parse turns them back into a CA.
+func NewCA(commonName string) (certPEM, keyPEM []byte, err error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+	serial, err := randomSerial()
+	if err != nil {
+		return nil, nil, err
+	}
+	now := time.Now()
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: commonName},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(caValidFor),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), nil
+}
+
+// Parse loads a CA from the PEM that NewCA returned.
+func Parse(certPEM, keyPEM []byte) (*CA, error) { return parse(certPEM, keyPEM) }
 
 func parse(crtPEM, keyPEM []byte) (*CA, error) {
 	block, _ := pem.Decode(crtPEM)

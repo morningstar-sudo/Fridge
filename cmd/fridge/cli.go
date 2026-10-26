@@ -18,7 +18,7 @@ import (
 const usage = `usage: fridge <command> [args]
   login [--user U] [--password-stdin] [--yes] [--ca-file F] | logout | whoami
   setup --setup-token T --user U [--password-stdin]        (first admin, no browser needed)
-  engines | ls | backups <db> | ca
+  engines | ls | backups <db> | ca [--db <db>]       (--db: the CA that vouches for that database; trust it with sslmode=verify-full)
   create <engine> <name> --domain D [--version V] [--reveal] [--db-user U] [--db-password-stdin | --random-credentials]
   show <db> [--reveal]                                   (--reveal prints the password; it is audited)
   superuser show <db> [--reveal] | superuser rotate <db>
@@ -344,10 +344,17 @@ func (c *cli) dispatch(args []string) error {
 		}
 		return c.cidrs(b)
 	case "ca":
-		if _, err := c.need(cmd, rest, 0, nil); err != nil {
+		var db string
+		if _, err := c.need(cmd, rest, 0, func(fs *flag.FlagSet) {
+			fs.StringVar(&db, "db", "", "the CA of this database (your own CA, which signed its certificate); without it, the instance CA that signs the web UI")
+		}); err != nil {
 			return err
 		}
-		b, err := call("GET", "/api/ca", nil)
+		path := "/api/ca"
+		if db != "" {
+			path = "/api/databases/" + url.PathEscape(db) + "/ca"
+		}
+		b, err := call("GET", path, nil)
 		if err != nil {
 			return err
 		}

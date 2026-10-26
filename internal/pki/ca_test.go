@@ -189,3 +189,37 @@ func TestRemainingStopsAtTheCA(t *testing.T) {
 		t.Fatalf("the longest allowed leaf is refused: %v", err)
 	}
 }
+
+func TestNewCAIsAUsableIndependentCA(t *testing.T) {
+	c1, k1, err := NewCA("Fridge CA - alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2, k2, _ := NewCA("Fridge CA - bob")
+	alice, err := Parse(c1, k1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, _ := Parse(c2, k2)
+	leafPEM, _, err := alice.IssueNames([]string{"db.alice.lan"}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := pem.Decode(leafPEM)
+	leaf, _ := x509.ParseCertificate(b.Bytes)
+	verify := func(ca *CA) error {
+		roots := x509.NewCertPool()
+		roots.AppendCertsFromPEM(ca.CertPEM())
+		_, err := leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: "db.alice.lan"})
+		return err
+	}
+	if err := verify(alice); err != nil {
+		t.Fatalf("its own CA does not verify its leaf: %v", err)
+	}
+	if err := verify(bob); err == nil {
+		t.Fatal("another tenant's CA verifies the leaf")
+	}
+	if _, err := Parse(c1, k2); err == nil {
+		t.Fatal("a key that does not belong to the certificate was accepted")
+	}
+}

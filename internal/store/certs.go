@@ -65,22 +65,55 @@ CREATE TABLE db_tls (
 type DBTLS struct {
 	ServerCertPEM, ServerKeyEnc string
 	ClientCertPEM, ClientKeyEnc string
+	CACertPEM                   string // the CA that signed ServerCertPEM; empty = the instance-wide CA
 	NotAfter                    time.Time
 }
 
 // SetDBTLS stores (or replaces) the TLS material of database id.
 func (s *Store) SetDBTLS(ctx context.Context, id int64, t DBTLS) error {
-	_, err := s.pool.Exec(ctx, `INSERT INTO db_tls(database_id, server_cert_pem, server_key_enc, client_cert_pem, client_key_enc, not_after) VALUES($1,$2,$3,$4,$5,$6)
+	_, err := s.pool.Exec(ctx, `INSERT INTO db_tls(database_id, server_cert_pem, server_key_enc, client_cert_pem, client_key_enc, not_after, ca_cert_pem) VALUES($1,$2,$3,$4,$5,$6,$7)
 		ON CONFLICT (database_id) DO UPDATE SET server_cert_pem=EXCLUDED.server_cert_pem, server_key_enc=EXCLUDED.server_key_enc,
-			client_cert_pem=EXCLUDED.client_cert_pem, client_key_enc=EXCLUDED.client_key_enc, not_after=EXCLUDED.not_after`,
-		id, t.ServerCertPEM, t.ServerKeyEnc, t.ClientCertPEM, t.ClientKeyEnc, t.NotAfter)
+			client_cert_pem=EXCLUDED.client_cert_pem, client_key_enc=EXCLUDED.client_key_enc, not_after=EXCLUDED.not_after, ca_cert_pem=EXCLUDED.ca_cert_pem`,
+		id, t.ServerCertPEM, t.ServerKeyEnc, t.ClientCertPEM, t.ClientKeyEnc, t.NotAfter, t.CACertPEM)
 	return mapErr(err)
 }
 
 // GetDBTLS returns ErrNotFound for a database without node TLS (a node made before it existed).
 func (s *Store) GetDBTLS(ctx context.Context, id int64) (DBTLS, error) {
 	var t DBTLS
-	err := s.pool.QueryRow(ctx, `SELECT server_cert_pem, server_key_enc, client_cert_pem, client_key_enc, not_after FROM db_tls WHERE database_id=$1`, id).
-		Scan(&t.ServerCertPEM, &t.ServerKeyEnc, &t.ClientCertPEM, &t.ClientKeyEnc, &t.NotAfter)
+	err := s.pool.QueryRow(ctx, `SELECT server_cert_pem, server_key_enc, client_cert_pem, client_key_enc, not_after, ca_cert_pem FROM db_tls WHERE database_id=$1`, id).
+		Scan(&t.ServerCertPEM, &t.ServerKeyEnc, &t.ClientCertPEM, &t.ClientKeyEnc, &t.NotAfter, &t.CACertPEM)
 	return t, mapErr(err)
+}
+
+// migration7: every tenant (a user account) gets a CA of their own, created the first time they get a database. The
+// certificates of their databases are signed by it, so the CA a user downloads and trusts vouches for their databases
+// and for no one else's. ca_cert_pem on db_tls records which CA signed a node (” = the instance-wide CA, for nodes
+// made before tenant CAs existed).
+const migration7 = `
+CREATE TABLE tenant_cas (
+	user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+	cert_pem TEXT NOT NULL,
+	key_enc TEXT NOT NULL
+);
+ALTER TABLE db_tls ADD ca_cert_pem TEXT NOT NULL DEFAULT '';`
+
+type TenantCA struct {
+	UserID          int64
+	CertPEM, KeyEnc string
+}
+
+// GetTenantCA returns ErrNotFound for a user who has none yet.
+func (s *Store) GetTenantCA(ctx context.Context, userID int64) (TenantCA, error) {
+	c := TenantCA{UserID: userID}
+	err := s.pool.QueryRow(ctx, `SELECT cert_pem, key_enc FROM tenant_cas WHERE user_id=$1`, userID).Scan(&c.CertPEM, &c.KeyEnc)
+	return c, mapErr(err)
+}
+
+// CreateTenantCA stores c unless the user already has one (two requests racing): it returns whichever is stored.
+func (s *Store) CreateTenantCA(ctx context.Context, c TenantCA) (TenantCA, error) {
+	if _, err := s.pool.Exec(ctx, `INSERT INTO tenant_cas(user_id, cert_pem, key_enc) VALUES($1,$2,$3) ON CONFLICT (user_id) DO NOTHING`, c.UserID, c.CertPEM, c.KeyEnc); err != nil {
+		return TenantCA{}, mapErr(err)
+	}
+	return s.GetTenantCA(ctx, c.UserID)
 }

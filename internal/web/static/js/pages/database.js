@@ -97,7 +97,7 @@ export default async function database(ctx) {
           "p",
           { class: "hint mt-3 mb-0" },
           "Kết nối bằng TLS; tên host chọn database (SNI). Muốn kiểm tra chứng chỉ, ",
-          h("a", { href: "/api/ca", download: "fridge-ca.crt" }, "tải CA của Fridge"),
+          h("a", { href: `/api/databases/${encodeURIComponent(d.name)}/ca`, download: `${d.name}-ca.crt` }, "tải CA của database này"),
           " và dùng sslmode=verify-full.",
         ),
       ),
