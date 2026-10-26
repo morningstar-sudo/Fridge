@@ -1,8 +1,9 @@
 # Fridge on Docker Swarm. Deploy (or upgrade) with install.sh, or by hand from the directory holding .env:
 #   set -a; . ./.env; set +a; docker stack deploy --with-registry-auth -c stack.yml fridge
 #
-# Everything is a swarm service; adding a server is `docker swarm join` (plus, for a server that may hold databases,
-# `docker node update --label-add fridge.db=true <node>`). Nothing runs on the other servers but Docker itself.
+# Everything is a swarm service; adding a server is `install.sh --add-node` on the manager (it only runs `docker swarm join` on
+# the new server) and databases may be placed on it at once (`docker node update --label-add fridge.db=false <node>` opts a
+# server out). Nothing runs on the other servers but Docker itself.
 
 services:
   # One Traefik per server: the database port goes through the routing mesh (any server answers on 5432), the web

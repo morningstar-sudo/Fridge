@@ -30,7 +30,7 @@ const (
 	LabelRole = "fridge.role"     // "db" | "edge" | "job"
 	LabelKey  = "fridge.node_key" // ties a database's services and network together
 	LabelDB   = "fridge.db_id"
-	NodeLabel = "fridge.db" // swarm node label: "true" = databases may be placed here
+	NodeLabel = "fridge.db" // swarm node label: "false" keeps databases off a node; absent or anything else allows them
 	EdgePort  = 5432
 )
 
@@ -105,7 +105,8 @@ func (c *Client) networkExists(ctx context.Context, name string) (bool, error) {
 
 type Host struct{ ID, Hostname string }
 
-// PickHost chooses the ready, active node labelled fridge.db=true that holds the fewest databases.
+// PickHost chooses the ready, active node that holds the fewest databases. A server that joins the swarm is eligible
+// at once; `docker node update --label-add fridge.db=false <node>` keeps databases off one.
 func (c *Client) PickHost(ctx context.Context) (Host, error) {
 	nodes, err := c.cli.NodeList(ctx, swarm.NodeListOptions{})
 	if err != nil {
@@ -128,7 +129,7 @@ func (c *Client) PickHost(ctx context.Context) (Host, error) {
 	var best *swarm.Node
 	for i := range nodes {
 		n := &nodes[i]
-		if n.Status.State != swarm.NodeStateReady || n.Spec.Availability != swarm.NodeAvailabilityActive || n.Spec.Labels[NodeLabel] != "true" {
+		if n.Status.State != swarm.NodeStateReady || n.Spec.Availability != swarm.NodeAvailabilityActive || n.Spec.Labels[NodeLabel] == "false" {
 			continue
 		}
 		if best == nil || load[n.ID] < load[best.ID] || (load[n.ID] == load[best.ID] && n.Description.Hostname < best.Description.Hostname) {
@@ -136,7 +137,7 @@ func (c *Client) PickHost(ctx context.Context) (Host, error) {
 		}
 	}
 	if best == nil {
-		return Host{}, fmt.Errorf("no ready swarm node has the label %s=true (docker node update --label-add %s=true <node>)", NodeLabel, NodeLabel)
+		return Host{}, fmt.Errorf("no ready, active swarm node may hold databases (nodes labelled %s=false are skipped)", NodeLabel)
 	}
 	return Host{ID: best.ID, Hostname: best.Description.Hostname}, nil
 }

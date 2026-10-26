@@ -133,4 +133,37 @@ done
 $D service ls --format '{{.Name}}' | grep -qx "$EDGE" || fail "$EDGE was not recreated"
 echo "recreated $EDGE"
 
+
+step "adding a server: --add-node prints the command, then does it over SSH; the new server gets Traefik and databases"
+bash scripts/swarm-test/node.sh fsw3 fridge:dev fridge-job:dev postgres:17 postgres:18 traefik:v3.5 >/dev/null
+export MGR_DOCKER=tcp://127.0.0.1:23750 # the installer runs on this host and talks to the manager's API, as it would on the manager
+out=$(DOCKER_HOST=$MGR_DOCKER sh install.sh --add-node)
+echo "$out" | grep -q -- "--join .*:2377 --token SWMTKN-" || fail "--add-node printed no join command: $out"
+echo "$out" | grep -q "docker swarm join-token --rotate worker" || fail "--add-node does not say how to revoke the token"
+# the test containers have no sshd: an ssh that runs the command inside fsw3 stands in for it
+SHIM=$(mktemp -d)
+printf '#!/bin/sh\nshift\nexec env -u DOCKER_HOST docker exec -i fsw3 "$@"\n' >"$SHIM/ssh"
+chmod +x "$SHIM/ssh"
+DOCKER_HOST=$MGR_DOCKER PATH="$SHIM:$PATH" sh install.sh --add-node worker@fsw3 | tail -6
+rm -rf "$SHIM"
+for _ in $(seq 1 60); do
+	[ "$($D service ls --filter name=fridge_traefik --format '{{.Replicas}}')" = "3/3" ] && break
+	sleep 3
+done
+[ "$($D service ls --filter name=fridge_traefik --format '{{.Replicas}}')" = "3/3" ] || fail "Traefik did not start on the new server"
+echo "Traefik runs on all 3 servers"
+F domains add db3.lan >/dev/null
+F create postgres e3 --domain db3.lan --version 17 --reveal >/dev/null
+S3=""; for s in $($D service ls --filter label=fridge.role=db --format '{{.Name}}'); do case "$($D service ps "$s" --filter desired-state=running --format '{{.Node}}')" in fsw3) S3=$s ;; esac; done
+[ -n "$S3" ] || fail "no database was placed on the new server (it was not labelled: it must be eligible by default)"
+echo "database on the new server: $S3"
+IP3=$(docker inspect -f '{{(index .NetworkSettings.Networks "fsw-net").IPAddress}}' fsw3)
+DBPW3=$(F show e2eadm_e3 --reveal | grep -o 'postgresql://[^ ]*' | head -1 | sed -n 's|^postgresql://[^:]*:\([^@]*\)@.*|\1|p')
+PSQL3() { $D run --rm --network host -e PGPASSWORD="$DBPW3" --entrypoint /usr/lib/postgresql/17/bin/psql fridge-job:dev \
+	"host=db3.lan hostaddr=$1 port=5432 dbname=e2eadm_e3 user=e2eadm_e3 sslmode=require connect_timeout=8" -tA "${@:2}"; }
+for ip in "$IP3" "$IP1"; do # through the new server's own Traefik, and through an old one reaching a database on the new server
+	[ "$(R PSQL3 "$ip" -c 'select 7' | tail -1)" = 7 ] || fail "e3 through $ip"
+done
+echo "new server works"
+
 step "all good"

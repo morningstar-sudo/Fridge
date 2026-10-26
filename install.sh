@@ -16,11 +16,17 @@
 #   --uninstall         remove the stack; databases, their volumes and the metadata stay
 #   --purge             with --uninstall: also remove every database node, all volumes and --dir
 #   --yes               do not ask before --purge
+#
+# Adding a server (nothing is installed on it but Docker; databases may be placed on it as soon as it joins):
+#   --add-node            on the manager: print the one command to run on the new server
+#   --add-node USER@HOST  on the manager: run that command on the new server over SSH and wait until it is ready
+#   --join ADDR --token T on the new server: join the swarm of the manager at ADDR (what --add-node prints)
+# The new server needs 2377/tcp (to the manager), 7946/tcp+udp, 4789/udp and ESP (IP protocol 50) open between servers.
 set -eu
 
 REPO=morningstar-sudo/Fridge
 STACK=fridge
-ADMIN="" HOSTS="" VERSION="" DIR="" ADDR="" UNINSTALL=0 PURGE=0 YES=0
+ADMIN="" HOSTS="" VERSION="" DIR="" ADDR="" UNINSTALL=0 PURGE=0 YES=0 ADD_NODE=0 ADD_TARGET="" JOIN="" TOKEN=""
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
@@ -35,7 +41,10 @@ while [ $# -gt 0 ]; do
 	--uninstall) UNINSTALL=1; shift ;;
 	--purge) PURGE=1; shift ;;
 	--yes) YES=1; shift ;;
-	-h|--help) sed -n '2,19p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
+	--add-node) ADD_NODE=1; case "${2:-}" in ""|-*) shift ;; *) ADD_TARGET=$2; shift 2 ;; esac ;;
+	--join) JOIN=${2:?--join needs the manager address}; shift 2 ;;
+	--token) TOKEN=${2:?--token needs the worker join token}; shift 2 ;;
+	-h|--help) sed -n '2,24p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
 	*) die "unknown option $1 (see --help)" ;;
 	esac
 done
@@ -88,6 +97,58 @@ wait_for() { # <seconds> <what> <command...>
 	done
 	die "timed out waiting for $what"
 }
+
+# ------------------------------------------------------------------ add a server
+# On the new server: join the swarm. Traefik (a global service) starts there by itself and the server may hold databases
+# from now on (docker node update --label-add fridge.db=false <node> keeps them off).
+if [ -n "$JOIN" ]; then
+	[ -n "$TOKEN" ] || die "--join needs --token (docker swarm join-token worker, on the manager)"
+	case "$JOIN" in *:*) ;; *) JOIN=$JOIN:2377 ;; esac
+	case "$(swarm_state)" in
+	active) say "This server is already in a swarm; nothing to do."; exit 0 ;;
+	inactive) ;;
+	*) die "this server's swarm state is '$(swarm_state)'; fix it first (docker swarm leave --force starts over)" ;;
+	esac
+	say "Joining the swarm at $JOIN ..."
+	if [ -n "$ADDR" ]; then set -- --advertise-addr "$ADDR"; else set --; fi
+	docker swarm join "$@" --token "$TOKEN" "$JOIN" >/dev/null || die "could not join $JOIN: check that 2377/tcp, 7946/tcp+udp, 4789/udp and ESP are open between the servers (and --advertise-addr if this server has several addresses)"
+	say "Joined. Traefik starts on this server within a minute; databases can be placed here from now on."
+	say "Images are pulled on demand (and by Images > Pull). If the images are private: docker login ghcr.io on this server."
+	exit 0
+fi
+
+# On the manager: print (or, over SSH, run) the command that makes another server join.
+if [ "$ADD_NODE" = 1 ]; then
+	[ "$(swarm_state)" = active ] && [ "$(docker info --format '{{.Swarm.ControlAvailable}}')" = true ] || die "--add-node runs on the swarm manager"
+	WTOKEN=$(docker swarm join-token -q worker)
+	MGR=$(docker info --format '{{.Swarm.NodeAddr}}'):2377
+	JOIN_ARGS="--join $MGR --token $WTOKEN"
+	if [ -z "$ADD_TARGET" ]; then
+		say "On the new server (it needs Docker, and 2377/tcp to this server, 7946/tcp+udp, 4789/udp and ESP between servers):"
+		say ""
+		say "  curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh -s -- $JOIN_ARGS"
+		say ""
+		say "The token is a secret: whoever has it can join the swarm. Revoke it with: docker swarm join-token --rotate worker"
+		say "Or let this server do it over SSH:  sh install.sh --add-node USER@HOST"
+		exit 0
+	fi
+	SCRIPT=$0
+	if [ ! -f "$SCRIPT" ]; then # piped from curl: fetch the installer again to hand it to the new server
+		command -v curl >/dev/null 2>&1 || die "curl is needed to fetch the installer for $ADD_TARGET"
+		SCRIPT=$(mktemp)
+		curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install.sh" -o "$SCRIPT" || die "could not download install.sh"
+	fi
+	BEFORE=$(docker node ls --format '{{.Status}}' | grep -c '^Ready$' || true)
+	say "Joining $ADD_TARGET over SSH ..."
+	# shellcheck disable=SC2086
+	if [ -n "$ADDR" ]; then JOIN_ARGS="$JOIN_ARGS --advertise-addr $ADDR"; fi
+	ssh ${SSH_OPTS:-} "$ADD_TARGET" sh -s -- $JOIN_ARGS <"$SCRIPT" || die "the installer failed on $ADD_TARGET"
+	node_up() { [ "$(docker node ls --format '{{.Status}}' | grep -c '^Ready$')" -gt "$BEFORE" ]; }
+	wait_for 120 "the new server to show up as Ready in docker node ls" node_up
+	say "$ADD_TARGET is in the swarm. docker node ls:"
+	docker node ls
+	exit 0
+fi
 
 # ------------------------------------------------------------------ uninstall
 if [ "$UNINSTALL" = 1 ]; then
@@ -161,6 +222,13 @@ else
 	curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/deploy/stack.yml" -o "$DIR/stack.yml" || die "could not download stack.yml ($REF)"
 fi
 
+# the installer stays next to .env: --add-node, --uninstall and upgrades are run from there later
+if [ -f "$0" ]; then
+	[ "$0" -ef "$DIR/install.sh" ] || cp "$0" "$DIR/install.sh"
+elif command -v curl >/dev/null 2>&1; then
+	curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/install.sh" -o "$DIR/install.sh" || true
+fi
+
 # fresh secrets only for what .env lacks: FRIDGE_SECRET_KEY encrypts every stored password, so it is never regenerated
 setenv FRIDGE_META_PASSWORD "$(rand_hex 16)"
 setenv FRIDGE_SECRET_KEY "$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
@@ -230,5 +298,6 @@ say "  Config    $ENVF (keep FRIDGE_SECRET_KEY safe: without it the stored passw
 say ""
 say "Open ports on the server's firewall: 8443 for the web UI (limited by Settings > IP allowlist) and 5432 for databases."
 say "Port 5432 is not filtered by Fridge: the swarm routing mesh hides client addresses, so restrict it with the firewall."
-say "To add a server: docker swarm join ... (token from: docker swarm join-token worker), then on this server"
-say "  docker node update --label-add fridge.db=true <node>     # lets it hold databases"
+say "To add a server (nothing but Docker is needed on it):"
+say "  sh $DIR/install.sh --add-node               # prints the one command to run on the new server"
+say "  sh $DIR/install.sh --add-node USER@HOST     # or does it over SSH; databases can be placed on it as soon as it joins"

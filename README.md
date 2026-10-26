@@ -36,7 +36,7 @@ The password never leaves the browser (SCRAM-SHA-256 login).
 | `traefik` | every server (global) | database port 5432 on the swarm routing mesh, web/API port 8443 on the server itself; routes and certificates are fetched from Fridge, nothing is stored |
 | `fridge` | the server labelled `fridge.control=true` | the API, the scheduler, the swarm client (needs a manager) |
 | `fridge-meta` | same server | metadata Postgres |
-| `fridge-db-<key>` | one server per database (`fridge.db=true`), pinned, with a local volume | the database |
+| `fridge-db-<key>` | one server per database (any server unless labelled `fridge.db=false`), pinned, with a local volume | the database |
 | `fridge-edge-<key>` | next to its database | joins the shared edge network and the database network; relays to its database over TLS with that database's client certificate |
 
 All databases share one internal, encrypted overlay (`fridge_db`: no internet, nothing else on it). What keeps one
@@ -51,9 +51,21 @@ days before one expires. Dump, restore and the deep check of a backup run as one
 (`fridge-job` image, PostgreSQL clients 13–18) that join `fridge_db` and the empty `fridge_egress` network (the check
 job only the latter) and talk to S3 themselves; nothing is streamed through Fridge.
 
-**Add a server:** `docker swarm join …` on it, then on the manager `docker node update --label-add fridge.db=true <node>`
-so it may hold databases. New databases go to the labelled server holding the fewest. A database lives on one server with
-its local volume; if that server goes down the database is down until it returns (restore from S3 to move it).
+**Add a server** (nothing but Docker is needed on it; open 2377/tcp to the manager, 7946/tcp+udp, 4789/udp and ESP between
+servers). On the manager (the installer keeps a copy of itself next to `.env`):
+
+```sh
+sh /opt/fridge/install.sh --add-node                 # prints the one command to run on the new server
+sh /opt/fridge/install.sh --add-node admin@10.0.0.7  # or runs it for you over SSH and waits until the server is Ready
+```
+
+Run on the new server, that command is `install.sh --join <manager>:2377 --token <worker token>` (the token is a secret:
+`docker swarm join-token --rotate worker` revokes it). Traefik is a global service, so it starts on the new server by
+itself and the server answers on 5432 and 8443 at once. New databases go to the ready server holding the fewest, the new
+one included; databases already running do not move. `docker node update --label-add fridge.db=false <node>` keeps
+databases off a server. A database lives on one server with its local volume; if that server goes down the database
+is down until it returns (restore from S3 to move it). If the images are private, `docker login ghcr.io` on the new
+server.
 
 **Firewall.** Open 8443 (web UI/API) and 5432 (databases). The routing mesh hides client addresses, so Fridge cannot
 filter port 5432 by IP: restrict it with the host firewall or the cloud security group. The IP allowlist (Settings, default
