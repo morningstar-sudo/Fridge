@@ -50,15 +50,21 @@ func (m mysqlEngine) entrypoint(version string) string {
 	} else if majorMinorAtLeast(version, 8, 4) {
 		native = " --mysql-native-password=ON"
 	}
+	// MySQL certificates live in its own secure_file_priv directory: where the AppArmor profile of the distro mysqld (a
+	// GitHub runner has one, attached by path to /usr/sbin/mysqld) lets it read, unlike a directory of ours
+	dir := "/var/lib/fridge-tls"
+	if !m.mariadb {
+		dir = "/var/lib/mysql-files/fridge-tls"
+	}
 	return `set -e
-d=/var/lib/fridge-tls
+d=` + dir + `
 mkdir -p "$d"
 printf '%s\n' "$FRIDGE_TLS_SERVER_CERT" > "$d/server.crt"
 printf '%s\n' "$FRIDGE_TLS_SERVER_KEY" > "$d/server.key"
 printf '%s\n' "$FRIDGE_TLS_CLIENT_CA" > "$d/client-ca.crt"
 chown -R mysql:mysql "$d"
 chmod 600 "$d/server.key"
-( sleep 10; ls -ldn /var/lib $d $d/* >&2; id mysql >&2; gosu mysql cat $d/server.crt >/dev/null && echo READ-OK >&2 || echo READ-FAILED >&2; cat /proc/self/status | grep -E "Cap(Eff|Bnd)|NoNewPrivs|Seccomp" >&2 ) & # ponytail: temporary, why mysqld got EACCES on the CI runner
+( sleep 10; ls -ldn /var/lib $d $d/* >&2; id mysql >&2; gosu mysql cat $d/server.crt >/dev/null && echo READ-OK >&2 || echo READ-FAILED >&2; echo "apparmor: $(cat /proc/1/attr/current 2>&1)" >&2; cat /proc/self/status | grep -E "Cap(Eff|Bnd)|NoNewPrivs|Seccomp" >&2 ) & # ponytail: temporary, why mysqld got EACCES on the CI runner
 q() { printf '%s' "$1" | sed "s/\\\\/\\\\\\\\/g; s/'/''/g"; }
 mkdir -p /docker-entrypoint-initdb.d
 printf "` + create + `\nGRANT ALL PRIVILEGES ON *.* TO '%s'@'%%' WITH GRANT OPTION;\n" "$(q "$FRIDGE_ADMIN_USER")" "$(q "$FRIDGE_ADMIN_PASSWORD")" "$(q "$FRIDGE_ADMIN_USER")" > /docker-entrypoint-initdb.d/00-fridge.sql
