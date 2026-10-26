@@ -43,6 +43,8 @@ func main() {
 			os.Exit(runJob(os.Args[2:], os.Stdout, os.Stderr))
 		case "forward":
 			os.Exit(runForward(os.Args[2:], os.Stderr))
+		case "mysql-router":
+			os.Exit(runMySQLRouter(os.Args[2:], os.Stderr))
 		case "healthcheck":
 			os.Exit(healthcheck())
 		}
