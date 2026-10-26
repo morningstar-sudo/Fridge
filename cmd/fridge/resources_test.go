@@ -186,11 +186,6 @@ func TestShowAndSuperuser(t *testing.T) {
 	if code != 0 || len(recs) != 1 {
 		t.Fatalf("rotate: %d %v", code, paths(recs))
 	}
-	// a database without a separate superuser says so
-	_, out, _, _ = fake(t, map[string]string{"GET /api/databases/old": `{"id":2,"name":"old","legacy":true}`}, "", "superuser", "show", "old")
-	if !strings.Contains(out, "no separate superuser") {
-		t.Fatalf("legacy: %q", out)
-	}
 	// there is no --superuser flag on show
 	if code, _, _, _ := fake(t, map[string]string{"GET /api/databases/alice_app": db}, "", "show", "alice_app", "--superuser"); code != 2 {
 		t.Fatalf("--superuser accepted: %d", code)

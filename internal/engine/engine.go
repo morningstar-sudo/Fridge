@@ -11,7 +11,7 @@ import (
 )
 
 // Params identifies one database instance for a given engine.
-// AdminUser is the node superuser; legacy single-user nodes pass AdminUser = User.
+// AdminUser is the node superuser.
 type Params struct {
 	Name, User, Password, Version, AdminUser, AdminPassword string
 	Host                                                    string // when set the client tools connect over TCP to Host:Port (jobs); otherwise over the local socket

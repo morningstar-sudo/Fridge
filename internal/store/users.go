@@ -157,12 +157,6 @@ func (s *Store) SetUserDisabled(ctx context.Context, id int64, disabled bool) er
 	return s.guardedUserUpdate(ctx, `UPDATE users SET disabled=$2 WHERE id=$1`, id, disabled)
 }
 
-func (s *Store) CountActiveAdmins(ctx context.Context) (int, error) {
-	var n int
-	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE role='admin' AND NOT disabled`).Scan(&n)
-	return n, err
-}
-
 func (s *Store) CreateInvite(ctx context.Context, inv *Invite) error {
 	return mapErr(s.pool.QueryRow(ctx, `INSERT INTO invites(token_hash, username, role, purpose, user_id, created_by, expires_at)
 		VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id, created_at`,

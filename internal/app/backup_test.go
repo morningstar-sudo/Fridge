@@ -31,7 +31,7 @@ func fixture(t *testing.T, a *App) (store.Database, store.Destination) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := store.Database{Name: "abc", Engine: "postgres", Version: "17", Domain: "abc.example.com", TLSMode: "internal",
+	d := store.Database{Name: "abc", Engine: "postgres", Version: "17", Domain: "abc.example.com",
 		User: "abc_app", Volume: "fridge-postgres-0123456789abcdef", Status: "running", ContainerID: "fridge-db-0123456789abcdef",
 		NodeKey: "0123456789abcdef", AdminUser: "su_0123456789abcdef", AdminPasswordEnc: adminEnc, HostID: "host1"}
 	if err := a.Store.CreateDatabase(ctx, &d); err != nil {
@@ -138,7 +138,7 @@ func TestBackupConcurrent(t *testing.T) {
 
 func TestBackupNoDestination(t *testing.T) {
 	a, _, _ := newTestApp(t)
-	d := store.Database{Name: "abc", Engine: "postgres", Version: "17", Domain: "a.b.c", TLSMode: "internal", Volume: "v", Status: "running"}
+	d := store.Database{Name: "abc", Engine: "postgres", Version: "17", Domain: "a.b.c", Volume: "v", Status: "running"}
 	if err := a.Store.CreateDatabase(context.Background(), &d); err != nil {
 		t.Fatal(err)
 	}

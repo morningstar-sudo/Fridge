@@ -10,12 +10,8 @@ import (
 	"fridge/internal/store"
 )
 
-// RevealSuperuser returns the node superuser's credentials; a legacy node's admin is its db_user.
+// RevealSuperuser returns the node superuser's credentials.
 func (a *App) RevealSuperuser(ctx context.Context, d store.Database) (user, password string, err error) {
-	if d.AdminUser == "" {
-		pw, err := a.Box.Decrypt(d.PasswordEnc)
-		return d.User, pw, err
-	}
 	pw, err := a.Box.Decrypt(d.AdminPasswordEnc)
 	return d.AdminUser, pw, err
 }
@@ -26,9 +22,6 @@ func (a *App) RotateSuperuser(ctx context.Context, d store.Database) error {
 	mu, _ := a.suLocks.LoadOrStore(d.ID, &sync.Mutex{})
 	mu.(*sync.Mutex).Lock()
 	defer mu.(*sync.Mutex).Unlock()
-	if d.AdminUser == "" {
-		return invalid("legacy database %s has no separate superuser", d.Name)
-	}
 	if d.Status != "running" {
 		return invalid("database %s is %s, not running", d.Name, d.Status)
 	}

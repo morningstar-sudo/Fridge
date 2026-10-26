@@ -13,7 +13,7 @@ var ctx = context.Background()
 
 func TestReopenKeepsDataAndSkipsMigrations(t *testing.T) {
 	s := storetest.New(t)
-	d := &store.Database{Name: "abc", Engine: "postgres", Version: "17", Domain: "abc.com", TLSMode: "internal", User: "u", Status: "running"}
+	d := &store.Database{Name: "abc", Engine: "postgres", Version: "17", Domain: "abc.com", User: "u", Status: "running"}
 	if err := s.CreateDatabase(ctx, d); err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestReopenKeepsDataAndSkipsMigrations(t *testing.T) {
 func TestDatabaseUniqueness(t *testing.T) {
 	s := storetest.New(t)
 	mk := func(name, domain string) error {
-		return s.CreateDatabase(ctx, &store.Database{Name: name, Engine: "postgres", Version: "17", Domain: domain, TLSMode: "internal", Status: "running"})
+		return s.CreateDatabase(ctx, &store.Database{Name: name, Engine: "postgres", Version: "17", Domain: domain, Status: "running"})
 	}
 	if err := mk("abc", "abc.com"); err != nil {
 		t.Fatal(err)
@@ -79,7 +79,7 @@ func TestDestinationDeleteInUse(t *testing.T) {
 	if err := s.CreateDestination(ctx, &store.Destination{Name: "minio", Provider: "s3"}); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("dup dest name: %v", err)
 	}
-	db := &store.Database{Name: "abc", Engine: "postgres", Version: "17", Domain: "abc.com", TLSMode: "internal", Status: "running"}
+	db := &store.Database{Name: "abc", Engine: "postgres", Version: "17", Domain: "abc.com", Status: "running"}
 	if err := s.CreateDatabase(ctx, db); err != nil {
 		t.Fatal(err)
 	}

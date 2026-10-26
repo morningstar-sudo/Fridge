@@ -65,8 +65,6 @@ func TestCreateDatabaseValidation(t *testing.T) {
 		"domain":     func(r *CreateRequest) { r.Domain = "localhost" },
 		"domain inj": func(r *CreateRequest) { r.Domain = "a.com`)||x" },
 		"domain dot": func(r *CreateRequest) { r.Domain = "a..com" },
-		"acme":       func(r *CreateRequest) { r.TLSMode = "acme" },
-		"tls":        func(r *CreateRequest) { r.TLSMode = "weird" },
 		"engine":     func(r *CreateRequest) { r.Engine = "oracle" },
 	}
 	for name, mut := range cases {
@@ -220,7 +218,7 @@ func TestRecoverInterrupted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	half := store.Database{Name: "half", Engine: "postgres", Version: "17", Domain: "half.com", TLSMode: "internal",
+	half := store.Database{Name: "half", Engine: "postgres", Version: "17", Domain: "half.com",
 		User: "half_app", Volume: "fridge-postgres-half", Status: "creating", NodeKey: "aaaaaaaaaaaaaaaa"}
 	if err := a.Store.CreateDatabase(ctx, &half); err != nil {
 		t.Fatal(err)

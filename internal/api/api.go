@@ -239,14 +239,12 @@ type dbJSON struct {
 	Engine           string          `json:"engine"`
 	Version          string          `json:"version"`
 	Domain           string          `json:"domain"`
-	TLSMode          string          `json:"tls_mode"`
 	User             string          `json:"user"`
 	Status           string          `json:"status"`
 	CreatedAt        time.Time       `json:"created_at"`
 	Owner            string          `json:"owner"`
 	ConnectionString string          `json:"connection_string"` // password always masked
 	AdminUser        string          `json:"admin_user,omitempty"`
-	Legacy           bool            `json:"legacy,omitempty"`
 	LastBackup       *lastBackupJSON `json:"last_backup"`
 }
 
@@ -256,8 +254,8 @@ func dbOut(p auth.Principal, d store.Database, last map[int64]store.Backup) dbJS
 	if err != nil {
 		log.Printf("api: connection string of %s: %v", d.Name, err)
 	}
-	o := dbJSON{ID: d.ID, Name: d.Name, Engine: d.Engine, Version: d.Version, Domain: d.Domain, TLSMode: d.TLSMode,
-		User: d.User, Status: d.Status, CreatedAt: d.CreatedAt, Owner: d.OwnerName, ConnectionString: cs, Legacy: d.AdminUser == ""}
+	o := dbJSON{ID: d.ID, Name: d.Name, Engine: d.Engine, Version: d.Version, Domain: d.Domain,
+		User: d.User, Status: d.Status, CreatedAt: d.CreatedAt, Owner: d.OwnerName, ConnectionString: cs}
 	if app.IsDBOwner(p, d) {
 		o.AdminUser = d.AdminUser
 	}
@@ -392,7 +390,6 @@ func (s *server) createDB(w http.ResponseWriter, r *http.Request) {
 		Name       string `json:"name"`
 		Domain     string `json:"domain"`
 		Version    string `json:"version"`
-		TLSMode    string `json:"tls_mode"`
 		DBUser     string `json:"db_user"`
 		DBPassword string `json:"db_password"`
 	}
@@ -403,7 +400,7 @@ func (s *server) createDB(w http.ResponseWriter, r *http.Request) {
 	note(r, "engine", in.Engine)
 	note(r, "name", in.Name)
 	d, err := s.a.CreateDatabase(r.Context(), app.CreateRequest{Engine: in.Engine, Name: in.Name, Domain: in.Domain, Version: in.Version,
-		TLSMode: in.TLSMode, OwnerID: p.UserID, DBUser: in.DBUser, DBPassword: in.DBPassword})
+		OwnerID: p.UserID, DBUser: in.DBUser, DBPassword: in.DBPassword})
 	if err != nil {
 		fail(w, err)
 		return

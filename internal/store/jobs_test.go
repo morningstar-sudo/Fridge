@@ -12,7 +12,7 @@ import (
 
 func seed(t *testing.T, s *store.Store, name string) (db store.Database, dest store.Destination) {
 	t.Helper()
-	d := &store.Database{Name: name, Engine: "postgres", Version: "17", Domain: name + ".com", TLSMode: "internal", Status: "running"}
+	d := &store.Database{Name: name, Engine: "postgres", Version: "17", Domain: name + ".com", Status: "running"}
 	if err := s.CreateDatabase(ctx, d); err != nil {
 		t.Fatal(err)
 	}

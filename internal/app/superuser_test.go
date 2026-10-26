@@ -171,11 +171,6 @@ func TestRotateSuperuser(t *testing.T) {
 	if err := e.a.RotateSuperuser(ctx, stopped); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("stopped: %v", err)
 	}
-	legacy := store.Database{Name: "old", Engine: "postgres", Version: "17", Domain: "old.lan", TLSMode: "internal",
-		User: "old_app", Volume: "fridge-postgres-old", Status: "running", ContainerID: "c"}
-	if err := e.a.RotateSuperuser(ctx, legacy); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("legacy: %v", err)
-	}
 }
 
 func TestRotateSuperuserSerialized(t *testing.T) {
@@ -220,11 +215,6 @@ func TestRevealSuperuser(t *testing.T) {
 	u, pw, err := e.a.RevealSuperuser(ctx, d)
 	if err != nil || u != "su_"+d.NodeKey || pw != envOf(e.rt, "POSTGRES_PASSWORD") {
 		t.Fatalf("reveal = %q %q %v", u, pw, err)
-	}
-	enc, _ := e.a.Box.Encrypt("legacy-pw")
-	legacy := store.Database{User: "old_app", PasswordEnc: enc}
-	if u, pw, err := e.a.RevealSuperuser(ctx, legacy); err != nil || u != "old_app" || pw != "legacy-pw" {
-		t.Fatalf("legacy reveal = %q %q %v", u, pw, err)
 	}
 }
 

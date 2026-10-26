@@ -106,15 +106,11 @@ export default async function database(ctx) {
       ),
     );
     pane.append(app);
-    if (isOwner && (d.admin_user || d.legacy)) pane.append(superuserPanel());
+    if (isOwner && d.admin_user) pane.append(superuserPanel());
   }
 
   function superuserPanel() {
-    const box = h("div", { class: "panel-body" }, h("h2", { class: "panel-title" }, "Superuser", d.legacy ? h("span", { class: "badge-soft badge-warn ms-2" }, "kiểu cũ") : null));
-    if (d.legacy) {
-      box.append(h("p", { class: "mb-0" }, "Database này tạo theo kiểu cũ nên chỉ có một user (user ứng dụng) và không có superuser riêng."));
-      return h("div", { class: "panel" }, box);
-    }
+    const box = h("div", { class: "panel-body" }, h("h2", { class: "panel-title" }, "Superuser"));
     const out = h("div", { class: "mt-3" });
     const show = btn("Hiện mật khẩu", "btn-outline-primary btn-sm", async () => {
       try {

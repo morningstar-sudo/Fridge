@@ -44,7 +44,7 @@ func mkDB(t *testing.T, a *App, name string, owner int64) store.Database {
 		t.Fatal(err)
 	}
 	key := fmt.Sprintf("%016x", fnvHash(name))
-	d := store.Database{Name: name, Engine: "postgres", Version: "17", Domain: name + ".example.com", TLSMode: "internal",
+	d := store.Database{Name: name, Engine: "postgres", Version: "17", Domain: name + ".example.com",
 		User: name + "_app", Volume: "fridge-postgres-" + key, Status: "running", ContainerID: "fridge-db-" + key, OwnerID: &owner,
 		NodeKey: key, AdminUser: "su_" + key, AdminPasswordEnc: adminEnc, HostID: "host1"}
 	if err := a.Store.CreateDatabase(context.Background(), &d); err != nil {

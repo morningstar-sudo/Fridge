@@ -175,7 +175,7 @@ func TestRestoreSyncRejections(t *testing.T) {
 	key := "fridge/postgres-14/abc/abc-1.dump"
 	dest := restoreFixture(t, a, objs, key, dumpFile(t, "pg14.dump"), nil)
 	ctx := context.Background()
-	d := store.Database{Name: "root1_taken", Engine: "postgres", Version: "17", Domain: "taken.com", TLSMode: "internal",
+	d := store.Database{Name: "root1_taken", Engine: "postgres", Version: "17", Domain: "taken.com",
 		User: "root1_taken", Volume: "fridge-postgres-taken", Status: "running", ContainerID: "c"}
 	if err := a.Store.CreateDatabase(ctx, &d); err != nil {
 		t.Fatal(err)

@@ -4,3 +4,4 @@ deploy/.env
 node_modules/
 scripts/ui-smoke/fail-*.png
 scripts/ui-smoke/package*.json
+*.exe

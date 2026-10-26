@@ -12,7 +12,7 @@ import (
 
 func mkDB(t *testing.T, s *store.Store, name string, owner *store.User, status string) store.Database {
 	t.Helper()
-	d := &store.Database{Name: name, Engine: "postgres", Version: "17", Domain: name + ".lan", TLSMode: "internal", Status: status, OwnerID: &owner.ID}
+	d := &store.Database{Name: name, Engine: "postgres", Version: "17", Domain: name + ".lan", Status: status, OwnerID: &owner.ID}
 	if err := s.CreateDatabase(ctx, d); err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestDatabaseAdminUser(t *testing.T) {
 	s := storetest.New(t)
 	alice := mustUser(t, s, "alice", "user")
 	mk := func(name, admin, key string) error {
-		return s.CreateDatabase(ctx, &store.Database{Name: name, Engine: "postgres", Version: "17", Domain: name + ".lan", TLSMode: "internal",
+		return s.CreateDatabase(ctx, &store.Database{Name: name, Engine: "postgres", Version: "17", Domain: name + ".lan",
 			OwnerID: &alice.ID, AdminUser: admin, NodeKey: key})
 	}
 	if err := mk("alice_a", "su-bad!", ""); !errors.Is(err, store.ErrInvalid) {
@@ -306,7 +306,7 @@ func TestDBNameGlobalUnique(t *testing.T) {
 	s := storetest.New(t)
 	alice, bob := mustUser(t, s, "alice", "user"), mustUser(t, s, "bob", "user")
 	mkDB(t, s, "alice_shop", alice, "running")
-	d := &store.Database{Name: "alice_shop", Engine: "postgres", Version: "17", Domain: "x.lan", TLSMode: "internal", OwnerID: &alice.ID}
+	d := &store.Database{Name: "alice_shop", Engine: "postgres", Version: "17", Domain: "x.lan", OwnerID: &alice.ID}
 	if err := s.CreateDatabase(ctx, d); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("dup = %v", err)
 	}

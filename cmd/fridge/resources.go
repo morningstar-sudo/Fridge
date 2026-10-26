@@ -193,15 +193,8 @@ func (c *cli) superuser(args []string) error {
 			}
 			var v struct {
 				AdminUser string `json:"admin_user"`
-				Legacy    bool
 			}
-			return c.show(b, &v, func() {
-				if v.AdminUser == "" {
-					fmt.Fprintln(c.out, "(no separate superuser on this database)")
-					return
-				}
-				fmt.Fprintln(c.out, v.AdminUser)
-			})
+			return c.show(b, &v, func() { fmt.Fprintln(c.out, v.AdminUser) })
 		}
 		b, err := call("POST", "/api/databases/"+db+"/superuser/reveal", nil)
 		if err != nil {

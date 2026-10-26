@@ -6,19 +6,19 @@ import (
 )
 
 type Database struct {
-	ID                                                                                             int64
-	Name, Engine, Version, Domain, TLSMode, User, PasswordEnc, HostID, ContainerID, Volume, Status string
-	CreatedAt                                                                                      time.Time
-	OwnerID                                                                                        *int64
-	OwnerName                                                                                      string // read-only
-	AdminUser, AdminPasswordEnc, NodeKey                                                           string
-	DomainID                                                                                       *int64
+	ID                                                                                    int64
+	Name, Engine, Version, Domain, User, PasswordEnc, HostID, ContainerID, Volume, Status string
+	CreatedAt                                                                             time.Time
+	OwnerID                                                                               *int64
+	OwnerName                                                                             string // read-only
+	AdminUser, AdminPasswordEnc, NodeKey                                                  string
+	DomainID                                                                              *int64
 }
 
-const dbCols = `id, name, engine, version, domain, tls_mode, db_user, password_enc, host_id, container_id, volume, status, created_at, owner_id, COALESCE((SELECT username FROM users WHERE users.id = databases.owner_id), ''), admin_user, admin_password_enc, node_key, domain_id`
+const dbCols = `id, name, engine, version, domain, db_user, password_enc, host_id, container_id, volume, status, created_at, owner_id, COALESCE((SELECT username FROM users WHERE users.id = databases.owner_id), ''), admin_user, admin_password_enc, node_key, domain_id`
 
 func (d *Database) scan(r interface{ Scan(...any) error }) error {
-	return r.Scan(&d.ID, &d.Name, &d.Engine, &d.Version, &d.Domain, &d.TLSMode, &d.User, &d.PasswordEnc, &d.HostID, &d.ContainerID, &d.Volume, &d.Status, &d.CreatedAt, &d.OwnerID, &d.OwnerName, &d.AdminUser, &d.AdminPasswordEnc, &d.NodeKey, &d.DomainID)
+	return r.Scan(&d.ID, &d.Name, &d.Engine, &d.Version, &d.Domain, &d.User, &d.PasswordEnc, &d.HostID, &d.ContainerID, &d.Volume, &d.Status, &d.CreatedAt, &d.OwnerID, &d.OwnerName, &d.AdminUser, &d.AdminPasswordEnc, &d.NodeKey, &d.DomainID)
 }
 
 func (s *Store) CreateDatabase(ctx context.Context, d *Database) error {
@@ -28,9 +28,9 @@ func (s *Store) CreateDatabase(ctx context.Context, d *Database) error {
 	if d.Status == "" {
 		d.Status = "creating"
 	}
-	err := s.pool.QueryRow(ctx, `INSERT INTO databases(name, engine, version, domain, tls_mode, db_user, password_enc, host_id, container_id, volume, status, owner_id, admin_user, admin_password_enc, node_key, domain_id)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id, created_at`,
-		d.Name, d.Engine, d.Version, d.Domain, d.TLSMode, d.User, d.PasswordEnc, d.HostID, d.ContainerID, d.Volume, d.Status, d.OwnerID, d.AdminUser, d.AdminPasswordEnc, d.NodeKey, d.DomainID).Scan(&d.ID, &d.CreatedAt)
+	err := s.pool.QueryRow(ctx, `INSERT INTO databases(name, engine, version, domain, db_user, password_enc, host_id, container_id, volume, status, owner_id, admin_user, admin_password_enc, node_key, domain_id)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id, created_at`,
+		d.Name, d.Engine, d.Version, d.Domain, d.User, d.PasswordEnc, d.HostID, d.ContainerID, d.Volume, d.Status, d.OwnerID, d.AdminUser, d.AdminPasswordEnc, d.NodeKey, d.DomainID).Scan(&d.ID, &d.CreatedAt)
 	return mapErr(err)
 }
 

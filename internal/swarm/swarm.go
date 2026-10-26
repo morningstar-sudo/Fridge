@@ -398,7 +398,6 @@ type JobSpec struct {
 	Binds      []string // "host:container"
 	Volumes    []string // "name:container": a local volume of the host the job is pinned to
 	User       string   // run as this user ("" = the image's)
-	Labels     map[string]string
 	Timeout    time.Duration
 }
 
@@ -419,7 +418,7 @@ func (c *Client) RunJob(ctx context.Context, j JobSpec) (JobResult, error) {
 		j.Timeout = 6 * time.Hour
 	}
 	spec := swarm.ServiceSpec{
-		Annotations: swarm.Annotations{Name: name, Labels: mergeLabels(j.Labels, map[string]string{LabelRole: "job"})},
+		Annotations: swarm.Annotations{Name: name, Labels: map[string]string{LabelRole: "job"}},
 		TaskTemplate: swarm.TaskSpec{
 			ContainerSpec: &swarm.ContainerSpec{Image: j.Image, Command: j.Entrypoint, Args: j.Args, Env: j.Env, Labels: map[string]string{LabelRole: "job"}},
 			RestartPolicy: &swarm.RestartPolicy{Condition: swarm.RestartPolicyConditionNone},
@@ -502,17 +501,6 @@ func (c *Client) RunJob(ctx context.Context, j JobSpec) (JobResult, error) {
 	return res, nil
 }
 
-func mergeLabels(a, b map[string]string) map[string]string {
-	out := map[string]string{}
-	for k, v := range a {
-		out[k] = v
-	}
-	for k, v := range b {
-		out[k] = v
-	}
-	return out
-}
-
 // tail keeps the last logTail bytes written to it.
 type tail struct{ b []byte }
 
@@ -550,9 +538,6 @@ func (c *Client) SubnetsOf(ctx context.Context, names ...string) ([]netip.Prefix
 	}
 	return out, nil
 }
-
-// EdgeNetwork is the shared network's name (the proxy sits on it).
-func (c *Client) EdgeNetwork() string { return c.cfg.EdgeNetwork }
 
 func edgeArgs(db string, n NodeSpec) []string {
 	args := []string{"forward", "--listen", fmt.Sprintf(":%d", EdgePort), "--to", fmt.Sprintf("%s:%d", db, n.Port)}

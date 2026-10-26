@@ -17,13 +17,6 @@ import (
 const destBody = `{"name":"d","endpoint":"https://s3.example.com","bucket":"b","access_key":"AK","secret_key":"x"}`
 const dbBody = `{"engine":"postgres","name":"abc","domain":"abc.com"}`
 
-func TestTLSModeAcme(t *testing.T) {
-	h, _, _ := newSrv(t)
-	if w := do(h, "POST", "/api/databases", `{"engine":"postgres","name":"abc","domain":"abc.com","tls_mode":"acme"}`, true); w.Code != 400 {
-		t.Fatal(w.Code, w.Body.String())
-	}
-}
-
 func TestInternalErrorHidden(t *testing.T) {
 	h, _, a := newSrv(t)
 	do(h, "POST", "/api/destinations", destBody, true)

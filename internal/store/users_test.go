@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -93,7 +94,7 @@ func TestSetupBackfillsDomains(t *testing.T) {
 		{Name: "b", Domain: "old.com", Status: "running"},
 		{Name: "c", Domain: "other.com", Status: "running"},
 	} {
-		d.Engine, d.Version, d.TLSMode = "postgres", "17", "internal"
+		d.Engine, d.Version = "postgres", "17"
 		if err := s.CreateDatabase(ctx, &d); err != nil {
 			t.Fatal(err)
 		}
@@ -146,7 +147,7 @@ func TestUserCRUD(t *testing.T) {
 	if err := s.SetUserDisabled(ctx, a.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	if n, _ := s.CountActiveAdmins(ctx); n != 1 {
+	if n, _ := activeAdmins(s, ctx); n != 1 {
 		t.Fatalf("active admins = %d", n)
 	}
 	if err := s.SetUserRole(ctx, a.ID, "user"); err != nil {
@@ -205,7 +206,7 @@ func TestLastAdminConcurrent(t *testing.T) {
 	if nilN != 1 || lastN != 1 {
 		t.Fatalf("errs = %v", errs)
 	}
-	if n, _ := s.CountActiveAdmins(ctx); n != 1 {
+	if n, _ := activeAdmins(s, ctx); n != 1 {
 		t.Fatalf("admins = %d", n)
 	}
 	var last int64
@@ -373,4 +374,9 @@ func TestOwnerNotNullAfterSetup(t *testing.T) {
 	if _, err := s.Pool().Exec(ctx, `INSERT INTO databases(name, engine, version, domain) VALUES('x','postgres','17','x.com')`); err == nil {
 		t.Fatal("NULL databases.owner_id accepted after setup")
 	}
+}
+
+func activeAdmins(s *store.Store, ctx context.Context) (n int, err error) {
+	err = s.Pool().QueryRow(ctx, `SELECT count(*) FROM users WHERE role='admin' AND NOT disabled`).Scan(&n)
+	return
 }

@@ -25,10 +25,10 @@ type Preload struct {
 }
 
 type CreateRequest struct {
-	Engine, Name, Domain, Version, TLSMode string
-	OwnerID                                int64    // required, > 0
-	DBUser, DBPassword                     string   // user-chosen suffix / password; empty = derived / random
-	Preload                                *Preload // restore into a new node: a file the node must start with (Redis)
+	Engine, Name, Domain, Version string
+	OwnerID                       int64    // required, > 0
+	DBUser, DBPassword            string   // user-chosen suffix / password; empty = derived / random
+	Preload                       *Preload // restore into a new node: a file the node must start with (Redis)
 }
 
 var (
@@ -55,14 +55,6 @@ func (a *App) CreateDatabase(ctx context.Context, req CreateRequest) (store.Data
 	req.Domain = strings.ToLower(strings.TrimSpace(req.Domain))
 	if req.OwnerID <= 0 {
 		return store.Database{}, invalid("owner is required")
-	}
-	switch req.TLSMode {
-	case "", "internal":
-		req.TLSMode = "internal"
-	case "acme":
-		return store.Database{}, invalid("acme lands in phase 3")
-	default:
-		return store.Database{}, invalid("tls_mode must be internal")
 	}
 	if !validDomain(req.Domain) {
 		return store.Database{}, invalid("domain must be a hostname")
@@ -102,7 +94,7 @@ func (a *App) CreateDatabase(ctx context.Context, req CreateRequest) (store.Data
 	}
 	d := store.Database{
 		HostID: host.ID,
-		Name:   name, Engine: req.Engine, Version: version, Domain: req.Domain, TLSMode: req.TLSMode,
+		Name:   name, Engine: req.Engine, Version: version, Domain: req.Domain,
 		User: user, PasswordEnc: enc, DomainID: &domainID,
 		Volume: fmt.Sprintf("fridge-%s-%s", req.Engine, nodeKey), Status: "creating", OwnerID: &req.OwnerID,
 		NodeKey: nodeKey, AdminUser: "su_" + nodeKey, AdminPasswordEnc: adminEnc,
@@ -207,7 +199,7 @@ func MaskedConnString(d store.Database) (string, error) {
 	return strings.Replace(cs, mark, "****", 1), err
 }
 
-// SuperuserConnString connects as the node superuser (a legacy node's db_user).
+// SuperuserConnString connects as the node superuser.
 func (a *App) SuperuserConnString(ctx context.Context, d store.Database) (string, error) {
 	u, pw, err := a.RevealSuperuser(ctx, d)
 	if err != nil {
@@ -226,13 +218,9 @@ func connAs(d store.Database, user, pw string) (string, error) {
 	return eng.ConnString(p, d.Domain), nil
 }
 
-// nodeParams is d without secrets. Legacy (phase-1) nodes have no superuser: their db_user is the admin.
+// nodeParams is d without secrets.
 func nodeParams(d store.Database) engine.Params {
-	p := engine.Params{Name: d.Name, User: d.User, Version: d.Version, AdminUser: d.AdminUser}
-	if p.AdminUser == "" {
-		p.AdminUser = d.User
-	}
-	return p
+	return engine.Params{Name: d.Name, User: d.User, Version: d.Version, AdminUser: d.AdminUser}
 }
 
 // removeNode tears down the node's services, network and volume, its route and cert, then marks the row "error". Failures are only logged.
